@@ -1,0 +1,25 @@
+{
+  "id": "dragon-moonlight",
+  "name": "Dragon · 月白紫雾",
+  "mode": "dark",
+  "direction": "aurora-glass",
+  "palette": {
+    "accent": "#B6A0DE",
+    "support": "#A4CFE4",
+    "surface": "#181522",
+    "ink": "#EEEAF6"
+  },
+  "background": {
+    "source": "generated",
+    "position": "center right",
+    "veil": 0.72,
+    "prompt": "Original silver-haired lavender-eyed dragon girl in the far right 25 percent; midnight-plum studio, faint moon halo, violet mist; quiet negative space in the center and bottom; no text, logos, or UI."
+  },
+  "shape": { "radius": 16, "shadow": "soft" },
+  "decorations": {
+    "density": "none",
+    "sidebarWidget": { "enabled": false, "title": "", "caption": "", "icon": "" },
+    "cornerCard": { "enabled": false, "title": "", "caption": "", "icon": "" }
+  },
+  "copy": { "tagline": "把想法变成作品" }
+}

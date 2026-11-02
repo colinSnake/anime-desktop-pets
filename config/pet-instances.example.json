@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "instances": [
+    {
+      "id": "white-dragon",
+      "package": {
+        "id": "local.bailong.white-dragon",
+        "version": "0.6.2-dragon.8"
+      },
+      "enabled": false,
+      "preferences": {
+        "size": 256,
+        "scheduledActivity": true,
+        "movement": true,
+        "hideInFullscreen": true
+      }
+    }
+  ]
+}

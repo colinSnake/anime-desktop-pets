@@ -1,0 +1,447 @@
+--- a/app/pet.py
++++ b/app/pet.py
+@@ -10,7 +10,10 @@
+ from quota import read_quota, quota_windows
+ from version import VERSION
+ from runtime_paths import resource_root, data_root
+-from animation_frames import AnimationFrameStore, LazyAnimationFrames
++from dragon_frames import AnimationFrameStore, LazyAnimationFrames, GLOBAL_ANIMATION_BUDGET
++from dragon_ui import Bubble, NativeMenu, decorate_action
++from dragon_behavior import AutonomousBehavior
++from dragon_playback import PresentationClock, pose_pixmap, pose_bridge, blend_pose, transition_profile
+ 
+ ROOT=resource_root()
+ STATE=data_root()
+@@ -33,7 +36,7 @@
+         try: self.ready.emit(quota_windows(read_quota(cancel=self.cancel)))
+         except Exception as error: self.failed.emit(str(error))
+ 
+-class Bubble(QWidget):
++class UpstreamBubble(QWidget):
+     def __init__(self):
+         super().__init__(None, FLAGS)
+         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+@@ -89,7 +92,7 @@
+         self.adjustSize();self.show()
+ 
+ class Pet(QWidget):
+-    def __init__(self):
++    def __init__(self,state_dir=None):
+         super().__init__(None,FLAGS)
+         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+@@ -97,18 +100,24 @@
+         self.setWindowTitle('白龙桌宠');self.setFixedSize(256,256)
+         self.manifest=json.loads((ASSETS/'素材清单.json').read_text(encoding='utf-8'))
+         self.variants=[v for v in self.manifest['variants'] if self.asset_path(v).is_file()]
+-        self.idles=[self.manifest['idle']]+self.manifest.get('additionalIdleAnimations',[])[:1]
++        self.idles=[self.manifest['idle']]+self.manifest.get('additionalIdleAnimations',[])
+         self.cache=OrderedDict();self.pinned_frames={};self.frames=[];self.current=None;self.mode='idle';self.index=0
+         self.frame_size=min(512,max(256,round(256*max(s.devicePixelRatio() for s in QApplication.screens()))))
+-        self.frame_store=AnimationFrameStore() if sys.platform=='darwin' else None
++        self.frame_store=AnimationFrameStore(resource_budget=GLOBAL_ANIMATION_BUDGET) if sys.platform=='darwin' else None
+         self.transition=None
++        self.displayed_frame=None;self.displayed_item=None;self.waiting_first_frame=False
++        self.presentation=None;self.bridge_source=None;self.pose_bridge=None;self.displayed_canvas=None
++        self.pose_bridge_ready=False
+         self.bubble=Bubble();self.generation=0;self.worker=None;self.quota_inflight=False;self.dragging=False;self.last_click=None
+-        self.chat=None
+         self.task_active=False
+         self.manual_hidden=False;self.fullscreen_hidden=False;self.hidden_since=None
+-        STATE.mkdir(parents=True,exist_ok=True)
+-        self.settings=QSettings(str(STATE/'preferences.ini'),QSettings.Format.IniFormat) if sys.platform=='darwin' else QSettings('BailongPet','DesktopPet')
++        self.state_dir=Path(state_dir) if state_dir is not None else STATE
++        self.state_dir.mkdir(parents=True,exist_ok=True)
++        self.settings=QSettings(str(self.state_dir/'preferences.ini'),QSettings.Format.IniFormat) if sys.platform=='darwin' else QSettings('BailongPet','DesktopPet')
+         self.auto_hide_fullscreen=self.settings.value('autoHideFullscreen',True,type=bool)
++        self.size_percent=max(50,min(150,self.settings.value('sizePercent',100,type=int)))
++        self.setFixedSize(round(256*self.size_percent/100),round(256*self.size_percent/100))
++        self.behavior=AutonomousBehavior(self)
+         self.work_slots=self.manifest.get('workAnimations',[])[:6]
+         self.click_timer=QTimer(self);self.click_timer.setTimerType(Qt.TimerType.PreciseTimer);self.click_timer.setSingleShot(True);self.click_timer.setInterval(250);self.click_timer.timeout.connect(self.single_click)
+         self.bubble_timer=QTimer(self);self.bubble_timer.setSingleShot(True);self.bubble_timer.timeout.connect(self.dismiss_bubble)
+@@ -117,7 +126,7 @@
+         self.move(self.constrained_position(QPoint(area.right()-360,area.bottom()-340)))
+         for screen in QApplication.screens():self.watch_screen(screen)
+         QApplication.instance().screenAdded.connect(self.watch_screen)
+-        QApplication.instance().screenRemoved.connect(lambda screen:QTimer.singleShot(0,self.ensure_on_screen))
++        QApplication.instance().screenRemoved.connect(self.screen_removed)
+         self.idle()
+         # On macOS, pin lightweight animation handles while frames share a bounded
+         # cache. Other platforms keep the original preloading behavior.
+@@ -146,7 +155,7 @@
+         if QApplication.platformName()=='cocoa':configure_macos_window(int(self.winId()))
+     def setup_tray(self):
+         # Use the default idle's first frame, independent of the current action.
+-        icon=QIcon(self.pinned_frames[str(self.asset_path(self.idles[0]))][0])
++        icon=QIcon(str(ROOT/'BailongPet.icns'))
+         self.setWindowIcon(icon)
+         self.tray=QSystemTrayIcon(icon,self);self.tray.setToolTip('GPT白龙娘桌宠')
+         self.tray_menu=self.context_menu();self.tray.setContextMenu(self.tray_menu)
+@@ -154,6 +163,7 @@
+         self.tray.activated.connect(self.tray_activated)
+         if QSystemTrayIcon.isSystemTrayAvailable():self.tray.show()
+     def refresh_tray_menu(self):
++        self.behavior.pause()
+         # Rebuild through the same factory used by the pet's right-click menu.
+         fresh=self.context_menu()
+         self.tray_menu.clear()
+@@ -174,10 +184,6 @@
+         if self.speech_hidden() and not getattr(self.bubble,'is_task_progress',False) and self.bubble.isVisible():self.bubble.hide()
+         if self.dialogue_hidden():
+             if self.bubble.isVisible():self.bubble.hide()
+-            if self.chat and self.chat.composer.isVisible():self.chat.composer.hide()
+-        elif self.chat and self.chat.enabled:
+-            if not self.chat.composer.isVisible():
+-                self.chat.composer.show();self.chat.position()
+     def set_auto_hide_fullscreen(self,enabled):
+         self.auto_hide_fullscreen=enabled
+         self.settings.setValue('autoHideFullscreen',enabled)
+@@ -188,14 +194,15 @@
+             self.say('主人，托盘暂时没准备好，我先留在这里陪你。');return
+         self.manual_hidden=hidden;self.apply_visibility()
+     def apply_visibility(self):
++        self.behavior.pause()
+         if self.desktop_hidden():
+             if self.hidden_since is None:self.hidden_since=time.monotonic()
+             self.tick.stop();self.click_timer.stop();self.last_click=None;self.dragging=False
+             self.hide();self.bubble.hide()
+-            if self.chat:self.chat.composer.hide()
+         else:
+             if self.hidden_since is not None:
+                 self.started+=time.monotonic()-self.hidden_since;self.hidden_since=None
++                if self.presentation:self.presentation.last=time.monotonic()
+             self.ensure_on_screen();self.show();self.tick.start()
+             self.sync_dialogue_visibility()
+         if hasattr(self,'tray'):
+@@ -211,7 +218,6 @@
+             self.fullscreen_hidden=state;self.apply_visibility()
+         if self.desktop_hidden():
+             self.bubble.hide()
+-            if self.chat:self.chat.composer.hide()
+         self.sync_dialogue_visibility()
+     def constrained_position(self,position,pointer=None):
+         screens=QApplication.screens()
+@@ -219,27 +225,26 @@
+         # contain empty gaps or permit half the pet to hang off a monitor.
+         screen=QApplication.screenAt(pointer) if pointer is not None else None
+         def constrain(area):
+-            if self.chat and self.chat.enabled:
+-                width=max(self.width(),self.chat.composer.width());shift=(width-self.width())//2
+-                size=QSize(width,self.height()+8+self.chat.composer.height())
+-                return clamp_position(position-QPoint(shift,0),size,area)+QPoint(shift,0)
+             return clamp_position(position,self.size(),area)
+         if screen:return constrain(screen.availableGeometry())
+         candidates=[constrain(s.availableGeometry()) for s in screens]
+         return min(candidates,key=lambda p:(p.x()-position.x())**2+(p.y()-position.y())**2) if candidates else position
+     def watch_screen(self,screen):
+-        screen.availableGeometryChanged.connect(lambda area:self.ensure_on_screen())
++        screen.availableGeometryChanged.connect(self.screen_geometry_changed)
++        QTimer.singleShot(0,self.ensure_on_screen)
++    def screen_geometry_changed(self,area):
++        self.ensure_on_screen()
++    def screen_removed(self,screen):
+         QTimer.singleShot(0,self.ensure_on_screen)
+     def ensure_on_screen(self):
+         position=self.constrained_position(self.pos())
+         if position!=self.pos():
++            self.behavior.pause()
+             self.move(position)
+             if self.dragging:self.origin=self.pos();self.press_pos=QCursor.pos()
+         if self.bubble.isVisible():self.position_bubble()
+-        if self.chat:self.chat.position()
+     def moveEvent(self,event):
+         super().moveEvent(event)
+-        if getattr(self,'chat',None):self.chat.position()
+     def asset_path(self,item):
+         # Optional playbackFile allows future formats without changing the manifest's video source.
+         return ASSETS/(item.get('playbackFile') or item['file'].replace('.webm','.webp'))
+@@ -275,11 +280,27 @@
+         self.cache[key]=frames
+         while len(self.cache)>2:self.cache.popitem(last=False)
+         return frames
+-    def play(self,item,mode):
+-        self.frames=self.load(item);self.current=item;self.mode=mode;self.index=0;self.started=time.monotonic();self.update_frame()
++    def play(self,item,mode,start_ms=0):
++        # 捕获当前已经合成的画面；连续打断也不回到上一个动作的原始姿态。
++        source=self.displayed_canvas
++        blend,fixed_geometry=transition_profile(self.mode,mode,item is self.idles[0],self.behavior.motion_reduced())
++        if hasattr(self,'behavior'):self.behavior.on_play(mode)
++        self.frames=self.load(item);self.current=item;self.mode=mode;self.started=time.monotonic()
++        duration=item.get('durationMs',4000)/1000
++        durations=getattr(self.frames,'durations_ms',[duration*1000/len(self.frames)]*len(self.frames))
++        blend=blend if source is not None else 0
++        self.presentation=PresentationClock(durations,duration,self.started,start_ms,blend)
++        self.index=self.presentation.index;self.bridge_source=source;self.pose_bridge=None;self.pose_bridge_ready=fixed_geometry
++        self.waiting_first_frame=True
++        if self.frame_store:self.frame_store.activate(self.frames.path,self.frame_size,len(self.frames))
++        # 直接请求指定入口，不先展示素材第 0 帧。
++        if self.frame_store:self.frames.request(self.index)
++        self.update_frame()
+         if getattr(self,'hidden_since',None) is not None:self.hidden_since=self.started
+         self.transition=None
+         self.sync_dialogue_visibility()
++    def presentation_elapsed(self,now=None):
++        return self.presentation.elapsed if self.presentation else 0.
+     def idle(self):
+         if self.task_active:
+             work=self.regular_work_animations()
+@@ -292,7 +312,8 @@
+             self.last_task_group=mode
+             self.play(random.choice(pool),mode)
+             return
+-        item=random.choices(self.idles,weights=[4,1][:len(self.idles)])[0]
++        weights=[4]+[1]*(len(self.idles)-1)
++        item=random.choices(self.idles,weights=weights)[0]
+         self.play(item,'idle')
+     def regular_work_animations(self):
+         return [v for v in self.work_slots if v and v['id']!='work01' and self.asset_path(v).is_file()]
+@@ -316,10 +337,61 @@
+         # dither the soft character edges and damage transparent rendering.
+         self.update()
+     def animate(self):
+-        duration=self.current.get('durationMs',4000)/1000
+-        elapsed=time.monotonic()-self.started
+-        if elapsed>=duration:
+-            if self.mode=='drag':self.play(self.manifest.get('dragAnimation') or self.idles[0],'drag')
++        clock=self.presentation
++        if clock is None:return
++        def ready(index):
++            if self.frame_store:
++                self.frames.request(index)
++                return self.frames.ready(index) is not None
++            return bool(self.frames)
++        was_blending=clock.blending
++        was_loop_blending=clock.loop_blending
++        clock.advance(time.monotonic(),ready)
++        self.waiting_first_frame=clock.waiting
++        error=self.frame_store.error(self.frames.path) if self.frame_store else None
++        if error or clock.timed_out(time.monotonic()):
++            if not getattr(self,'decode_error_reported',False):
++                self.decode_error_reported=True;self.say('动画暂不可用：'+(error or '等待解码超时'),10000)
++            self.behavior.interrupt()
++            if self.current is not self.idles[0]:self.play(self.idles[0],'idle')
++            return
++        if clock.waiting:
++            self.behavior.tick()
++            return
++        facing=self.behavior.release_facing
++        mirror=bool(self.behavior.release_spring is not None and facing and self.current.get('sourceFacing') in ('left','right') and facing!=self.current['sourceFacing'])
++        turned=mirror!=getattr(self,'pose_mirrored',False)
++        if clock.looped or (turned and self.displayed_item is self.current and clock.loop_range):
++            self.bridge_source=self.displayed_canvas;self.pose_bridge=None;self.pose_bridge_ready=True
++            clock.begin_seam()
++        changed=self.index!=clock.index or self.displayed_item is not self.current or was_blending or was_loop_blending or clock.blending or clock.loop_blending or clock.looped or turned
++        self.index=clock.index
++        frame=self.frames.ready(self.index) if self.frame_store else self.frames[self.index]
++        if frame is not None and changed:
++            self.displayed_frame=frame;self.displayed_item=self.current
++            target=pose_pixmap(frame,self.current,self.frame_size,mirror=mirror)
++            self.pose_mirrored=mirror
++            if not self.pose_bridge_ready:
++                self.pose_bridge=pose_bridge(self.bridge_source,target) if self.bridge_source is not None else None
++                self.pose_bridge_ready=True
++            self.displayed_canvas=blend_pose(self.bridge_source,target,clock.alpha,self.pose_bridge)
++            if clock.alpha>=1:
++                self.bridge_source=None;self.pose_bridge=None;self.pose_bridge_ready=False
++            self.update_frame()
++        # 普通移动跟随呈现时间；甩动弹簧在tick内独立计时，不等待缺帧或混合。
++        self.behavior.tick()
++        if self.presentation is not clock:return
++        if clock.finished:
++            if self.mode=='autonomous-motion' and self.behavior.motion:
++                # 甩动姿态持续到弹簧落底；旧末帧标记也不能提前切换待机。
++                if self.behavior.release_spring is not None:
++                    clock.finished=False
++                elif self.behavior.motion.kind=='clip':
++                    self.behavior.interrupt();self.play(self.idles[0],'idle')
++                else:self.behavior._play(self.current,'autonomous-motion')
++            elif self.mode=='landing' and self.behavior.release_spring:
++                self.behavior._play(self.current,'landing')
++            elif self.mode=='drag':self.behavior.update_drag()
+             elif self.mode=='work-start' and self.task_active:
+                 work=self.regular_work_animations()
+                 if work:
+@@ -329,25 +400,21 @@
+                 self.play(self.return_transition_item(self.current),'return-idle')
+             elif self.mode=='return-idle':self.play(self.idles[0],'idle')
+             else:self.idle()
+-            return
+-        index=min(len(self.frames)-1,int(elapsed/duration*len(self.frames)))
+-        if self.transition:self.update()
+-        if index!=self.index:self.index=index;self.update_frame()
+     def paintEvent(self,event):
+         if self.frames:
+             painter=QPainter(self);painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+             self.draw_frame(painter,QRectF(self.rect()))
+     def draw_frame(self,painter,canvas):
+-        scale=self.current.get('renderScale',1.0);offset=self.current.get('renderOffset',[0,0])
+-        width,height=canvas.width()*scale,canvas.height()*scale
+-        target=QRectF(canvas.x()+(canvas.width()-width)/2+canvas.width()*offset[0],canvas.y()+canvas.height()-height+canvas.height()*offset[1],width,height)
+-        frame=self.frames[self.index];painter.drawPixmap(target,frame,QRectF(frame.rect()))
++        # paintEvent 不拉取/切换帧，避免先画首帧、后启动时钟的竞态。
++        frame=self.displayed_canvas
++        if frame is not None:painter.drawPixmap(canvas,frame,QRectF(frame.rect()))
+     def snapshot_frame(self):
+         pixmap=QPixmap(self.frame_size,self.frame_size);pixmap.fill(Qt.GlobalColor.transparent)
+         painter=QPainter(pixmap);self.draw_frame(painter,QRectF(pixmap.rect()));painter.end();return pixmap
+     def position_bubble(self):
+         screen=QApplication.screenAt(self.frameGeometry().center()) or QApplication.primaryScreen()
+         area=screen.availableGeometry();pet=self.frameGeometry()
++        self.bubble.fit_to_area(area)
+         width,height=self.bubble.width(),self.bubble.height();gap=12
+         if not getattr(self.bubble,'is_quota_result',False):
+             x=max(area.left(),min(pet.center().x()-width//2,area.right()-width+1))
+@@ -366,9 +433,6 @@
+             y=max(area.top(),min(y,area.bottom()-height+1))
+             overlap=pet.intersected(QRect(x,y,width,height))
+             score=max(0,overlap.width())*max(0,overlap.height())
+-            if self.chat and self.chat.enabled:
+-                overlap=self.chat.composer.frameGeometry().intersected(QRect(x,y,width,height))
+-                score+=max(0,overlap.width())*max(0,overlap.height())
+             positions.append((score,x,y))
+         _,x,y=min(positions,key=lambda item:item[0]);self.bubble.move(x,y)
+     def say(self,text,ms=4000):
+@@ -388,7 +452,7 @@
+         if getattr(self.bubble,'is_task_progress',False) and self.bubble.isVisible():
+             view=self.bubble.result_view;bar=view.verticalScrollBar()
+             bottom=bar.value()>=bar.maximum()-8;old=bar.value()
+-            self.bubble.result_title.setText(title);view.setPlainText(text)
++            self.bubble.result_title.setText(title);view.setPlainText(text);self.bubble.finish()
+             bar.setValue(bar.maximum() if bottom else min(old,bar.maximum()))
+         else:
+             self.bubble.task_result(title,text,details);self.bubble.is_task_progress=True
+@@ -399,22 +463,8 @@
+         if celebration:self.play(celebration,'task-celebration')
+         # Play directly so the celebration's interaction line is never shown.
+         self.task_result('主人，完成啦！',text,details)
+-    def chat_controller(self):
+-        if self.chat is None:
+-            from chat_ui import ChatController
+-            try:self.chat=ChatController(self)
+-            except Exception as error:
+-                self.say('唔，主人，对话模式暂时打不开啦：'+str(error),10000);return None
+-        return self.chat
+-    def toggle_chat(self):
+-        controller=self.chat_controller()
+-        if controller:controller.toggle()
+-        self.sync_dialogue_visibility()
+-    def open_history(self):
+-        controller=self.chat_controller()
+-        if controller:controller.open_history()
+     def context_menu(self):
+-        menu=QMenu(self)
++        menu=NativeMenu(self)
+         action=menu.addAction('显示桌宠' if self.manual_hidden or self.fullscreen_hidden else '隐藏桌宠')
+         action.triggered.connect(lambda checked=False:self.set_manual_hidden(not self.manual_hidden if not self.fullscreen_hidden else False))
+         if self.fullscreen_hidden:
+@@ -422,25 +472,49 @@
+         menu.addSeparator()
+         automatic=menu.addAction('全屏时自动隐藏');automatic.setCheckable(True)
+         automatic.setChecked(self.auto_hide_fullscreen);automatic.toggled.connect(self.set_auto_hide_fullscreen)
+-        menu.addAction('关闭对话模式' if self.chat and self.chat.enabled else '打开对话模式',self.toggle_chat)
+-        menu.addAction('查看历史对话',self.open_history)
++        size=menu.addMenu('桌宠大小')
++        for percent in (50,75,100,125,150):
++            action=size.addAction(f'{percent}%（{round(256*percent/100)} × {round(256*percent/100)}）')
++            action.setCheckable(True);action.setChecked(self.width()==round(256*percent/100))
++            action.triggered.connect(lambda checked=False,v=percent:self.set_size_percent(v))
++        menu.addAction('查看 Codex 额度',lambda:QTimer.singleShot(0,self.quota))
+         menu.addSeparator()
++        activity=menu.addMenu('自主活动')
++        automatic=activity.addAction('定时播放动作');automatic.setCheckable(True)
++        automatic.setChecked(self.behavior.enabled);automatic.toggled.connect(self.behavior.set_enabled)
++        movement=activity.addAction('允许蹦跳移动');movement.setCheckable(True)
++        movement.setChecked(self.behavior.motion_enabled);movement.toggled.connect(self.behavior.set_motion_enabled)
++        preview=activity.addAction('表演一套动作')
++        preview.setEnabled(not self.behavior.motion_reduced())
++        preview.triggered.connect(lambda checked=False:QTimer.singleShot(0,lambda:self.behavior.perform_action(preview=True)))
++        if self.manifest.get('movementAnimations'):
++            movement=activity.addMenu('走路 / 跑步 / 飞行')
++            movement.setEnabled(not self.behavior.motion_reduced())
++            for item in self.manifest['movementAnimations']:
++                action=decorate_action(movement.addAction(item['name']),item,self.current)
++                action.setCheckable(False)
++                action.triggered.connect(lambda checked=False,v=item:QTimer.singleShot(0,lambda:self.behavior.perform_movement(v,preview=True)))
+         interaction=menu.addMenu('互动差分动画')
+         for item in self.variants:
+-            action=interaction.addAction(item['id']+' · '+item['name'])
++            action=decorate_action(interaction.addAction(item['name']),item,self.current)
+             action.triggered.connect(lambda checked=False,v=item:self.choose(v))
+         work=menu.addMenu('工作差分动画')
+         available=[item for item in self.work_slots if item and self.asset_path(item).is_file()]
+         for item in available:
+-            action=work.addAction(item['id']+' · '+item['name'])
++            action=decorate_action(work.addAction(item['name']),item,self.current)
+             action.triggered.connect(lambda checked=False,v=item:self.choose(v))
+         if not available:work.addAction('暂无动作（已预留6个位置）').setEnabled(False)
+         idle=menu.addMenu('待机差分动画')
+         for index,item in enumerate(self.idles):
+-            name='默认待机' if index==0 else '待机动作02'
+-            action=idle.addAction(name);action.triggered.connect(lambda checked=False,v=item:self.preview_idle(v))
++            name='默认待机' if index==0 else item.get('name','待机动作02')
++            action=decorate_action(idle.addAction(name),item,self.current);action.triggered.connect(lambda checked=False,v=item:self.preview_idle(v))
+         menu.addSeparator();menu.addAction('退出桌宠',self.close)
+         return menu
++    def set_size_percent(self,value):
++        value=max(50,min(150,int(value)))
++        if value==self.size_percent and self.width()==round(256*value/100):return
++        self.size_percent=value;size=round(256*value/100);self.setFixedSize(size,size)
++        self.settings.setValue('sizePercent',value);self.ensure_on_screen()
+     def preview_idle(self,item):
+         self.click_timer.stop();self.last_click=None;self.generation+=1;self.play(item,'idle')
+     def play_click_sound(self):
+@@ -488,10 +562,12 @@
+         self.quota_inflight=False
+         if self.quota_generation==self.generation:self.say('主人，我暂时没查到额度，过一会儿再看看好不好？\n'+error,8000)
+     def mousePressEvent(self,event):
++        self.behavior.pause()
+         if event.button()==Qt.MouseButton.RightButton:
+             self.click_timer.stop();self.last_click=None
+             menu=self.context_menu();menu.exec(event.globalPosition().toPoint());menu.deleteLater();return
+         if event.button()==Qt.MouseButton.LeftButton:
++            self.behavior.begin_drag()
+             self.press_pos=event.globalPosition().toPoint();self.origin=self.pos();self.dragging=False
+     def mouseDoubleClickEvent(self,event):
+         # Qt may emit this before mousePressEvent for the second physical press.
+@@ -502,24 +578,24 @@
+             if delta.manhattanLength()>8 and not self.dragging:
+                 self.dragging=True;self.click_timer.stop();self.last_click=None;self.generation+=1
+                 self.bubble_timer.stop();self.bubble.hide()
+-                self.play(self.manifest.get('dragAnimation') or self.idles[0],'drag')
+             if self.dragging:
+                 self.move(self.constrained_position(self.origin+delta,event.globalPosition().toPoint()))
+-                self.position_bubble()
++                self.behavior.record_drag()
++                self.behavior.update_drag()
++                if self.bubble.isVisible():self.position_bubble()
+     def mouseReleaseEvent(self,event):
+         if event.button()!=Qt.MouseButton.LeftButton:return
+         if self.dragging:
+             self.dragging=False;self.last_click=None;self.click_timer.stop()
+-            landing=self.manifest.get('landingAnimation')
+-            if landing:self.play(landing,'landing')
+-            else:self.idle()
++            if self.behavior.release_drag():return
++            # 轻放、停稳后松手或禁用位移都只回普通待机，不播旧疲惫落地。
++            self.play(self.idles[0],'idle')
+             return
+         now=time.monotonic()
+         if self.last_click is not None and now-self.last_click<=.25:self.quota()
+         else:self.last_click=now;self.click_timer.start()
+     def closeEvent(self,event):
+-        if self.chat and not self.chat.shutdown():
+-            event.ignore();QTimer.singleShot(500,self.close);return
++        self.behavior.close()
+         self.tick.stop();self.visibility_timer.stop();self.tray.hide();self.bubble.close()
+         if self.frame_store:self.frame_store.close()
+         if self.worker and self.worker.isRunning():self.worker.cancel.set();self.worker.wait(3000)
+@@ -577,7 +653,7 @@
+                 from desktop_visibility import mac_window_status
+                 native_status=mac_window_status(int(pet.winId()))
+                 native_visible=native_status.get('isVisible',native_visible)
+-            (STATE/'运行状态.json').write_text(json.dumps({'version':VERSION,'pid':os.getpid(),'visible':pet.isVisible(),'nativeVisible':native_visible,'nativeWindow':native_status,'windowId':int(pet.winId()),'variants':len(pet.variants),'position':[pet.x(),pet.y()],'displaySize':[pet.width(),pet.height()],'frameSize':[self_size for self_size in (pet.frames[0].width(),pet.frames[0].height())]},ensure_ascii=False),encoding='utf-8')
++            (STATE/'运行状态.json').write_text(json.dumps({'version':VERSION,'pid':os.getpid(),'visible':pet.isVisible(),'nativeVisible':native_visible,'nativeWindow':native_status,'windowId':int(pet.winId()),'variants':len(pet.variants),'position':[pet.x(),pet.y()],'displaySize':[pet.width(),pet.height()],'frameSize':[pet.frame_size,pet.frame_size]},ensure_ascii=False),encoding='utf-8')
+         QTimer.singleShot(1000,record_startup)
+         if '--preview' in sys.argv:
+             QTimer.singleShot(500,lambda:pet.grab().save(str(STATE/'桌宠窗口预览.png')))

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "codexBundleIdentifier": "com.openai.codex",
+  "codexAppPath": "",
+  "videoPath": "media/startup.mp4",
+  "holdAt": 11.3,
+  "transitionStart": 12.7,
+  "transitionEnd": 13.65,
+  "launchTimeout": 60,
+  "windowWaitTimeout": 30,
+  "volume": 1,
+  "playerMaxWidth": 1280,
+  "petEnabled": true,
+  "petImagePath": "pet/preview.png",
+  "petSize": 210,
+  "hidePetInFullscreen": true,
+  "petBackend": "native",
+  "externalPetAppPath": "",
+  "externalPetAssetsPath": "",
+  "themeEnabled": false
+}

@@ -1,0 +1,8 @@
+{
+  "enabled": false,
+  "model": "gpt-image-2.5",
+  "baseUrl": "",
+  "apiKeyEnvironment": "DRAGON_IMAGE_API_KEY",
+  "protocol": "pending-provider-verification",
+  "note": "Await user-provided endpoint and protocol. Do not guess API routes, rename the model or make a paid call."
+}

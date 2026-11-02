@@ -1,0 +1,29 @@
+--- a/macos/BailongPet.spec
++++ b/macos/BailongPet.spec
+@@ -8,11 +8,12 @@
+          (str(root/'MACOS.txt'), '.'),
+          (str(root/'NOTICE.md'), '.'),
+          (str(root/'THIRD_PARTY_NOTICES.md'), '.'),
+-         (str(root/'BUILD_INFO.json'), '.')]
++         (str(root/'BUILD_INFO.json'), '.'),
++         (str(root/'DRAGON_PATCH.json'), '.')]
+ a = Analysis([str(root/'app/pet.py')], pathex=[str(root/'app')],
+              binaries=[], datas=datas,
+              hiddenimports=['autostart', 'selftest', 'runtime_paths', 'version',
+-                            'animation_frames', 'desktop_visibility', 'chat_ui', 'chat_backend', 'quota'],
++                            'animation_frames', 'dragon_frames', 'dragon_ui', 'dragon_behavior', 'dragon_playback', 'desktop_visibility', 'quota'],
+              hookspath=[], hooksconfig={}, runtime_hooks=[],
+              excludes=['tkinter', 'PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets',
+                        'PySide6.QtQml', 'PySide6.QtQuick', 'PySide6.QtQuickWidgets',
+@@ -40,8 +41,9 @@
+ coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='BailongPet')
+ app = BUNDLE(coll, name='BailongPet.app', icon=str(root/'macos/BailongPet.icns'),
+              bundle_identifier='local.bailongpet.macos', version='0.4.1',
+-             info_plist={'CFBundleDisplayName': '白龙桌宠',
+-                         'CFBundleVersion': '3',
++             info_plist={'CFBundleDisplayName': '白龙桌宠 · Dragon 增强版',
++                         'CFBundleVersion': '@DRAGON_BUNDLE_VERSION@',
++                         'DragonPatchVersion': '@DRAGON_PATCH_VERSION@',
+                          'LSUIElement': True,
+                          'NSHighResolutionCapable': True,
+                          'LSMinimumSystemVersion': '12.0'})

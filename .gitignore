@@ -1,0 +1,33 @@
+.DS_Store
+.build/
+.swiftpm/
+build/
+dist/
+.env
+.env.*
+!.env.example
+*.log
+# Local-only third-party media. No redistribution grant is implied.
+resources/media/*.mp4
+resources/pet/preview.png
+resources/pet/animations/
+# Generated originals are kept locally until reviewed.
+resources/poster/*.png
+resources/poster/*.webp
+resources/poster/*.jpg
+config/image-provider.local.json
+
+resources/assets.local.json
+
+# 私有下载、完整第三方桌宠与验证产物，不得公开分发。
+.local/
+
+# Python 检查脚本缓存
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/

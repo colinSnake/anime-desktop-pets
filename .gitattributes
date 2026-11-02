@@ -1,0 +1,2 @@
+# Unified diff 的空白上下文行必须保留前导空格，禁止按尾随空白自动修剪。
+*.patch whitespace=-blank-at-eol

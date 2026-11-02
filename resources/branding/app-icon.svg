@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+<title id="title">Anime Desktop Pets — 伴星窗口</title>
+<desc id="desc">柔白圆角外框、青蓝粉紫渐层、紫灰桌面窗口、白色伴星与奶油色卫星。不代表白龙或官方 AI 平台。</desc>
+<defs>
+<radialGradient id="cyanGlow" gradientUnits="userSpaceOnUse" cx="762.0" cy="222.0" r="460.0"><stop offset="0.0" stop-color="#38F2F4" stop-opacity="0.95"/><stop offset="1.0" stop-color="#38F2F4" stop-opacity="0.0"/></radialGradient>
+<radialGradient id="lilacGlow" gradientUnits="userSpaceOnUse" cx="810.0" cy="680.0" r="420.0"><stop offset="0.0" stop-color="#C87CE9" stop-opacity="0.65"/><stop offset="1.0" stop-color="#C87CE9" stop-opacity="0.0"/></radialGradient>
+<radialGradient id="peachGlow" gradientUnits="userSpaceOnUse" cx="218.0" cy="832.0" r="550.0"><stop offset="0.0" stop-color="#FFE0D0" stop-opacity="1.0"/><stop offset="1.0" stop-color="#FFE0D0" stop-opacity="0.0"/></radialGradient>
+<linearGradient id="pearl" gradientUnits="userSpaceOnUse" x1="180.0" y1="64.0" x2="850.0" y2="960.0"><stop offset="0.0" stop-color="#FFFFFF" stop-opacity="1.0"/><stop offset="1.0" stop-color="#EFF0F8" stop-opacity="1.0"/></linearGradient>
+<linearGradient id="sky" gradientUnits="userSpaceOnUse" x1="512.0" y1="144.0" x2="512.0" y2="880.0"><stop offset="0.0" stop-color="#22D8F2" stop-opacity="1.0"/><stop offset="0.3" stop-color="#459EFA" stop-opacity="1.0"/><stop offset="0.67" stop-color="#B29CF4" stop-opacity="1.0"/><stop offset="1.0" stop-color="#F4BFE7" stop-opacity="1.0"/></linearGradient>
+<linearGradient id="starlight" gradientUnits="userSpaceOnUse" x1="430.0" y1="300.0" x2="670.0" y2="690.0"><stop offset="0.0" stop-color="#FFFFFF" stop-opacity="1.0"/><stop offset="0.6" stop-color="#F4F2FF" stop-opacity="1.0"/><stop offset="1.0" stop-color="#DFDEFF" stop-opacity="1.0"/></linearGradient>
+</defs>
+<rect x="64.0" y="64.0" width="896.0" height="896.0" rx="200.0" fill="url(#pearl)" opacity="1.0"/>
+<rect x="66.0" y="66.0" width="892.0" height="892.0" rx="198.0" fill="none" opacity="1.0" stroke="#E0E2EF" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="144.0" y="144.0" width="736.0" height="736.0" rx="142.0" fill="url(#sky)" opacity="1.0"/>
+<rect x="144.0" y="144.0" width="736.0" height="736.0" rx="142.0" fill="url(#cyanGlow)" opacity="1.0"/>
+<rect x="144.0" y="144.0" width="736.0" height="736.0" rx="142.0" fill="url(#peachGlow)" opacity="1.0"/>
+<rect x="144.0" y="144.0" width="736.0" height="736.0" rx="142.0" fill="url(#lilacGlow)" opacity="1.0"/>
+<rect x="224.0" y="328.0" width="576.0" height="400.0" rx="86.0" fill="#5D5594" opacity="0.14"/>
+<rect x="224.0" y="302.0" width="576.0" height="400.0" rx="86.0" fill="#FFFFFF" opacity="0.18"/>
+<rect x="224.0" y="302.0" width="576.0" height="400.0" rx="86.0" fill="none" opacity="1.0" stroke="#49446E" stroke-width="42.0" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 250 406 L 394 406" fill="none" opacity="0.65" stroke="#49446E" stroke-width="18.0" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="408.0" y="764.0" width="208.0" height="36.0" rx="18.0" fill="#49446E" opacity="1.0"/>
+<path d="M 575 267 C 595 267 605 284 614 319 L 645 423 L 749 454 C 784 463 801 473 801 493 C 801 513 784 523 749 532 L 645 563 L 614 667 C 605 702 595 719 575 719 C 555 719 545 702 536 667 L 505 563 L 401 532 C 366 523 349 513 349 493 C 349 473 366 463 401 454 L 505 423 L 536 319 C 545 284 555 267 575 267 Z" fill="#5F5192" opacity="0.22"/>
+<path d="M 575 247 C 591 247 600 263 609 295 L 640 403 L 748 434 C 780 443 796 452 796 468 C 796 484 780 493 748 502 L 640 533 L 609 641 C 600 673 591 689 575 689 C 559 689 550 673 541 641 L 510 533 L 402 502 C 370 493 354 484 354 468 C 354 452 370 443 402 434 L 510 403 L 541 295 C 550 263 559 247 575 247 Z" fill="url(#starlight)" opacity="1.0"/>
+<ellipse cx="779.0" cy="261.0" rx="42.0" ry="42.0" fill="#64568F" opacity="0.18"/>
+<ellipse cx="779.0" cy="247.0" rx="42.0" ry="42.0" fill="#FFF2CD" opacity="1.0"/>
+</svg>
