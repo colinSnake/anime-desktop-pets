@@ -336,9 +336,11 @@ passes, and `dragonctl --check` reports `ok=true` without launching a normal pet
 
 The executed suite includes 83 Swift tests, 10 project checks, 5 App-icon export checks,
 8 build-input/staging checks, 13 acquisition/source checks, 15 extra-asset checks, 41 library
-checks, 5 offscreen library-UI checks, 79 runtime checks, 9 real-pet adapter checks, 37 controller
-checks, 21 IPC checks and isolated control integration. The rebuilt frozen helper also passes
-its 13-check isolated self-test. “Real-pet adapter” means offscreen tests of the real adapter
+checks, 5 offscreen library-UI checks, 120 runtime checks, 9 real-pet adapter checks, 37 controller
+checks, 21 IPC checks and isolated control integration. These suites were rerun before the Git
+baseline commit with no skipped suites. The existing `dragon.30` build previously passed its
+18-check frozen isolated self-test; this Git/documentation pass did not rebuild the apps or rerun
+that frozen self-test. “Real-pet adapter” means offscreen tests of the real adapter
 code with synthetic fixtures, not desktop acceptance.
 
 The original 25 clips were previously audited across 2,529 frames and the ten extra clips across
@@ -346,6 +348,21 @@ The original 25 clips were previously audited across 2,529 frames and the ten ex
 full-frame artwork audit. No pet-owned chat/history UI is shipped. These checks do not replace
 real desktop, multi-screen/Space/focus, long-duration CPU/RSS, third-party package playback or
 installation acceptance. See the [verification record](docs/实际验证记录.md) for exact scope.
+
+## Development and Git commits
+
+Use `<type>(<scope>): <Chinese imperative summary>` for commit titles. Keep the type and scope
+in English and the summary and body in Chinese, preserving technical identifiers as needed.
+Each commit should have one logical purpose; include its related tests and documentation,
+and report only checks actually run, including failures, skips and unverified desktop behavior.
+For example: `docs(workflow): 记录 Git 提交与验证规范`.
+
+Run `./scripts/test.sh` for the project suite and `./scripts/test-multi-pet.sh` for the independent
+multi-pet suite when the prepared runtime is available. Missing dependencies or skipped suites
+must not be reported as full validation. Documentation-only edits need link/status consistency
+and diff checks, not an app rebuild or launch. Review the staged diff before committing; keep
+local assets, credentials and build outputs ignored. Commits do not authorize a remote push.
+See [repository instructions](AGENTS.md) and the [Git workflow guide](docs/Git提交与协作规范.md).
 
 ## Documentation
 
