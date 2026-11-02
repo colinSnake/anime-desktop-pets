@@ -70,7 +70,7 @@ public struct PetAnimationCatalog: Equatable, Sendable {
     }
 }
 
-/// 只表示伴侣当前的显示意图，不读取外部桌宠的聊天或任务状态。
+/// 只表示桌边小伙伴应用当前的显示意图，不读取外部桌宠的聊天或任务状态。
 public struct ExternalPetLaunchIntent: Sendable {
     public enum Resolution: Equatable { case reveal, leaveAlone, hide }
     public private(set) var generation = 0

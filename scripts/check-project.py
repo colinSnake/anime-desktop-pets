@@ -48,11 +48,12 @@ class ProjectChecks(unittest.TestCase):
         copy = (source/'AppCopy.swift').read_text()
         self.assertIn('static let name = "桌边小伙伴"', copy)
         self.assertIn('让喜欢的角色，陪在桌边。', copy)
+        self.assertNotIn('伴侣', copy)
         coordinator = (source/'Coordinator.swift').read_text()
         for key in ('AppCopy.name', 'AppCopy.tagline', 'AppCopy.runningMessage', 'AppCopy.quitTitle'):
             self.assertIn(key, coordinator)
         for path in source.glob('*.swift'):
-            self.assertNotIn('退出伴侣', path.read_text())
+            self.assertNotIn('伴侣', path.read_text())
         self.assertIn('DragonCodexCompanion', (source/'Runtime.swift').read_text())
         build = (ROOT/'scripts/build.sh').read_text()
         self.assertIn("CFBundleIdentifier='local.dragon.codex-companion'", build)

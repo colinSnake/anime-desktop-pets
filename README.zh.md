@@ -3,7 +3,7 @@
 [English](README.md) | [简体中文](README.zh.md)
 
 面向 macOS 的动漫风格桌宠系列：当前白龙是 Codex 的角色；Claude、DeepSeek、Grok 角色计划沿用同一美术风格加入。
-目前只有 Codex 角色与桌边小伙伴功能已接入。桌边小伙伴与 Codex 并行运行，不修改官方应用包、不改 `app.asar`，不接管 Dock，也不自动重启 Codex。
+目前已接入 Codex 白龙与桌边小伙伴应用。桌边小伙伴与 Codex 并行运行，不修改官方应用包、不改 `app.asar`，不接管 Dock，也不自动重启 Codex。
 本项目不是上述平台的官方产品或插件。
 
 **GitHub Description (EN)：** An anime-style macOS desktop-pet collection for AI assistants: a white dragon for Codex, with Claude, DeepSeek, and Grok characters planned in the same art style.
@@ -193,12 +193,12 @@ python3 scripts/clean-builds.py --dry-run
 ./scripts/dragonctl.sh --preview-pet
 ```
 
-同一时间只能有一个桌边小伙伴实例，切换启动模式前需要先退出。
+同一时间只能运行一个桌边小伙伴应用实例，切换启动模式前需要先退出。
 完整桌宠提供真实的待机、点击、拖拽、落地动作及分类菜单。
 原生静态降级模式仍支持拖动与台词，创建时尊重“减少动态效果”；
 不能由此宣称上游完整播放器已实现相同系统设置适配。
 
-完整构建也提供一条手动预览命令，会先安全退出旧桌边小伙伴并等待清理，避免单实例冲突：
+完整构建也提供一条手动预览命令，会先安全退出旧的桌边小伙伴应用并等待清理，避免单实例冲突：
 
 ```bash
 ./scripts/preview-full-pet.sh

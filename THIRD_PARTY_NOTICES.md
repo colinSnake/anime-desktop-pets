@@ -1,7 +1,7 @@
 # 第三方来源与素材边界
 
 根目录 MIT 许可证仅覆盖本项目原创源码，不覆盖第三方媒体、角色、商标或另行安装的工具。
-这是独立的本地桌面伴侣，不是 OpenAI 产品，也不是官方 Codex 插件。
+这是独立的本地桌边小伙伴应用，不是 OpenAI 产品，也不是官方 Codex 插件。
 
 ## 1. 开发素材（不提交 Git）
 
@@ -48,7 +48,7 @@ Kki1ds macOS 适配的任务映射、完成去重与异步播放思路。
 ## 5. 系统框架与可选工具
 
 AppKit、AVFoundation、AVKit、CoreGraphics、ImageIO、QuartzCore 是系统框架，
-不是 Swift 伴侣引入的第三方 GUI 运行时；完整外部桌宠另行随带 Python/Qt 等自身依赖。
+不是 Swift 宿主应用引入的第三方 GUI 运行时；完整外部桌宠另行随带 Python/Qt 等自身依赖。
 可选主题脚本调用独立安装的 `codex-theme-studio`，没有复制该工具源码，
 也不把它呈现为官方 API。
 
@@ -59,7 +59,7 @@ AppKit、AVFoundation、AVKit、CoreGraphics、ImageIO、QuartzCore 是系统框
 增强构建只将这 10 段与原 25 动作合并，写入 `outputs/DRAGON_EXTRA_SOURCE.json` 来源和散列；
 上游素材、第三方声明和项目的公开发行边界不变，不称为原创角色帧。
 
-## 伴侣 App 原创几何标识（2026-11-02 设计初版）
+## 桌边小伙伴应用的原创几何标识（2026-11-02 设计初版）
 
 `resources/branding/app-icon.svg`、`app-icon.png` 与 `AppIcon.icns` 由本项目
 `scripts/build-app-icon.swift` 中新绘制的几何形状离线导出，不是白龙媒体的描摹、

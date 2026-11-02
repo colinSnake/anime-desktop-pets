@@ -4,7 +4,7 @@
 
 An anime-style macOS desktop-pet collection for AI assistants. The current white dragon is the
 Codex character; Claude, DeepSeek, and Grok characters are planned in the same art style. The
-companion currently integrates with Codex only and runs without modifying its application bundle
+desktop-pet app currently integrates with Codex only and runs without modifying its application bundle
 or `app.asar`. This is not an official product or plugin for any of these platforms.
 
 **GitHub description:** An anime-style macOS desktop-pet collection for AI assistants: a white dragon for Codex, with Claude, DeepSeek, and Grok characters planned in the same art style.
@@ -37,7 +37,7 @@ The App's friendly Chinese UI name is **桌边小伙伴**, with the line **让�
 (“Let your favorite characters keep you company at your desk.”). The project name, App bundle name,
 identifiers and configuration paths are unchanged.
 
-The **Companion Star Window** icon now uses a pearl-white rim, a luminous cyan/blue-to-lavender/pink
+The **Buddy Star Window** icon now uses a pearl-white rim, a luminous cyan/blue-to-lavender/pink
 and pale-peach background, a violet-gray window and a milky-white star. This second draft borrows
 only the user-provided screenshot's color relationship, not its camera-lens motif. It remains
 separate from the dragon character and awaits visual approval. Both drafts were drawn offline
@@ -193,19 +193,19 @@ or send the following command from a **second terminal tab** at the repository r
 ./scripts/dragonctl.sh --quit
 ```
 
-After the first companion instance has exited, preview the pet:
+After the first desktop-pet app instance has exited, preview the pet:
 
 ```bash
 ./scripts/dragonctl.sh --preview-pet
 ```
 
-Only one companion instance may run at a time. Quit it before switching startup modes.
+Only one desktop-pet app instance may run at a time. Quit it before switching startup modes.
 The full pet provides actual idle/click/drag/landing animations and its own action menus.
 The native fallback supports image dragging and speech; only that fallback's breathing effect
 is disabled by system Reduce Motion when created.
 
 For the full build, a manual convenience entry point validates the 25/35-action catalog, quits the old
-companion, waits for cleanup, and then previews the pet without launching/restarting Codex:
+desktop-pet app, waits for cleanup, and then previews the pet without launching/restarting Codex:
 
 ```bash
 ./scripts/preview-full-pet.sh
@@ -230,17 +230,17 @@ Or:
 ```
 
 Both are foreground modes. Use another terminal tab or the menu bar for controls.
-If Codex is already running, the companion shows the pet **without replaying the startup video**.
+If Codex is already running, the desktop-pet app shows the pet **without replaying the startup video**.
 A genuine cold-start acceptance test requires the user to deliberately quit and relaunch Codex.
 Closing a Codex window is not the same as terminating its process.
 
 | Command | Purpose |
 | --- | --- |
-| `--status` | Inspect the companion state |
+| `--status` | Inspect the desktop-pet app state |
 | `--show` / `--hide` | Show or hide the pet |
 | `--dismiss` | End pet display for the current Codex session |
-| `--pause` / `--resume` | Pause or resume companion coordination |
-| `--quit` | Quit the companion, not Codex |
+| `--pause` / `--resume` | Pause or resume app coordination |
+| `--quit` | Quit the desktop-pet app, not Codex |
 
 Pass one command to `./scripts/dragonctl.sh`. Esc, Command+., and the skip button dismiss the movie.
 Timeouts and playback failures clean up the overlay rather than blocking Codex.
@@ -260,19 +260,19 @@ runtime data live in:
   instance.lock
 ```
 
-Copy and edit the **complete** template if needed, then restart the companion, not Codex.
+Copy and edit the **complete** template if needed, then restart the desktop-pet app, not Codex.
 Relative media paths resolve against the resource root. `DRAGON_DATA_DIR` isolates local state;
 `DRAGON_RESOURCE_DIR` overrides the resource root.
 
 The source template retains the native fallback. The default build produces an external-backend
-template pointing to `../Helpers/BailongPet.app`, resolved relative to the companion resource root.
+template pointing to `../Helpers/BailongPet.app`, resolved relative to the app resource root.
 The default build copies the locally adapted helper with its own signature and provenance marker.
 The original downloaded app is preserved. `--full-pet` explicitly selects that unchanged upstream
 build; `--native-pet` selects the static fallback. See [runtime details](docs/桌宠增强与性能构建.md).
 An existing user `companion.json` takes precedence. If it explicitly selects native, change the
 complete config or back it up and remove it to use the bundled default. Never discard custom settings silently.
 
-The helper owns its animation and interaction features. The companion coordinates startup,
+The helper owns its animation and interaction features. The desktop-pet app coordinates startup,
 show/hide and local status; it never force-terminates a helper that might be running a task.
 See the [full-pet integration guide](docs/完整桌宠接入说明.md) for lifecycle and privacy boundaries.
 
