@@ -15,9 +15,13 @@ unchanged.
 
 This is a local development prototype with **35 character animations**, multi-pet management and
 a local asset library. A separate helper provides the full pet experience; the native PNG backend
-is a limited fallback. Live Codex task following is not implemented.
+is a limited fallback. The enhanced helper can follow local Codex task lifecycle events and play work animations;
+real desktop task following still awaits manual acceptance.
 Real desktop behavior, focus, multi-display and long-duration resource use still need
 manual acceptance. See the [roadmap](docs/roadmap.md) and [verification record](docs/实际验证记录.md).
+The startup animation is locally upscaled to 4K; its source backup and processing report remain private.
+The repeatable workflow and its roughly 0.9 GiB model-process peak-memory measurement are documented in
+the [4K upscaling guide](docs/开机动画4K超分.md). A standalone upscaler app is not implemented.
 
 ## Requirements
 
@@ -54,8 +58,11 @@ instance. For Codex launch/watch modes and local configuration, see the
 - Full animated white-dragon pet, multi-instance management and a local pet asset library.
 - Startup presentation and coordination run in the macOS host; animation and interaction run in a
   separate Python/PySide6 helper.
-- Quota is refreshed only on explicit user request through the existing read-only local adapter.
-- The app does not provide its own chat/history, read chat contents, or follow live Codex tasks.
+- A local script can upscale the startup video from 1080p to 4K while keeping 24 fps and the original AAC audio. See the [4K workflow](docs/开机动画4K超分.md); desktop playback still needs manual acceptance.
+- Quota queries require an explicit user action. Official accounts show subscription windows; TiMi CC uses a matching, enabled CC Switch usage configuration to show provider balance. See [quota details](docs/额度气泡说明.md).
+- Local task following reads bounded rollout records in memory, retains lifecycle state only, and never saves or displays chat contents.
+  It rotates work animations while local interactive tasks remain active; it does not identify the foreground chat. See [task following](docs/Codex任务跟随.md).
+- The app does not provide its own chat/history. Quota queries remain explicit user actions.
 - Poster generation and automatic theme application are not enabled.
 
 Implementation and package details are maintained in the [technical documentation](docs/文档索引.md),
@@ -67,6 +74,12 @@ Run `./scripts/test.sh` for the project suite. Run `./scripts/test-multi-pet.sh`
 multi-pet and IPC suite when the prepared runtime is available. A skipped suite is not a full pass.
 Automated and offscreen tests do not replace real desktop acceptance. The
 [verification record](docs/实际验证记录.md) lists exact coverage and outstanding checks.
+
+The prepared PySide6 environment can generate network-isolated UI snapshots with
+`scripts/preview-pet-ui.py`; see the [local guide](docs/本地开发与使用指南.md).
+Offscreen previews use Fusion (including an override of inherited Qt style settings),
+not native macOS styling; this does not change the desktop application's appearance.
+The project suite includes preview and refresh-button lifecycle regression tests.
 
 ## Documentation
 
