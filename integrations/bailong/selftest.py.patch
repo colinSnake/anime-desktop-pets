@@ -18,7 +18,7 @@
          if '--quota-only' in sys.argv:
              from quota import read_quota,quota_windows
              windows=quota_windows(read_quota())
-@@ -37,58 +26,179 @@
+@@ -37,58 +26,204 @@
          from types import SimpleNamespace
          report.update(version=VERSION,frozen=bool(getattr(sys,'frozen',False)))
          app=QApplication([]);pet=Pet();pet.tick.stop()
@@ -65,6 +65,10 @@
 -        pet.play(pet.manifest['quotaAnimation'],'quota');pet.started=time.monotonic()-4.1;pet.animate();assert pet.mode=='idle'
 +        assert len(items)==35 and len(pet.idles)==6 and len(pet.manifest['movementAnimations'])==6
 +        report['checks'].append('全部35动作含6移动尺寸校准字段齐全')
++        from dragon_playback import flight_render_geometry
++        flight=next(item for item in pet.manifest['movementAnimations'] if item['id']=='move03left')
++        assert flight_render_geometry(flight,4000)[0]==1.30
++        report['checks'].append('飞行头身尺寸在真实清单加载后统一校准，不按尾翼外框缩小右飞')
 +        autonomous_ids={item['id'] for item in pet.behavior.action_pool()}
 +        interaction_ids={item['id'] for item in pet.variants}
 +        idle_ids={item['id'] for item in pet.idles}
@@ -74,6 +78,16 @@
 +        assert interaction_ids<=autonomous_ids and idle_ids<=autonomous_ids
 +        assert not (work_ids&autonomous_ids)
 +        report['checks'].append('日常动作池覆盖全部互动与待机差分，排除工作差分')
++        scheduled=[]
++        for _ in range(3*len(expected_ids)):
++            item=pet.behavior.next_action()
++            scheduled.append(item['id'])
++            pet.behavior.last_action=item['id']
++        categories=['idle' if identifier.startswith('idle') else 'interaction' for identifier in scheduled]
++        assert expected_ids<=set(scheduled)
++        assert all(categories[index:index+3]==['interaction','interaction','idle']
++                   for index in range(0,len(categories)-2,3))
++        report['checks'].append('日常动作按两互动一待机分组轮转且最终覆盖所有动作')
 +        pet.play(pet.manifest['quotaAnimation'],'quota');settle_first_frame();present_at(4.1);assert pet.mode=='idle'
          report['checks'].append('查询动作只播一次')
          press=SimpleNamespace(button=lambda:__import__('PySide6.QtCore',fromlist=['Qt']).Qt.MouseButton.LeftButton,globalPosition=lambda:QPointF(200,200))
@@ -173,11 +187,11 @@
 +        area=QApplication.primaryScreen().availableGeometry()
 +        for prefix in ('move02','move03'):
 +            pet.behavior.interrupt()
-+            pet.move(QPoint(pet.x(),area.bottom()+1-pet.height()-100))
++            pet.move(QPoint(area.left()+32-pet.render_margin,area.bottom()+1-pet.height()+pet.render_margin-100))
 +            pet.play(pet.manifest['dragAnimation'],'drag');settle_first_frame();present_at(.5)
 +            before=pet.displayed_canvas.toImage().copy();origin=pet.pos()
 +            pet.behavior.drag_samples.clear()
-+            pet.behavior.drag_samples.extend([(moment[0]-.1,pet.x(),pet.y()+30),(moment[0],pet.x(),pet.y())])
++            pet.behavior.drag_samples.extend([(moment[0]-.1,pet.x()-30,pet.y()),(moment[0],pet.x(),pet.y())])
 +            choice=pet.behavior.rng.choice
 +            pet.behavior.rng.choice=lambda items:next(v for v in items if v['id'].startswith(prefix))
 +            try:assert pet.behavior.release_drag()
@@ -190,11 +204,11 @@
 +            assert pet.displayed_canvas.toImage()==before and pet.snapshot_frame().toImage()==before
 +            settle_first_frame();assert clock.alpha==0 and pet.pos()==origin
 +            motion=pet.behavior.motion;spring=pet.behavior.release_spring
-+            assert motion.released and spring is not None and spring.vy<0
++            assert motion.released and spring is not None and spring.vx>0 and spring.vy==0
 +            spring.restitution=.92 # 生命周期专项：确保短循环片段结束后轨迹仍存活。
 +            pose_elapsed=clock.elapsed;moment[0]+=.02;pet.behavior.tick()
 +            assert spring.elapsed>0 and clock.elapsed==pose_elapsed and pet.pos()!=origin
-+            present_at(.2);assert pet.y()<origin.y()-12
++            present_at(.2);assert pet.x()>origin.x()
 +            for seconds in (motion.duration,motion.duration+.4):
 +                present_at(seconds)
 +                assert pet.current is item and pet.presentation is clock and pet.mode=='autonomous-motion'
@@ -204,24 +218,35 @@
 +                if pet.behavior.release_spring is None:break
 +                present_at(pet.presentation.elapsed+.25)
 +            assert pet.behavior.motion is None and pet.behavior.release_spring is None
-+            assert spring.settled and pet.y()==area.bottom()+1-pet.height()
++            assert spring.settled and pet.y()==area.bottom()+1-pet.height()+pet.render_margin
 +            assert pet.current is pet.idles[0] and pet.mode=='idle' and pet.presentation.loop_range is None
 +            assert spring.bottom_bounces>=1
 +            returned=pet.presentation;visible=pet.displayed_canvas.toImage().copy()
 +            assert returned.blend_duration==.28 and pet.pose_bridge_ready and pet.pose_bridge is None
 +            settle_first_frame();assert returned.alpha==0 and pet.displayed_canvas.toImage()==visible
++            seen_indices={returned.index};middle=None
++            for _ in range(20):
++                target_position=returned.offset+min(returned.elapsed+.035,returned.length)
++                target_index=returned.index_at(target_position)
++                pet.frames.request(target_index);deadline=time.monotonic()+15
++                while pet.frames.ready(target_index) is None:
++                    app.processEvents();time.sleep(.005)
++                    if time.monotonic()>deadline:raise TimeoutError('回待机混合帧预取超时')
++                returned.last=time.monotonic()-.035;pet.animate()
++                seen_indices.add(returned.index)
++                if middle is None and returned.blend_elapsed>=.14:
++                    middle=pet.displayed_canvas.toImage().copy()
++                if not returned.blending:break
++            assert len(seen_indices)>1
++            assert middle is not None and middle!=visible
++            assert returned.alpha==1
 +            from dragon_playback import pose_pixmap
-+            target=pose_pixmap(pet.frames.ready(returned.index),pet.current,pet.frame_size).toImage()
-+            for _ in range(4):
-+                returned.last=time.monotonic()-.035;pet.animate()
-+            assert 0<returned.alpha<1 and pet.displayed_canvas.toImage()!=visible and pet.displayed_canvas.toImage()!=target
-+            for _ in range(4):
-+                returned.last=time.monotonic()-.035;pet.animate()
-+            assert returned.alpha==1 and pet.displayed_canvas.toImage()==target
++            target=pose_pixmap(pet.frames.ready(returned.index),pet.current,pet.frame_size,padding=__import__('dragon_playback').canvas_padding(pet.frame_size)).toImage()
++            assert pet.displayed_canvas.toImage()==target
 +            assert pet.size()==display_size and pet.frame_size==decode_size
 +        report['checks'].append('姿态混合期间弹簧独立计时继续位移，不等待WebP或姿态时钟（离屏）')
 +        report['checks'].append('松手随机奔跑或飞行，两种有效运动段均持续循环到弹跳结束才回默认待机（离屏）')
-+        report['checks'].append('松手按屏幕尺度和力度触发重力轨迹、边界弹性碰撞及衰减，持续到可用屏幕底部停止（离屏）')
++        report['checks'].append('松手保留实际水平/垂直初速，接触边界后按恢复和摩擦衰减至停止（离屏）')
 +        pet.bubble.quota(windows);pet.bubble.grab().save(str(output/'Codex额度气泡离屏检查.png'));pet.bubble.hide()
 +        report['checks'].append('跑飞收敛回默认待机以280ms真实中间画面过渡，首尾像素连续（离屏）')
 +        report['checks'].append('拖拽与松手不改用户尺寸或解码尺寸，不按尾巴翅膀外框临时缩放（离屏）')

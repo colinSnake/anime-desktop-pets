@@ -117,6 +117,7 @@ class ReleaseSpring:
     bounces: int = 0
     top_bounces: int = 0
     bottom_bounces: int = 0
+    grounded: bool = False
     elapsed: float = 0.
     _remainder: float = 0.
     _finish_at: float | None = None
@@ -125,6 +126,11 @@ class ReleaseSpring:
 
     STEP = 1. / 240.
     REST_SPEED = 72.
+    REST_TANGENT = 15.
+    GROUND_FRICTION = 2.5
+    CONTACT_FRICTION = .12
+    DRAG_FRICTION = 4.
+    RESTITUTION = .62
 
     @classmethod
     def launch(cls, origin, velocity, bounds):
@@ -132,17 +138,15 @@ class ReleaseSpring:
         left, top, right, bottom = bounds
         gravity = 1600.
         right, bottom = max(left, right), max(top, bottom)
-        span = max(1., bottom - top)
-        speed = math.hypot(*velocity)
-        strength = max(0., min(1., (speed - 280.) / 920.))
-        # 轻甩短、重甩高；不再用屏高乘2.2强行把所有甩动抬到相同高度。
-        height = min(span * .85, max(18., span * (.08 + .67 * strength)))
-        vertical_speed = math.sqrt(2. * gravity * height)
-        upward = velocity[1] <= 0 or abs(velocity[1]) < 80.
-        vertical = -vertical_speed if upward else vertical_speed
-        return cls(float(x), float(y), max(-1200., min(1200., velocity[0])), vertical,
+        return cls(float(x), float(y), max(-1200., min(1200., velocity[0])),
+                   max(-1200., min(1200., velocity[1])),
                    float(left), float(right), float(top), float(bottom), gravity,
-                   .46 + .20 * strength)
+                   cls.RESTITUTION)
+
+    def apply_contact_friction(self, tangent_velocity, normal_impact):
+        """Bound tangential impulse by the normal impulse at a solid surface."""
+        impulse = self.CONTACT_FRICTION * (1. + self.restitution) * abs(normal_impact)
+        return math.copysign(max(0., abs(tangent_velocity) - impulse), tangent_velocity)
 
     def advance(self, seconds):
         if self.settled or seconds <= 0:
@@ -169,10 +173,15 @@ class ReleaseSpring:
                     self.settled = True
                     break
                 continue
-            self.vy += self.gravity * dt
+            if self.grounded:
+                self.y = self.bottom
+                self.vy = 0.
+                self.vx *= math.exp(-self.GROUND_FRICTION * dt)
+            else:
+                self.vy += self.gravity * dt
             self.x += self.vx * dt
-            self.y += self.vy * dt
-            self.vx *= math.exp(-1.25 * dt)
+            if not self.grounded:
+                self.y += self.vy * dt
             if self.x < self.left:
                 self.x = self.left
                 self.vx = abs(self.vx) * self.restitution
@@ -187,13 +196,18 @@ class ReleaseSpring:
             elif self.y > self.bottom:
                 self.y = self.bottom
                 impact = abs(self.vy)
+                self.vx = self.apply_contact_friction(self.vx, impact)
                 self.bounces += 1
                 self.bottom_bounces += 1
                 if impact * self.restitution < self.REST_SPEED:
                     self.vy = 0.
-                    self.settled = True
+                    self.grounded = True
                 else:
                     self.vy = -impact * self.restitution
+                    self.grounded = False
+            if self.grounded and abs(self.vx) < self.REST_TANGENT:
+                self.vx = 0.
+                self.settled = True
             if self.settled:
                 break
 
@@ -209,6 +223,10 @@ class ReleaseSpring:
         # Dock 隐藏或切换屏幕后地面下移，不能在旧地面悬停。
         if self.settled and self.y < bottom:
             self.settled = False
+            self.vy = 0.
+            self.grounded = False
+        elif self.grounded and self.y < bottom:
+            self.grounded = False
             self.vy = 0.
         if self.x < left:
             self.x = left
@@ -226,11 +244,13 @@ class ReleaseSpring:
             impact = abs(self.vy)
             self.bounces += 1
             self.bottom_bounces += 1
+            self.vx = self.apply_contact_friction(self.vx, impact)
             if impact * self.restitution < self.REST_SPEED:
                 self.vy = 0.
-                self.settled = True
+                self.grounded = True
             else:
                 self.vy = -impact * self.restitution
+                self.grounded = False
 
 
 class AutonomousBehavior:
@@ -244,6 +264,7 @@ class AutonomousBehavior:
     DRAG_REST_SPEED = 80.
     DRAG_STOP_INTERVAL = .08
     MOTION_MAX_STEP = .05  # GUI 卡顿后不追赶积压位移。
+    ACTION_CADENCE = ('interaction', 'interaction', 'idle')
 
     def __init__(self, pet, clock=time.monotonic, rng=None, reduce_motion=None):
         self.pet = pet
@@ -261,7 +282,9 @@ class AutonomousBehavior:
         self.own_play = False
         self.last_action = None
         self.last_kind = None
-        self.action_queue = []
+        self.action_queues = {'interaction': [], 'idle': []}
+        self.action_groups_signature = None
+        self.action_cadence_index = 0
         self.next_at = self.clock() + self.rng.uniform(*self.INTERVAL)
         self._motion_setting = True  # Fail closed until the first read.
         self._check_motion_at = 0.
@@ -324,22 +347,43 @@ class AutonomousBehavior:
                 result.append(item)
         return result
 
+    def action_groups(self):
+        groups = {'interaction': [], 'idle': []}
+        seen = set()
+        for category, items in (('interaction', self.pet.variants), ('idle', self.pet.idles)):
+            for item in items:
+                identifier = item.get('id')
+                if identifier and identifier not in seen:
+                    seen.add(identifier)
+                    groups[category].append(item)
+        return groups
+
     def next_action(self, previous=None):
-        """轮转完整动作池，避免随机抽样长期遗漏某个互动差分。"""
-        pool = self.action_pool()
-        identifiers = {item.get('id') for item in pool}
-        if not pool:
-            self.action_queue = []
+        """按两次互动穿插一次待机，分类洗牌队列保证动作最终都能轮到。"""
+        groups = self.action_groups()
+        signature = tuple((category, tuple(item['id'] for item in groups[category]))
+                          for category in ('interaction', 'idle'))
+        if signature != self.action_groups_signature:
+            self.action_groups_signature = signature
+            self.action_queues = {category: [] for category in groups}
+            self.action_cadence_index = 0
+        available_categories = [category for category in ('interaction', 'idle') if groups[category]]
+        if not available_categories:
             return None
-        if not self.action_queue or any(item.get('id') not in identifiers for item in self.action_queue):
-            self.action_queue = pool[:]
-            self.rng.shuffle(self.action_queue)
-        available = [item for item in self.action_queue
+        cadence = tuple(category for category in self.ACTION_CADENCE
+                        if category in available_categories)
+        category = cadence[self.action_cadence_index % len(cadence)]
+        self.action_cadence_index += 1
+        queue = self.action_queues[category]
+        if not queue:
+            queue.extend(groups[category])
+            self.rng.shuffle(queue)
+        available = [item for item in queue
                      if item.get('id') not in (previous, self.last_action)]
         if not available:
-            available = [item for item in self.action_queue if item.get('id') != previous] or self.action_queue
+            available = [item for item in queue if item.get('id') != previous] or queue
         item = available[0]
-        self.action_queue.remove(item)
+        queue.remove(item)
         return item
 
     def blocked(self, moving=False, allow_pointer=False, allow_disabled=False, allow_action=False):
@@ -351,7 +395,7 @@ class AutonomousBehavior:
                 or QApplication.activeModalWidget() is not None
                 or bool(QApplication.mouseButtons())
                 or (not moving and pet.mode != 'idle' and not allow_action)
-                or (not moving and not allow_pointer and pet.frameGeometry().adjusted(-32, -32, 32, 32).contains(QCursor.pos())))
+                or (not moving and not allow_pointer and pet.body_geometry().adjusted(-32, -32, 32, 32).contains(QCursor.pos())))
 
     def motion_reduced(self):
         now = self.clock()
@@ -368,7 +412,7 @@ class AutonomousBehavior:
         if screen is None:
             self.pause()
             return False
-        area = screen.availableGeometry()
+        area = self.pet.movement_area(screen.availableGeometry())
         spring.update_bounds((area.left(), area.top(),
                               area.right() + 1 - self.pet.width(),
                               area.bottom() + 1 - self.pet.height()))
@@ -460,13 +504,15 @@ class AutonomousBehavior:
         self.defer()
         if self.motion_enabled and (preview or self.rng.random() < .45):
             if self.pet.manifest.get('movementAnimations'):
-                return self.perform_movement(preview=preview)
+                if self.perform_movement(preview=preview):
+                    return True
+                return self._perform_action_unchecked()
             kinds = [kind for kind in self.KINDS if kind != self.last_kind]
             kind = self.rng.choice(kinds)
             screen = QApplication.screenAt(self.pet.frameGeometry().center()) or QApplication.primaryScreen()
             if screen:
                 motion = Motion.within(kind, (self.pet.x(), self.pet.y()), self.pet.size(),
-                                       screen.availableGeometry(), self.rng)
+                                       self.pet.movement_area(screen.availableGeometry()), self.rng)
                 if motion.height >= 8 or abs(motion.travel) >= 8:
                     item = self.pet.manifest.get('dragAnimation') or self.pet.idles[0]
                     self._play(item, 'autonomous-motion')
@@ -507,7 +553,7 @@ class AutonomousBehavior:
         screen = QApplication.screenAt(self.pet.frameGeometry().center()) or QApplication.primaryScreen()
         if screen is None:
             return False
-        area = screen.availableGeometry()
+        area = self.pet.movement_area(screen.availableGeometry())
         left = max(0, self.pet.x() - area.left())
         right = max(0, area.right() + 1 - self.pet.width() - self.pet.x())
         candidates = [v for v in ([item] if item else pool)
@@ -527,13 +573,13 @@ class AutonomousBehavior:
         room = left if facing == 'left' else right
         flying = item['id'].startswith('move03')
         if flying:
-            cap = min(640, max(300, round(area.width() * .34)))
+            cap = min(640, max(300, round(screen.availableGeometry().width() * .34)))
         elif item['id'].startswith('move02'):
-            cap = min(520, max(240, round(area.width() * .27)))
+            cap = min(520, max(240, round(screen.availableGeometry().width() * .27)))
         else:
-            cap = min(420, max(160, round(area.width() * .18)))
+            cap = min(420, max(160, round(screen.availableGeometry().width() * .18)))
         travel = min(room, cap) * (-1 if facing == 'left' else 1)
-        flight_height = min(280, max(112, round(area.height() * .22)))
+        flight_height = min(280, max(112, round(screen.availableGeometry().height() * .22)))
         height = min(max(0, self.pet.y() - area.top()), flight_height) if flying else 0
         entry = 0.
         if released:
@@ -582,16 +628,36 @@ class AutonomousBehavior:
                                      math.hypot(x - self.drag_origin[0], y - self.drag_origin[1]))
 
     def drag_velocity(self, window, now=None):
-        """Use a time window, including time held still before release."""
+        """Estimate release velocity with a recency-weighted least-squares fit."""
         now = self.clock() if now is None else now
         samples = [sample for sample in self.drag_samples if 0 <= now - sample[0] <= window]
-        if len(samples) < 2 or now - samples[-1][0] >= self.DRAG_STOP_INTERVAL:
+        if len(samples) < 2:
             return 0., 0.
-        dt = now - samples[0][0]
-        if dt < .008:
+        start, end = samples[0][0], samples[-1][0]
+        if end - start < .008:
             return 0., 0.
-        return ((samples[-1][1] - samples[0][1]) / dt,
-                (samples[-1][2] - samples[0][2]) / dt)
+        # Fit actual pointer samples only; apply release-pause drag separately
+        # so the synthetic stationary point cannot distort the path direction.
+        observations = samples
+        t0 = samples[0][0]
+        duration = end - t0
+        weights = [.5 + (sample[0] - t0) / duration for sample in observations]
+        total_weight = sum(weights)
+        mean_t = sum(weight * sample[0] for weight, sample in zip(weights, observations)) / total_weight
+
+        def slope(axis):
+            mean_position = sum(weight * sample[axis] for weight, sample in zip(weights, observations)) / total_weight
+            covariance = sum(weight * (sample[0] - mean_t) * (sample[axis] - mean_position)
+                             for weight, sample in zip(weights, observations))
+            variance = sum(weight * (sample[0] - mean_t) ** 2
+                           for weight, sample in zip(weights, observations))
+            return covariance / variance if variance > 1e-12 else 0.
+
+        pause = now - end
+        if pause >= self.DRAG_STOP_INTERVAL:
+            return 0., 0.
+        decay = math.exp(-ReleaseSpring.DRAG_FRICTION * pause)
+        return slope(1) * decay, slope(2) * decay
 
     def drag_animation(self):
         """轻拖用普通姿态，明显位移才走/跑/飞；阈值滞回避免反复解码。"""
@@ -675,7 +741,7 @@ class AutonomousBehavior:
         screen = QApplication.screenAt(self.pet.frameGeometry().center()) or QApplication.primaryScreen()
         if screen is None:
             return False
-        area = screen.availableGeometry()
+        area = self.pet.movement_area(screen.availableGeometry())
         origin = self.pet.constrained_position(self.pet.pos(), self.pet.frameGeometry().center())
         self.pet.move(origin)
         low = area.left() - origin.x()

@@ -23,8 +23,8 @@ SOURCE = ROOT.parent.parent / 'github/codex-pet/bailong-desktop-pet-macos'
 STAGE = LOCAL / 'generated-source'
 APP = LOCAL / 'dist/BailongPet.app'
 PYTHON = LOCAL / 'venv/bin/python'
-VERSION = 'dragon.30'
-BUNDLE_VERSION = '24'
+VERSION = 'dragon.35'
+BUNDLE_VERSION = '29'
 
 
 def digest(path):

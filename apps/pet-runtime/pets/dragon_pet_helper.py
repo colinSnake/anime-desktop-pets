@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import sys
 
-from PySide6.QtCore import QSettings, QTimer, Signal
+from PySide6.QtCore import QPoint, QSettings, QTimer, Signal
 from PySide6.QtWidgets import QApplication
 
 
@@ -164,7 +164,7 @@ def _factory(row, state):
         def _setting_changed(self, key, value):
             if self._applying_preferences or self._stopping:
                 return
-            mapping = {'sizePercent': ('size', self.width()),
+            mapping = {'sizePercent': ('size', self.logical_size),
                        'autonomousEnabled': ('scheduledActivity', bool(value)),
                        'autonomousMotion': ('movement', bool(value)),
                        'autoHideFullscreen': ('hideInFullscreen', bool(value))}
@@ -176,7 +176,7 @@ def _factory(row, state):
             was_dragging = self.dragging
             super().mouseReleaseEvent(event)
             if was_dragging and not self._stopping:
-                self.preferences_changed.emit(dict(x=self.x(), y=self.y()))
+                self.preferences_changed.emit(dict(x=self.body_geometry().x(), y=self.body_geometry().y()))
 
         def apply_preferences(self, value):
             self._applying_preferences = True
@@ -184,20 +184,38 @@ def _factory(row, state):
                 value = copy.deepcopy(value)
                 size = int(value['size'])
                 self.size_percent = round(size * 100 / 256)
-                self.setFixedSize(size, size)
+                self.set_pet_size(size)
                 self.settings.setValue('sizePercent', self.size_percent)
-                self.behavior.set_enabled(bool(value['scheduledActivity']))
-                self.behavior.set_motion_enabled(bool(value['movement']))
-                self.set_auto_hide_fullscreen(bool(value['hideInFullscreen']))
+                # Position persistence is not an instruction to restart the
+                # scheduler or cancel a just-created release spring.
+                if self.behavior.enabled != bool(value['scheduledActivity']):
+                    self.behavior.set_enabled(bool(value['scheduledActivity']))
+                if self.behavior.motion_enabled != bool(value['movement']):
+                    self.behavior.set_motion_enabled(bool(value['movement']))
+                if self.auto_hide_fullscreen != bool(value['hideInFullscreen']):
+                    self.set_auto_hide_fullscreen(bool(value['hideInFullscreen']))
                 previous = self.definition['preferences'] if getattr(self, '_preferences_applied', False) else {}
                 if (value.get('x') is not None and value.get('y') is not None and
                         (value.get('x'), value.get('y')) != (previous.get('x'), previous.get('y'))):
-                    self.move(int(value['x']), int(value['y']))
+                    target = QPoint(int(value['x']), int(value['y']))
+                    if target != self.body_geometry().topLeft():
+                        self.behavior.pause()
+                        self.move(target - QPoint(self.render_margin, self.render_margin))
+                        self.rebase_drag()
                 self.ensure_on_screen()
                 self.definition['preferences'] = value
                 self._preferences_applied = True
             finally:
                 self._applying_preferences = False
+
+        def preference_anchor(self):
+            return self.body_geometry().topLeft()
+
+        def restore_preference_anchor(self, anchor):
+            # Roll back the live location, not an older saved drag position.
+            self.move(anchor - QPoint(self.render_margin, self.render_margin))
+            self.ensure_on_screen()
+            self.rebase_drag()
 
         def closeEvent(self, event):
             # An individual pet must never quit the shared QApplication.

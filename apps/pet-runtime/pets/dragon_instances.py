@@ -408,6 +408,11 @@ class InstanceController(QObject):
         old = copy.deepcopy(self.definitions[identifier]['preferences'])
         updated = copy.deepcopy(self.registry)
         next(row for row in updated['instances'] if row['id'] == identifier)['preferences'] = desired
+        # Optional logical-anchor checkpoint: the live position can differ
+        # from the last stored drag position after autonomous motion.
+        snapshot_anchor = getattr(session.window, 'preference_anchor', None) if session else None
+        restore_anchor = getattr(session.window, 'restore_preference_anchor', None) if session else None
+        anchor = snapshot_anchor() if callable(snapshot_anchor) and callable(restore_anchor) else None
         # 先应用窗口，再原子持久化；写失败则还原窗口，避免另一只跟着变化。
         self.updating_preferences = True
         try:
@@ -420,6 +425,8 @@ class InstanceController(QObject):
             if session and self.sessions.get(identifier) is session and session.phase == 'running':
                 try:
                     session.window.apply_preferences(old)
+                    if anchor is not None:
+                        restore_anchor(anchor)
                 except Exception as rollback:
                     self._failed(identifier, session, '偏好回滚失败：' + str(rollback))
             raise

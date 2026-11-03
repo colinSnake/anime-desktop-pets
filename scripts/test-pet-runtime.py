@@ -125,6 +125,70 @@ class FramesTests(unittest.TestCase):
             self.assertLessEqual(sum(store.cached_bytes for store in stores),budget.image_bytes)
             self.assertLessEqual(sum(store.pixmap_bytes for store in stores),budget.pixmap_bytes)
 
+    def test_shared_decoder_serves_current_frames_before_queued_prefetch(self):
+        budget = AnimationResourceBudget(image_bytes=8 * 40 * 40 * 4,
+                                         pixmap_bytes=0, max_decoders=1)
+        order = []
+        guard = threading.Lock()
+        holder = budget.acquire_decode_slot(lambda: -1, lambda: True)
+        self.assertTrue(holder)
+
+        def wait_for_decode(name, priority):
+            acquired = budget.acquire_decode_slot(lambda: priority, lambda: True)
+            if acquired:
+                with guard:
+                    order.append(name)
+                budget.release_decode_slot()
+
+        prefetch = threading.Thread(target=wait_for_decode, args=('prefetch', 1))
+        requested = threading.Thread(target=wait_for_decode, args=('requested-frame', 0))
+        prefetch.start()
+        deadline = time.monotonic() + 2
+        while budget.pending_decodes < 1 and time.monotonic() < deadline:
+            time.sleep(.002)
+        self.assertEqual(budget.pending_decodes, 1)
+        requested.start()
+        deadline = time.monotonic() + 2
+        while budget.pending_decodes < 2 and time.monotonic() < deadline:
+            time.sleep(.002)
+        self.assertEqual(budget.pending_decodes, 2)
+        budget.release_decode_slot()
+        prefetch.join(2)
+        requested.join(2)
+        self.assertFalse(prefetch.is_alive())
+        self.assertFalse(requested.is_alive())
+        self.assertEqual(order, ['requested-frame', 'prefetch'])
+
+    def test_frame_request_superseded_after_slot_grant_skips_stale_decode(self):
+        budget = AnimationResourceBudget(image_bytes=8 * 40 * 40 * 4,
+                                         pixmap_bytes=0, max_decoders=1)
+        store = self.store(resource_budget=budget, prefetch=2)
+        original_acquire = budget.acquire_decode_slot
+        changed = threading.Event()
+
+        def acquire_then_advance(priority, valid):
+            acquired = original_acquire(priority, valid)
+            if acquired and not changed.is_set():
+                changed.set()
+                store.request(self.paths[0], 40, 3, 6)
+            return acquired
+
+        calls = []
+        original_decode = decode_image
+
+        def record_decode(source, index, size):
+            calls.append(index)
+            return original_decode(source, index, size)
+
+        with patch.object(budget, 'acquire_decode_slot', side_effect=acquire_then_advance):
+            with patch('dragon_frames.decode_image', side_effect=record_decode):
+                store.activate(self.paths[0], 40, 6)
+                spin_until(lambda: store.ready(self.paths[0], 40, 3) is not None)
+        self.assertTrue(changed.is_set())
+        self.assertNotIn(0, calls)
+        self.assertIn(3, calls)
+        store.close()
+
     def test_shared_budget_rebalances_populated_caches_on_join_and_stop(self):
         cost=40*40*4
         budget=AnimationResourceBudget(image_bytes=4*cost,pixmap_bytes=4*cost)
@@ -149,7 +213,8 @@ class FramesTests(unittest.TestCase):
 
     def test_waiting_for_shared_decoder_can_stop_without_acquiring_slot(self):
         budget=AnimationResourceBudget()
-        budget.decode_slots.acquire()
+        holder=budget.acquire_decode_slot(lambda:0,lambda:True)
+        self.assertTrue(holder)
         try:
             store=self.store(resource_budget=budget)
             store.activate(self.paths[0],40,6)
@@ -161,7 +226,7 @@ class FramesTests(unittest.TestCase):
             store.close()
             self.assertEqual(budget.active_stores,0)
         finally:
-            budget.decode_slots.release()
+            budget.release_decode_slot()
 
     def test_cancelled_generation_is_discarded(self):
         entered=threading.Event()
@@ -175,6 +240,26 @@ class FramesTests(unittest.TestCase):
             spin_until(lambda:store.ready(self.paths[1],40,0) is not None)
             self.assertGreater(store.stats['stale'],0)
             self.assertNotIn((str(self.paths[0]),40,0),store.frames)
+
+    def test_same_animation_frame_outside_prefetch_window_is_discarded(self):
+        entered = threading.Event()
+        original = decode_image
+
+        def slow(source, index, size):
+            if index == 0:
+                entered.set()
+                time.sleep(.05)
+            return original(source, index, size)
+
+        with patch('dragon_frames.decode_image', side_effect=slow):
+            store = self.store(prefetch=2)
+            store.activate(self.paths[0], 40, 6)
+            store.request(self.paths[0], 40, 0, 6)
+            self.assertTrue(entered.wait(2))
+            store.request(self.paths[0], 40, 5, 6)
+            spin_until(lambda: store.ready(self.paths[0], 40, 5) is not None)
+            self.assertNotIn((str(self.paths[0]),40,0),store.frames)
+            self.assertGreater(store.stats['stale'], 0)
 
     def test_pixel_alpha_and_random_access(self):
         store=self.store()
@@ -322,7 +407,7 @@ class UITests(unittest.TestCase):
         try:
             pet.set_size_percent(200)
             self.assertEqual(pet.size_percent,150)
-            self.assertEqual(pet.size().width(),384)
+            self.assertEqual(pet.logical_size,384)
             menu=pet.context_menu()
             size=next(a.menu() for a in menu.actions() if a.text()=='桌宠大小')
             self.assertEqual([a.text() for a in size.actions()],
@@ -616,17 +701,19 @@ class BehaviorTests(unittest.TestCase):
             self.assertLessEqual(abs(motion.travel), 96)
             self.assertEqual(motion.travel > 0, velocity > 0)
             for i in range(101):
-                self.assertTrue(area.contains(QRect(QPoint(*motion.position(i / 100)), self.pet.size())))
+                self.assertTrue(area.contains(QRect(QPoint(*motion.position(i / 100)), self.pet.size()).adjusted(self.pet.render_margin,self.pet.render_margin,-self.pet.render_margin,-self.pet.render_margin)))
 
     def test_release_spring_scales_to_screen_and_damps_boundary_bounces(self):
         from dragon_behavior import ReleaseSpring
-        small = ReleaseSpring.launch((100, 300), (0, 0), (0, 0, 300, 400))
-        large = ReleaseSpring.launch((100, 600), (0, 0), (0, 0, 300, 800))
-        self.assertAlmostEqual(abs(large.vy) / abs(small.vy), 2 ** .5, places=2)
         upward = ReleaseSpring.launch((100, 300), (0, -500), (0, 0, 300, 900))
         downward = ReleaseSpring.launch((100, 300), (0, 500), (0, 0, 300, 900))
         self.assertLess(upward.vy, 0)
         self.assertGreater(downward.vy, 0)
+        horizontal = ReleaseSpring.launch((100, 300), (700, 0), (0, 0, 300, 900))
+        self.assertEqual((horizontal.vx, horizontal.vy), (700., 0.))
+        horizontal.advance(.1)
+        self.assertGreater(horizontal.x, 150.)
+        self.assertGreater(horizontal.vy, 0.)
         # Weak throws need not hit the ceiling. Deliberate high-energy near-top
         # and near-floor starts still exercise real boundary collisions.
         for origin, velocity, target in (((100, 20), (0, -1100), 'top_bounces'),
@@ -651,6 +738,27 @@ class BehaviorTests(unittest.TestCase):
         self.assertEqual(spring.y, spring.bottom)
         self.assertGreaterEqual(len(impacts), 3)
         self.assertTrue(all(a > b for a, b in zip(impacts, impacts[1:])))
+
+    def test_floor_contact_uses_ground_friction_without_erasing_horizontal_throw(self):
+        from dragon_behavior import ReleaseSpring
+        spring = ReleaseSpring.launch((100, 899.99), (500, 0), (0, 0, 300, 900))
+        spring.restitution = .3
+        spring.advance(.1)
+        self.assertGreaterEqual(spring.bottom_bounces, 1)
+        self.assertTrue(spring.grounded)
+        after_contact = spring.x
+        spring.advance(.1)
+        self.assertGreater(spring.x, after_contact)
+        self.assertFalse(spring.settled)
+        self.assertLess(spring.vx, 500.)
+
+    def test_wall_contact_reflects_horizontal_velocity(self):
+        from dragon_behavior import ReleaseSpring
+        spring = ReleaseSpring.launch((295, 200), (600, 0), (0, 0, 300, 900))
+        spring.gravity = 0.
+        spring.advance(.02)
+        self.assertLess(spring.vx, 0.)
+        self.assertLess(spring.x, spring.right)
 
     def test_release_spring_always_finishes_at_screen_floor_not_origin(self):
         from dragon_behavior import ReleaseSpring
@@ -693,7 +801,7 @@ class BehaviorTests(unittest.TestCase):
         self.assertGreaterEqual(spring.y, spring.top)
         self.assertLessEqual(spring.y, spring.bottom)
         spring.x = 260
-        spring.vx = 100
+        spring.vx = 500
         spring.y = 520
         spring.vy = 400
         before = spring.bounces
@@ -743,8 +851,27 @@ class BehaviorTests(unittest.TestCase):
     def test_drag_velocity_accounts_for_time_since_last_move(self):
         self.behavior.drag_samples.clear()
         self.behavior.drag_samples.extend([(self.now-.15, 100, 100), (self.now-.05, 140, 100)])
-        self.assertFalse(self.behavior.release_drag())  # 400px/s moving, 267px/s including pause.
+        moving = self.behavior.drag_velocity(.2, self.now-.049)
+        released = self.behavior.drag_velocity(.2, self.now)
+        self.assertGreater(moving[0], released[0])
+        self.assertAlmostEqual(released[0], moving[0] * math.exp(-4. * .05), delta=2.)
+        self.assertFalse(self.behavior.release_drag())
         self.assertIsNone(self.behavior.release_spring)
+
+    def test_drag_velocity_weights_recent_motion_but_rejects_direction_reversal(self):
+        self.behavior.drag_samples.clear()
+        self.behavior.drag_samples.extend([
+            (self.now-.14, 100, 100), (self.now-.10, 108, 100),
+            (self.now-.06, 128, 100), (self.now-.02, 164, 100),
+        ])
+        vx, vy = self.behavior.drag_velocity(.15, self.now)
+        self.assertGreater(vx, 400.)
+        self.assertEqual(vy, 0.)
+        self.behavior.drag_samples.extend([
+            (self.now-.01, 150, 100), (self.now, 140, 100),
+        ])
+        reversed_vx, _ = self.behavior.drag_velocity(.15, self.now)
+        self.assertLess(reversed_vx, vx)
 
     def test_fast_drag_then_hold_does_not_flick_on_release(self):
         self.behavior.drag_samples.clear()
@@ -939,24 +1066,62 @@ class BehaviorTests(unittest.TestCase):
             'interaction': interaction_ids, 'idle': idle_ids, 'work': set(),
         })
         selected = []
-        for _ in range(len(pool)):
+        for _ in range(3 * len(pool)):
             item = self.behavior.next_action(previous=None)
             selected.append(item['id'])
             self.behavior.last_action = item['id']
-        self.assertEqual(set(selected), expected)
-        self.assertEqual(len(selected), len(set(selected)))
+        self.assertTrue(expected.issubset(selected))
+        self.assertTrue(all(left != right for left, right in zip(selected, selected[1:])))
+        categories = ['idle' if identifier.startswith('idle') else 'interaction'
+                      for identifier in selected]
+        for offset in range(0, len(categories) - 2, 3):
+            self.assertEqual(categories[offset:offset + 3],
+                             ['interaction', 'interaction', 'idle'])
 
-    def test_scheduled_preview_rotates_full_action_pool_before_optional_movement(self):
+    def test_daily_action_cadence_adapts_when_one_action_category_is_missing(self):
+        self.pet.variants = []
+        for _ in range(9):
+            self.pet.mode = 'idle'
+            item = self.behavior.next_action(previous=None)
+            self.behavior.last_action = item['id']
+            self.assertIn(item, self.pet.idles)
+
+    def test_scheduled_movement_falls_back_to_action_when_screen_edge_blocks_it(self):
+        from PySide6.QtCore import QPoint
+        area = APP.primaryScreen().availableGeometry()
+        self.pet.manifest['movementAnimations'] = [item for item in self.original_movements
+                                                   if item.get('sourceFacing') == 'left']
+        self.pet.move(QPoint(area.left()-self.pet.render_margin, area.top()+180))
+        self.behavior.motion_enabled = True
+        chosen = []
+        original = self.behavior._perform_action_unchecked
+
+        def action():
+            result = original()
+            chosen.append(result)
+            return result
+
+        self.behavior._perform_action_unchecked = action
+        with patch.object(self.behavior.rng, 'random', return_value=0.):
+            self.assertTrue(self.behavior.perform())
+        self.assertEqual(chosen, [True])
+        self.assertIn(self.pet.current['id'],
+                      {item['id'] for item in self.behavior.action_pool()})
+
+    def test_scheduled_preview_rotates_categories_and_covers_full_action_pool(self):
         self.behavior.motion_enabled = False
         expected = {item['id'] for item in self.behavior.action_pool()}
         selected = []
-        for _ in range(len(expected)):
+        for _ in range(24):
             self.pet.mode = 'idle'
             self.pet.waiting_first_frame = False
             self.assertTrue(self.behavior.perform(preview=True))
             selected.append(self.pet.current['id'])
         self.assertEqual(set(selected), expected)
-        self.assertEqual(len(selected), len(set(selected)))
+        self.assertTrue(all(left != right for left, right in zip(selected, selected[1:])))
+        categories = ['idle' if identifier.startswith('idle') else 'interaction'
+                      for identifier in selected]
+        self.assertEqual(categories, ['interaction', 'interaction', 'idle'] * 8)
 
     def test_manual_action_preview_does_not_start_movement(self):
         self.behavior.motion_enabled = True
@@ -1029,7 +1194,7 @@ class ClipMovementTests(unittest.TestCase):
             self.start(item['id'])
             motion = self.behavior.motion
             for i in range(101):
-                self.assertTrue(area.contains(QRect(QPoint(*motion.position(i/100)), self.pet.size())))
+                self.assertTrue(area.contains(QRect(QPoint(*motion.position(i/100)), self.pet.size()).adjusted(self.pet.render_margin,self.pet.render_margin,-self.pet.render_margin,-self.pet.render_margin)))
 
     def test_scheduled_movement_ranges_scale_up_with_available_screen(self):
         from PySide6.QtCore import QPoint
@@ -1050,7 +1215,7 @@ class ClipMovementTests(unittest.TestCase):
                 self.assertGreaterEqual(motion.height, min(112, self.pet.y() - area.top()))
             for index in range(101):
                 point = QPoint(*motion.position(index / 100))
-                self.assertTrue(area.contains(self.pet.rect().translated(point)))
+                self.assertTrue(self.pet.movement_area(area).contains(self.pet.rect().translated(point)))
 
     def test_manual_preview_respects_task_motion_and_accessibility(self):
         item = self.original_movements[0]
@@ -1151,7 +1316,7 @@ class PresentationTests(unittest.TestCase):
         self.assertEqual(clock.index,2)
         self.assertAlmostEqual(clock.elapsed,.08)
 
-    def test_wait_blend_and_stall_share_frozen_time(self):
+    def test_wait_blend_and_stall_share_presentation_time(self):
         from dragon_playback import PresentationClock
         clock=PresentationClock([40]*10,.4,0,blend=.1)
         clock.advance(1,lambda index:False)
@@ -1159,7 +1324,7 @@ class PresentationTests(unittest.TestCase):
         clock.advance(2,lambda index:True)
         self.assertEqual(clock.alpha,0)
         clock.advance(2.05,lambda index:True)
-        self.assertGreater(clock.alpha,0);self.assertEqual(clock.elapsed,0)
+        self.assertGreater(clock.alpha,0);self.assertAlmostEqual(clock.elapsed,.05)
         clock.advance(2.11,lambda index:True)
         clock.advance(2.12,lambda index:True)
         elapsed=clock.elapsed
@@ -1167,6 +1332,28 @@ class PresentationTests(unittest.TestCase):
         self.assertTrue(clock.stalled);self.assertEqual(clock.elapsed,elapsed)
         clock.advance(10,lambda index:True)
         self.assertLessEqual(clock.elapsed-elapsed,.050001)
+
+    def test_transition_blend_and_target_animation_advance_together(self):
+        from dragon_playback import PresentationClock
+        clock = PresentationClock([40] * 10, .4, 0, blend=.16)
+        clock.advance(0, lambda _: True)
+        for step in range(1, 5):
+            clock.advance(step * .04, lambda _: True)
+        self.assertAlmostEqual(clock.blend_elapsed, .16)
+        self.assertAlmostEqual(clock.elapsed, .16)
+        self.assertFalse(clock.blending)
+        self.assertEqual(clock.index, 4)
+
+    def test_transition_blend_pauses_with_target_frame_decode_stall(self):
+        from dragon_playback import PresentationClock
+        clock = PresentationClock([40] * 10, .4, 0, blend=.28)
+        clock.advance(0, lambda _: True)
+        clock.advance(.04, lambda _: True)
+        blend, elapsed = clock.blend_elapsed, clock.elapsed
+        clock.advance(.08, lambda _: False)
+        self.assertEqual(clock.blend_elapsed, blend)
+        self.assertEqual(clock.elapsed, elapsed)
+        self.assertTrue(clock.stalled)
 
     def test_decode_timeout_and_last_frame_gate(self):
         from dragon_playback import PresentationClock
@@ -1302,19 +1489,27 @@ class DragTransitionRulesTests(unittest.TestCase):
 
 
 class ReleaseRulesTests(unittest.TestCase):
-    def test_strength_changes_height_and_duration_without_changing_kind(self):
+    def test_release_preserves_two_axis_velocity_with_fixed_material_restitution(self):
         from dragon_behavior import ReleaseSpring
         launches=[]
         for vx in (285,600,1100):
             spring=ReleaseSpring.launch((600,1600),(vx,-50),(0,0,3000,1600))
-            launch=abs(spring.vy);highest=spring.y
+            self.assertEqual((spring.vx,spring.vy),(float(vx),-50.))
             for _ in range(240*12):
-                spring.advance(1/240);highest=min(highest,spring.y)
+                spring.advance(1/240)
                 if spring.settled:break
             self.assertTrue(spring.settled)
-            launches.append((launch,1600-highest,spring.elapsed))
-        for dimension in range(3):
-            self.assertTrue(launches[0][dimension]<launches[1][dimension]<launches[2][dimension],launches)
+            launches.append((spring.restitution,spring.elapsed))
+        self.assertEqual([entry[0] for entry in launches], [.62, .62, .62])
+
+    def test_contact_friction_scales_with_normal_impact_and_never_reverses_tangent(self):
+        from dragon_behavior import ReleaseSpring
+        spring = ReleaseSpring.launch((100, 300), (500, 0), (0, 0, 300, 900))
+        weak = spring.apply_contact_friction(500., 100.)
+        strong = spring.apply_contact_friction(500., 300.)
+        self.assertGreater(weak, strong)
+        self.assertGreaterEqual(spring.apply_contact_friction(20., 1000.), 0.)
+        self.assertLessEqual(spring.apply_contact_friction(-20., 1000.), 0.)
 
     def test_large_screen_fallback_lands_smoothly_instead_of_hard_snap(self):
         from dragon_behavior import ReleaseSpring
@@ -1374,6 +1569,93 @@ class ReleaseRulesTests(unittest.TestCase):
         self.assertEqual(frame.toImage(),normal)
 
 
+class FlightSizeTests(unittest.TestCase):
+    def setUp(self):
+        from dragon_playback import calibrate_flight_sizes
+        self.assets=ROOT/'.local/pet-build/source/outputs/白龙桌宠素材'
+        self.manifest=json.loads((self.assets/'素材清单.json').read_text())
+        self.original=json.loads(json.dumps(self.manifest))
+        calibrate_flight_sizes(self.manifest)
+        self.flight=next(v for v in self.manifest['movementAnimations'] if v['id']=='move03left')
+
+    def test_artwork_calibration_is_idempotent_and_does_not_change_size_settings(self):
+        from dragon_playback import calibrate_flight_sizes,flight_render_geometry
+        once=json.loads(json.dumps(self.manifest))
+        calibrate_flight_sizes(self.manifest)
+        self.assertEqual(once,self.manifest)
+        for position in (0,2500,3125,4000,5000,5700,6700,9100):
+            scale,offset=flight_render_geometry(self.flight,position)
+            if 3125 <= position <= 5700:
+                self.assertAlmostEqual(scale,1.30)
+            if position <= 2500 or position >= 6700:
+                self.assertEqual(scale,self.flight['renderScale'])
+                self.assertEqual(tuple(offset),tuple(self.flight['renderOffset']))
+        self.assertEqual(json.loads((self.assets/'素材清单.json').read_text()),self.original)
+        for item in self.manifest['movementAnimations']:
+            if item['id']!='move03left':
+                self.assertEqual(item,next(v for v in self.original['movementAnimations'] if v['id']==item['id']))
+
+    def test_calibration_does_not_override_unrelated_or_imported_package_actions(self):
+        from dragon_playback import calibrate_flight_sizes
+        for changed in ({'playbackFile':'assets/flight.webp'}, {'durationMs':1000},
+                        {'_assetRoot':'/imported/package'}, {'file':'other.webp'}):
+            item=dict(self.flight,**changed);item.pop('_flightSizeProfile',None)
+            manifest={'movementAnimations':[item]}
+            original=json.loads(json.dumps(manifest))
+            calibrate_flight_sizes(manifest)
+            self.assertEqual(manifest,original)
+
+    def test_padded_canvas_contains_full_normalized_flight_without_cropping(self):
+        from dragon_playback import flight_render_geometry
+        durations=__import__('dragon_frames').webp_frame_durations(self.assets/self.flight['playbackFile'])
+        def crop(box,scale,offset):
+            x=(1-scale)/2+offset[0];y=1-scale+offset[1]
+            l,t,r,b=box
+            return max(0,-.25-(l*scale+x),-.25-(t*scale+y),r*scale+x-1.25,b*scale+y-1.25)
+        elapsed=0.
+        with Image.open(self.assets/self.flight['playbackFile']) as reader:
+            for index,duration in enumerate(durations):
+                reader.seek(index);bounds=reader.convert('RGBA').getchannel('A').getbbox()
+                box=tuple(v/720 for v in bounds)
+                position=elapsed*self.flight['durationMs']/sum(durations);elapsed+=duration
+                scale,offset=flight_render_geometry(self.flight,position)
+                self.assertEqual(crop(box,scale,offset),0.,index)
+
+    def test_normalized_canvas_scales_only_with_menu_size_and_mirrors_without_clipping(self):
+        from dragon_playback import pose_pixmap,_alpha_bounds,canvas_padding
+        with Image.open(self.assets/self.flight['playbackFile']) as reader:
+            reader.seek(135)
+            frames={size:decode_image(reader,135,size) for size in (128,256,384)}
+        normalized=[]
+        for size,frame in frames.items():
+            from PySide6.QtGui import QPixmap
+            pixmap=QPixmap.fromImage(frame)
+            padding=canvas_padding(size);side=size+2*padding
+            original=pose_pixmap(pixmap,self.flight,size,position_ms=4500,padding=padding)
+            mirrored=pose_pixmap(pixmap,self.flight,size,position_ms=4500,mirror=True,padding=padding)
+            l,t,r,b=_alpha_bounds(original)
+            ml,mt,mr,mb=_alpha_bounds(mirrored)
+            self.assertLessEqual(abs(ml-(side-r)),1)
+            self.assertLessEqual(abs(mr-(side-l)),1)
+            self.assertLessEqual(abs(mt-t),1);self.assertLessEqual(abs(mb-b),1)
+            self.assertEqual((original.width(),original.height()),(side,side))
+            normalized.append(((r-l)/size,(b-t)/size))
+        for actual in normalized[1:]:
+            for component,expected in zip(actual,normalized[0]):
+                self.assertAlmostEqual(component,expected,delta=.025)
+
+
+    def test_padding_expands_render_box_without_resizing_idle_pixels(self):
+        from dragon_playback import pose_pixmap,canvas_padding
+        from PySide6.QtGui import QPixmap
+        with Image.open(self.assets/self.manifest['idle']['playbackFile']) as reader:
+            frame=QPixmap.fromImage(decode_image(reader,0,256))
+        original=pose_pixmap(frame,self.manifest['idle'],256)
+        padding=canvas_padding(256)
+        padded=pose_pixmap(frame,self.manifest['idle'],256,padding=padding)
+        self.assertEqual(padded.copy(padding,padding,256,256).toImage(),original.toImage())
+
+
 class ReleaseCacheTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name)
@@ -1389,7 +1671,7 @@ class ReleaseCacheTests(unittest.TestCase):
         from dragon_playback import release_source_key
         profile=dict(sourceKey=release_source_key(self.item),file='dragon-release/cached.webp',durationMs=1250)
         profile.update(changes)
-        self.catalog.write_text(json.dumps(dict(schema=1,profiles={'move02':profile})))
+        self.catalog.write_text(json.dumps(dict(schema=1,profiles={self.item['id']:profile})))
 
     def test_catalog_selects_only_matching_source_without_mutating_item(self):
         from dragon_playback import release_clip
@@ -1399,6 +1681,23 @@ class ReleaseCacheTests(unittest.TestCase):
         self.assertEqual((result['moveStartMs'],result['moveStopMs'],result['durationMs']),(0,1250,1250))
         self.assertEqual(result['releaseSource'],'move02')
         self.assertEqual(result['playbackFile'],'dragon-release/cached.webp')
+
+    def test_release_clip_preserves_flight_source_pose_time(self):
+        from dragon_playback import calibrate_flight_sizes, flight_render_geometry, release_clip
+        assets=ROOT/'.local/pet-build/source/outputs/白龙桌宠素材'
+        manifest=json.loads((assets/'素材清单.json').read_text())
+        calibrate_flight_sizes(manifest)
+        self.item=next(item for item in manifest['movementAnimations'] if item['id']=='move03left')
+        self.assertEqual(flight_render_geometry(self.item,4000)[0],1.30)
+        self.save(sourceFirstFrame=113)
+        result=release_clip(self.item,self.catalog)
+        self.assertEqual(result['playbackFile'],'dragon-release/cached.webp')
+        for elapsed in (0.,500.,1000.):
+            source_time=113*9100/273+elapsed
+            self.assertEqual(flight_render_geometry(result,elapsed),
+                             flight_render_geometry(self.item,source_time))
+        self.save(sourceFirstFrame=-1)
+        self.assertIs(release_clip(self.item,self.catalog),self.item)
 
     def test_missing_corrupt_and_oversized_catalog_safely_fall_back(self):
         from dragon_playback import release_clip
@@ -1515,23 +1814,31 @@ class ReleasePresentationTests(unittest.TestCase):
                     self.assertAlmostEqual(clock.blend_duration,.28)
                     self.assertEqual(self.pet.displayed_canvas.toImage(),source)
                     self.assertTrue(self.pet.pose_bridge_ready);self.assertIsNone(self.pet.pose_bridge)
-                    self.pet.frames.request(0)
-                    spin_until(lambda:self.pet.frames.ready(0) is not None)
-                    target=pose_pixmap(self.pet.frames.ready(0),self.pet.current,self.pet.frame_size).toImage()
                     base=clock.last
                     with patch('pet.pose_bridge',side_effect=AssertionError('drag must not resize by silhouette')):
                         with patch('pet.time.monotonic',return_value=base):self.pet.animate()
                         self.assertEqual(clock.alpha,0)
-                        with patch('pet.time.monotonic',return_value=base+.035):self.pet.animate()
-                        self.assertGreater(clock.alpha,0);self.assertLess(clock.alpha,1)
-                        middle=self.pet.displayed_canvas.toImage().copy()
-                        self.assertNotEqual(middle,source);self.assertNotEqual(middle,target)
-                        for index in range(2,10):
-                            with patch('pet.time.monotonic',return_value=base+index*.035):self.pet.animate()
+                        seen_indices={clock.index}
+                        middle=None
+                        for _ in range(20):
+                            target_position=clock.offset+min(clock.elapsed+.035,clock.length)
+                            target_index=clock.index_at(target_position)
+                            self.pet.frames.request(target_index)
+                            spin_until(lambda:self.pet.frames.ready(target_index) is not None)
+                            with patch('pet.time.monotonic',return_value=clock.last+.035):self.pet.animate()
+                            seen_indices.add(clock.index)
                             self.assertEqual(self.pet.size(),size)
-                    self.assertEqual(clock.alpha,1)
-                    self.assertEqual(self.pet.displayed_canvas.toImage(),target)
-                    self.assertIsNone(self.pet.bridge_source)
+                            if middle is None and clock.blend_elapsed >= .14:
+                                middle=self.pet.displayed_canvas.toImage().copy()
+                            if not clock.blending:
+                                break
+                        self.assertGreater(len(seen_indices),1)
+                        self.assertGreater(clock.alpha,0);self.assertEqual(clock.alpha,1)
+                        self.assertNotEqual(middle,source)
+                        target_frame=self.pet.frames.ready(clock.index)
+                        target=pose_pixmap(target_frame,self.pet.current,self.pet.frame_size,padding=__import__('dragon_playback').canvas_padding(self.pet.frame_size)).toImage()
+                        self.assertEqual(self.pet.displayed_canvas.toImage(),target)
+                        self.assertIsNone(self.pet.bridge_source)
 
     def test_drag_and_release_keep_user_size_and_calibrated_render_scale(self):
         original_percent=self.pet.size_percent
@@ -1589,10 +1896,10 @@ class ReleasePresentationTests(unittest.TestCase):
         with patch.object(self.behavior,'tick'):
             with patch('pet.time.monotonic',return_value=.03):self.pet.animate()
             self.assertTrue(clock.loop_blending)
-            self.assertNotEqual(self.pet.displayed_canvas.toImage(),pose_pixmap(frame,self.pet.current,self.pet.frame_size).toImage())
+            self.assertNotEqual(self.pet.displayed_canvas.toImage(),pose_pixmap(frame,self.pet.current,self.pet.frame_size,padding=__import__('dragon_playback').canvas_padding(self.pet.frame_size)).toImage())
             with patch('pet.time.monotonic',return_value=.06):self.pet.animate()
         self.assertEqual(clock.index,0);self.assertFalse(clock.loop_blending)
-        self.assertEqual(self.pet.displayed_canvas.toImage(),pose_pixmap(frame,self.pet.current,self.pet.frame_size).toImage())
+        self.assertEqual(self.pet.displayed_canvas.toImage(),pose_pixmap(frame,self.pet.current,self.pet.frame_size,padding=__import__('dragon_playback').canvas_padding(self.pet.frame_size)).toImage())
         self.assertIsNone(self.pet.bridge_source)
 
     def test_wall_turn_mirrors_without_switching_animation_or_resetting_clocks(self):
@@ -1709,7 +2016,7 @@ class ReleasePresentationTests(unittest.TestCase):
         self.assertIsNone(self.behavior.motion)
         self.assertIn(self.pet.mode,('landing','idle'))
         self.assertNotEqual(self.pet.current.get('id'), self.pet.manifest['landingAnimation']['id'])
-        self.assertEqual(self.pet.y(), area.bottom() + 1 - self.pet.height())
+        self.assertEqual(self.pet.y(), area.bottom() + 1 - self.pet.height() + self.pet.render_margin)
         self.assertTrue(spring.settled)
 
     def test_release_clip_expiry_cannot_cancel_unsettled_spring(self):
@@ -1732,7 +2039,7 @@ class ReleasePresentationTests(unittest.TestCase):
         self.assertIsNone(self.behavior.release_spring)
         self.assertIsNone(self.behavior.motion)
         self.assertTrue(spring.settled)
-        self.assertEqual(self.pet.y(), area.bottom() + 1 - self.pet.height())
+        self.assertEqual(self.pet.y(), area.bottom() + 1 - self.pet.height() + self.pet.render_margin)
 
     def test_release_clock_rounding_cannot_end_motion_in_midair(self):
         from dataclasses import replace
@@ -1754,7 +2061,7 @@ class ReleasePresentationTests(unittest.TestCase):
         area = APP.primaryScreen().availableGeometry()
         self.assertTrue(spring.settled)
         self.assertIsNone(self.behavior.release_spring)
-        self.assertEqual(self.pet.y(), area.bottom() + 1 - self.pet.height())
+        self.assertEqual(self.pet.y(), area.bottom() + 1 - self.pet.height() + self.pet.render_margin)
 
     def test_flick_loops_same_active_pose_until_spring_settles(self):
         self.assertTrue(self.behavior.release_drag())
@@ -1847,12 +2154,16 @@ class ReleasePresentationTests(unittest.TestCase):
         origin = self.pet.pos()
         clock = self.pet.presentation
         clock.blend_elapsed = 0.
-        for _ in range(6):
-            self.now += 1/60
-            with patch('pet.time.monotonic', return_value=clock.last+1/60):
-                self.pet.animate()
-        self.assertEqual(clock.elapsed, 0.)
+        current_frame = self.pet.frames.ready(clock.index)
+        self.assertIsNotNone(current_frame)
+        with patch.object(self.pet.frames, 'ready', return_value=current_frame):
+            for _ in range(6):
+                self.now += 1/60
+                with patch('pet.time.monotonic', return_value=clock.last+1/60):
+                    self.pet.animate()
+        self.assertGreater(clock.elapsed, .09)
         self.assertTrue(clock.blending)
+        self.assertAlmostEqual(clock.blend_elapsed, clock.elapsed, places=3)
         self.assertGreater(spring.elapsed, .09)
         self.assertNotEqual(self.pet.pos(), origin)
 

@@ -42,8 +42,16 @@ def release_clip(item, catalog):
                 or not target.is_file() or not isinstance(duration, (int, float))
                 or not math.isfinite(duration) or not 0 < duration <= item.get('durationMs', 0)):
             return item
-        return dict(item, playbackFile=str(relative), durationMs=duration,
-                    moveStartMs=0, moveStopMs=duration, releaseSource=item['id'])
+        result = dict(item, playbackFile=str(relative), durationMs=duration,
+                      moveStartMs=0, moveStopMs=duration, releaseSource=item['id'])
+        if item.get('_flightSizeProfile') == 'bailong-left-v1':
+            # The fixed source has 273 frames / 9100ms. Keep the source pose
+            # time when a release loop starts partway through that artwork.
+            first = profile.get('sourceFirstFrame')
+            if not isinstance(first, int) or not 0 <= first < 273:
+                return item
+            result['_flightSourceStartMs'] = first * 9100 / 273
+        return result
     except (OSError, ValueError, TypeError, AttributeError):
         return item
 
@@ -133,9 +141,6 @@ class PresentationClock:
                 self.waiting = False
                 self.blocked_since = None
             return
-        if self.blending:
-            self.blend_elapsed = min(self.blend_duration, self.blend_elapsed + dt)
-            return
         target = self.elapsed + dt
         position = self.offset + target
         cycle = 0
@@ -153,6 +158,8 @@ class PresentationClock:
             self.blocked_since = now
         if not self.stalled:
             self.blocked_since = None
+            if self.blending:
+                self.blend_elapsed = min(self.blend_duration, self.blend_elapsed + dt)
             if self.loop_range is not None:
                 self.looped = cycle != self.loop_cycle
                 self.loop_cycle = cycle
@@ -161,21 +168,27 @@ class PresentationClock:
             self.finished = self.loop_range is None and target >= self.length
 
 
-def pose_pixmap(frame, item, size, *, mirror=False):
+def canvas_padding(size):
+    """Rendering-only overscan; the menu size still defines the character canvas."""
+    return round(size * .25)
+
+
+def pose_pixmap(frame, item, size, *, mirror=False, position_ms=0., padding=0):
     """将素材锚点、缩放和偏移固化到同一个窗口坐标系；仅 GUI 线程调用。"""
     from PySide6.QtCore import QRectF, Qt
     from PySide6.QtGui import QPixmap, QPainter
-    result = QPixmap(size, size)
+    result = QPixmap(size + 2 * padding, size + 2 * padding)
     result.fill(Qt.GlobalColor.transparent)
     if frame is None:
         return result
-    scale, offset = item.get('renderScale', 1.), item.get('renderOffset', [0, 0])
+    scale, offset = flight_render_geometry(item, position_ms)
     width = size * scale
     target = QRectF((size - width) / 2 + size * offset[0], size - width + size * offset[1], width, width)
     painter = QPainter(result)
+    painter.translate(padding, padding)
     painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
     if mirror:
-        painter.translate(2 * target.center().x(), 0)
+        painter.translate(size if item.get('_flightSizeProfile') else 2 * target.center().x(), 0)
         painter.scale(-1, 1)
     painter.drawPixmap(target, frame, QRectF(frame.rect()))
     painter.end()
@@ -202,6 +215,38 @@ def pose_bridge(source, target):
 
 
 _POSE_BRIDGE_UNSET = object()
+
+
+# Only the pinned built-in clip is corrected; imported packages own their
+# presentation metadata even when they happen to reuse a movement action ID.
+_LEFT_FLIGHT_SOURCE_KEY = '084e6080b23112acad75d0f25a5d2a4e96bf5a0cffad6e490f87881b070d4148'
+
+
+def calibrate_flight_sizes(manifest):
+    """Attach artwork normalization in memory; never change menu size or source files."""
+    for item in manifest.get('movementAnimations', []):
+        if not item.get('_assetRoot') and release_source_key(item) == _LEFT_FLIGHT_SOURCE_KEY:
+            item['_flightSizeProfile'] = 'bailong-left-v1'
+    return manifest
+
+
+def flight_render_geometry(item, position_ms=0.):
+    """Known source-pose correction, not a frame/silhouette-dependent auto zoom.
+
+    The left artwork shrinks its head/body while turning sideways. Normalize
+    that section at 1.30 on a padded canvas; leave the already full-size right
+    clip alone. Authored ramps follow the source's takeoff/return, so expanding
+    the standing frames never clips their horns. No pixels are read here.
+    """
+    scale, offset = item.get('renderScale', 1.), item.get('renderOffset', [0, 0])
+    if item.get('_flightSizeProfile') != 'bailong-left-v1':
+        return scale, offset
+    position = position_ms + item.get('_flightSourceStartMs', 0.)
+    enter = max(0., min(1., (position - 2500.) / 625.))
+    leave = max(0., min(1., (6700. - position) / 1000.))
+    weight = min(enter, leave)
+    weight = weight * weight * (3 - 2 * weight)
+    return scale + (1.30 - scale) * weight, offset
 
 
 def blend_pose(source, target, alpha, bridge=_POSE_BRIDGE_UNSET):

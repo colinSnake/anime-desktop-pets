@@ -15,7 +15,7 @@ HOME = tempfile.TemporaryDirectory(prefix='dragon-real-adapter-')
 os.environ.update(HOME=HOME.name, BAILONG_DATA_DIR=HOME.name, QT_QPA_PLATFORM='offscreen', BAILONG_CODEX='/usr/bin/false')
 sys.path[:0] = [str(ROOT / 'apps/pet-runtime/pets'), str(ROOT / 'apps/pet-runtime/bailong'), str(ROOT / '.local/pet-build/generated-source/app')]
 from PIL import Image
-from PySide6.QtCore import QCoreApplication, QEvent, QTimer
+from PySide6.QtCore import QCoreApplication, QEvent, QTimer, QPoint, QPointF, Qt
 from PySide6.QtWidgets import QApplication
 from dragon_instances import InstanceController, InstanceStore
 from dragon_pet_helper import _factory
@@ -84,7 +84,8 @@ class RealAdapterTests(unittest.TestCase):
     def test_host_size_matches_context_menu_and_context_size_survives_restart(self):
         window = self.start()
         self.controller.set_preferences('first', dict(size=128))
-        self.assertEqual(window.width(), 128); self.assertEqual(window.size_percent, 50)
+        self.assertEqual(window.logical_size, 128); self.assertEqual(window.size_percent, 50)
+        self.assertEqual(window.width(), 192); self.assertEqual(window.render_margin, 32)
         menu = window.context_menu()
         sizes = next(action.menu() for action in menu.actions() if action.text() == '桌宠大小')
         self.assertEqual([a.text() for a in sizes.actions() if a.isChecked()], ['50%（128 × 128）'])
@@ -92,13 +93,136 @@ class RealAdapterTests(unittest.TestCase):
         self.assertEqual(self.controller.definitions['first']['preferences']['size'], 384)
         self.assertEqual(self.controller.definitions['second']['preferences']['size'], 256)
         self.controller.stop('first'); spin(lambda: 'first' not in self.controller.sessions)
-        self.assertEqual(self.start().width(), 384)
+        self.assertEqual(self.start().logical_size, 384)
+
+    def test_padding_preserves_logical_position_through_resize_drag_and_restart(self):
+        from PySide6.QtGui import QMouseEvent
+        area=APP.primaryScreen().availableGeometry()
+        anchor=area.topLeft()+QPoint(60,50)
+        self.controller.set_preferences('first', dict(x=anchor.x(),y=anchor.y(),scheduledActivity=False,movement=False))
+        window=self.start()
+        self.assertEqual(window.body_geometry().topLeft(),anchor)
+        for percent in (50,150,100):
+            window.set_size_percent(percent)
+            self.assertEqual(window.body_geometry().topLeft(),anchor)
+            self.assertEqual(window.width(),window.logical_size+2*window.render_margin)
+        anchor+=QPoint(20,30)
+        window.move(anchor-QPoint(window.render_margin,window.render_margin))
+        window.dragging=True
+        event=QMouseEvent(QEvent.Type.MouseButtonRelease,QPointF(80,80),QPointF(anchor),
+                          Qt.MouseButton.LeftButton,Qt.MouseButton.NoButton,Qt.KeyboardModifier.NoModifier)
+        window.mouseReleaseEvent(event)
+        saved=self.controller.definitions['first']['preferences']
+        self.assertEqual((saved['x'],saved['y']),(anchor.x(),anchor.y()))
+        self.assertEqual(saved['size'],256)
+        self.controller.stop('first');spin(lambda:'first' not in self.controller.sessions)
+        window=self.start()
+        self.assertEqual(window.body_geometry().topLeft(),anchor)
+        # Transparent overscan may cross the work-area edge; the logical body may not.
+        window.move(window.constrained_position(QPoint(area.left()-999,area.bottom()+999)))
+        self.assertEqual(window.body_geometry().left(),area.left())
+        self.assertEqual(window.body_geometry().bottom(),area.bottom())
+
+    def release_flick(self, window):
+        from PySide6.QtGui import QMouseEvent
+        window.manifest['movementAnimations']=[dict(window.idles[0],id='move02',
+            sourceFacing='right',moveStartMs=0,moveStopMs=250)]
+        window.behavior.begin_drag()
+        now=window.behavior.clock()
+        window.behavior.drag_samples.clear()
+        window.behavior.drag_samples.extend([(now-.1,window.x()-40,window.y()+20),
+                                             (now,window.x(),window.y())])
+        window.behavior.drag_distance=45
+        window.dragging=True
+        event=QMouseEvent(QEvent.Type.MouseButtonRelease,QPointF(80,80),QPointF(window.pos()),
+                         Qt.MouseButton.LeftButton,Qt.MouseButton.NoButton,Qt.KeyboardModifier.NoModifier)
+        window.mouseReleaseEvent(event)
+
+    def test_release_position_save_does_not_cancel_flick_or_reset_pose_clock(self):
+        window=self.start()
+        self.release_flick(window)
+        self.assertIsNotNone(window.behavior.release_spring)
+        self.assertEqual(window.mode,'autonomous-motion')
+        spring=window.behavior.release_spring;clock=window.presentation
+        saved=self.controller.definitions['first']['preferences']
+        self.assertEqual((saved['x'],saved['y']),
+                         (window.body_geometry().x(),window.body_geometry().y()))
+        self.controller.set_preferences('first',{})
+        self.assertIs(window.behavior.release_spring,spring)
+        self.assertIs(window.presentation,clock)
+        spin(lambda:spring.elapsed>0)
+        self.assertIs(window.behavior.release_spring,spring)
+
+    def test_host_resize_write_failure_restores_live_anchor_not_old_saved_position(self):
+        window=self.start()
+        area=APP.primaryScreen().availableGeometry()
+        self.controller.set_preferences('first',dict(size=128,x=area.left()+20,y=area.top()+20))
+        window.move(window.constrained_position(QPoint(area.right(),area.bottom())))
+        anchor=window.body_geometry().topLeft()
+        original=copy.deepcopy(self.controller.definitions['first']['preferences'])
+        with patch.object(self.store,'save',side_effect=OSError('synthetic disk failure')):
+            with self.assertRaises(OSError):
+                self.controller.set_preferences('first',dict(size=384))
+        self.assertEqual(window.logical_size,128)
+        self.assertEqual(window.body_geometry().topLeft(),anchor)
+        self.assertEqual(self.controller.definitions['first']['preferences'],original)
+
+    def test_resize_interrupts_old_coordinate_motion_before_changing_padding(self):
+        window=self.start()
+        self.release_flick(window)
+        self.assertIsNotNone(window.behavior.release_spring)
+        anchor=window.body_geometry().topLeft()
+        window.set_size_percent(50)
+        self.assertIsNone(window.behavior.release_spring)
+        self.assertEqual(window.mode,'idle')
+        self.assertEqual(window.body_geometry().topLeft(),anchor)
+
+    def test_resize_during_held_drag_rebases_pointer_and_velocity_samples(self):
+        from PySide6.QtGui import QCursor
+        window=self.start()
+        window.origin=window.pos();window.press_pos=QPoint(1,1);window.dragging=True
+        window.behavior.begin_drag();window.behavior.drag_distance=80
+        anchor=window.body_geometry().topLeft()
+        window.set_size_percent(50)
+        self.assertEqual(window.body_geometry().topLeft(),anchor)
+        self.assertEqual(window.origin,window.pos())
+        self.assertEqual(window.press_pos,QCursor.pos())
+        self.assertEqual(window.behavior.drag_origin,(window.x(),window.y()))
+        self.assertEqual(window.behavior.drag_distance,0)
+        self.assertFalse(window.behavior.release_drag())
+        window.dragging=False
+
+    def test_explicit_host_position_change_interrupts_old_motion(self):
+        window=self.start();self.release_flick(window)
+        self.assertIsNotNone(window.behavior.release_spring)
+        area=APP.primaryScreen().availableGeometry()
+        anchor=area.topLeft()+QPoint(40,40)
+        self.controller.set_preferences('first',dict(x=anchor.x(),y=anchor.y()))
+        self.assertIsNone(window.behavior.release_spring)
+        self.assertEqual(window.mode,'idle')
+        self.assertEqual(window.body_geometry().topLeft(),anchor)
+
+    def test_failed_resize_during_drag_rebases_to_restored_live_anchor(self):
+        window=self.start()
+        self.controller.set_preferences('first',dict(size=128))
+        area=APP.primaryScreen().availableGeometry()
+        window.move(window.constrained_position(QPoint(area.right(),area.bottom())))
+        anchor=window.body_geometry().topLeft()
+        window.dragging=True;window.behavior.begin_drag()
+        with patch.object(self.store,'save',side_effect=OSError('synthetic disk failure')):
+            window.set_size_percent(150)
+        self.assertEqual(window.logical_size,128)
+        self.assertEqual(window.body_geometry().topLeft(),anchor)
+        self.assertEqual(window.origin,window.pos())
+        self.assertEqual(window.behavior.drag_origin,(window.x(),window.y()))
+        self.assertEqual(window.behavior.drag_distance,0)
+        window.dragging=False
 
     def test_custom_size_does_not_make_nearest_menu_item_a_noop(self):
         window = self.start()
         self.controller.set_preferences('first', dict(size=321))
         window.set_size_percent(125)
-        self.assertEqual(window.width(), 320)
+        self.assertEqual(window.logical_size, 320)
         self.assertEqual(self.controller.definitions['first']['preferences']['size'], 320)
 
     def test_instance_size_rejects_values_outside_50_to_150_percent(self):
@@ -106,7 +230,7 @@ class RealAdapterTests(unittest.TestCase):
         for size in (127, 385, 512):
             with self.assertRaises(ValueError):
                 self.controller.set_preferences('first', dict(size=size))
-        self.assertEqual(window.width(), 256)
+        self.assertEqual(window.logical_size, 256)
 
     def test_context_behavior_and_fullscreen_changes_persist(self):
         window = self.start()
@@ -144,9 +268,12 @@ class RealAdapterTests(unittest.TestCase):
     def test_preference_write_failure_rolls_back_window_and_registry(self):
         window = self.start()
         original = copy.deepcopy(self.controller.definitions['first']['preferences'])
+        anchor = window.body_geometry().topLeft()
         with patch.object(self.store, 'save', side_effect=OSError('synthetic disk failure')):
             window.set_size_percent(150)
-        self.assertEqual(window.width(), original['size'])
+        self.assertEqual(window.logical_size, original['size'])
+        self.assertEqual(window.body_geometry().topLeft(), anchor)
+        self.assertEqual(window.width(), original['size']+2*window.render_margin)
         self.assertEqual(self.controller.definitions['first']['preferences'], original)
         self.assertIn('保存窗口偏好失败', self.controller.sessions['first'].error)
 

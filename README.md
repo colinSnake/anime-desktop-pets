@@ -12,12 +12,13 @@ or `app.asar`. This is not an official product or plugin for any of these platfo
 **GitHub topics:** `desktop-pet`, `anime`, `macos`, `codex`, `claude`, `deepseek`, `grok`
 
 > **Status: local development prototype.** The default build packages the locally enhanced Bailong
-> macOS pet as a separate helper, with 35 character animations. Helper `dragon.30` rotates through all
+> macOS pet as a separate helper, with 35 character animations. The current working-tree physics estimates release velocity with a recency-weighted trail fit and applies drag during the brief release pause. Restitution is a fixed material property; floor friction is bounded by normal impact impulse, while side/top edges are frictionless. The existing smooth large-screen fallback is unchanged. The daily scheduler rotates through all
 > idle and interaction differences; work differences play only for tasks or from their manual menu.
 > Helper `dragon.22` requires both
 > at least 24px of drag displacement and 280px/s release speed before a flick triggers a hop; gentle
 > drags stay at the drop position. Drag pose decisions are sampled at most every 50ms. Version 0.6.10 shares a
-> process-wide pixel-cache budget and decode gate across pet instances. Version 0.6.9 reuses one
+> process-wide pixel-cache budget and decode gate across pet instances; `dragon.31` prioritizes current
+> animation frames over prefetch work. Version 0.6.9 reuses one
 > measured alpha-bound pose bridge throughout each transition, reducing per-frame pixel scans.
 > Version 0.6.8 added complete autonomous action rotation on top of screen-scale
 > gravity and damped edge rebounds after release, settling back into idle without an extra landing clip.
@@ -27,9 +28,11 @@ or `app.asar`. This is not an official product or plugin for any of these platfo
 > following of existing Codex tasks, original poster generation, and an
 > applied background are still not implemented; real desktop interaction requires manual acceptance.
 
-### Drag/release visual continuity (dragon.30)
+### Drag/release visual continuity (dragon.32)
 
-Returning from a drag or completed movement to default idle now uses a **280ms eased crossfade**, starting only when the idle frame is ready. The visible composed pose is retained while decoding; a new drag interrupts from that visible composite. Drag-related transitions keep the selected display size and existing per-clip calibration: no temporary zoom is inferred from a tail, wing or feather's alpha bounds. Natural pose silhouettes still differ; this is not generated in-between animation. Other transitions retain 160ms, Reduce Motion bypasses fades, and the shared pixel budgets are unchanged.
+Returning from a drag or completed movement to default idle now uses a **280ms eased crossfade**, starting only when the idle frame is ready. The target animation and crossfade advance together and both pause on a missing frame, so the target's first pose does not remain frozen throughout the fade. The visible composed pose is retained while decoding; a new drag interrupts from that visible composite. Drag-related transitions keep the selected display size and existing per-clip calibration: no temporary zoom is inferred from a tail, wing or feather's alpha bounds. Natural pose silhouettes still differ; this is not generated in-between animation. Other transitions retain 160ms, Reduce Motion bypasses fades, and the shared pixel budgets are unchanged.
+
+The transparent rendering box now has 25% padding on every side (1.5× the logical character canvas), without shrinking idle artwork. Built-in left-flight artwork is normalized to idle-like head/body size during side flight (scale 1.30), with smooth source-time compensation during takeoff/return; the already full-size right flight is retained rather than shrunk to fit its wings/tail. Held-drag flight, autonomous/manual movement and release loops share this correction. The right-click size setting remains the only user-controlled overall scale; floor bounds, bubbles and saved positions use the logical character canvas. No per-frame alpha-bound fitting is performed. Imported packages retain their authored presentation. Decoded-frame cache budgets remain unchanged, but composed canvases are larger; this is not a claim of unchanged RSS/CPU.
 
 ## App identity and pet character
 
@@ -58,13 +61,14 @@ Quota refresh uses the existing read-only Codex CLI adapter and runs only when e
 
 ## Autonomous activity (0.5.1)
 
-- Every 12–24 seconds of eligible idle time, the pet silently rotates through the complete idle and interaction pool; short movement remains a separate autonomous branch.
+- Every 12–24 seconds of eligible idle time, the pet silently rotates through all interaction and idle clips, normally two interactions followed by one idle clip; per-category shuffled queues preserve eventual coverage. If screen bounds prevent an autonomous move, that turn falls back to a regular animation. Work clips remain excluded; short movement remains a separate autonomous branch.
 - All 15 interaction and 6 idle clips are in the daily rotation. Work clips are reserved for active tasks or their manual menu; they do not appear during idle scheduling.
 - The enhanced helper uses left/right walk, run and fly clips. Position changes only between each clip’s movement start/stop times; the pet stays at the bounded endpoint during the closing poses. A 25-action compatibility catalog in the enhanced code retains the older hop/dash presets; the unmodified upstream app is separate.
 - Gentle dragging uses the default neutral pose; clear motion selects directional walk/run/fly with 50ms decision throttling and hysteresis. While held, only the active movement segment loops (no standing preparation or tired closing poses); an 80ms stop returns to neutral at the next pose update.
-- A flick requires at least 24 logical pixels of displacement and 280px/s in the latest 150ms, including any pause before release. Gentle, slow, short, or held-then-released drags stay exactly at the drop position and return directly to default idle—never the legacy landing/tired-flight clip, including when movement or Reduce Motion disables effects. A deliberate flick retains screen-bounded gravity/rebounds; each deliberate release randomly chooses directional running (chasing the feather) or flight. The selected active movement segment loops on the same presentation clock until the bounce settles, then returns directly to default idle; no tired closing pose or full entrance transition is replayed per loop. Independent 50/50 draws may repeat (run, run, fly is valid); there is no preference menu. Helper `dragon.30` uses four derived 384px release-only loops with a 60ms local seam bridge, follows wall rebounds using a mirrored draw without restarting media, scales height/damping with flick strength, and replaces the high-screen timeout snap with a smooth floor finish. Source animations remain unchanged; the 48MiB/8MiB shared pixel budgets are unchanged. Gentle release still never triggers a bounce. The older three-hop trajectory remains only for a 25-action compatibility catalog.
+- A flick requires at least 24 logical pixels of displacement and 280px/s in the latest 150ms, including any pause before release. Gentle, slow, short, or held-then-released drags stay exactly at the drop position and return directly to default idle—never the legacy landing/tired-flight clip, including when movement or Reduce Motion disables effects. A deliberate flick retains screen-bounded gravity/rebounds; each deliberate release randomly chooses directional running (chasing the feather) or flight. The selected active movement segment loops on the same presentation clock until the bounce settles, then returns directly to default idle; no tired closing pose or full entrance transition is replayed per loop. Independent 50/50 draws may repeat (run, run, fly is valid); there is no preference menu. Helper `dragon.29` uses four derived 384px release-only loops with a 60ms local seam bridge, follows wall rebounds using a mirrored draw without restarting media, and replaces the high-screen timeout snap with a smooth floor finish. Source animations remain unchanged; the 48MiB/8MiB shared pixel budgets are unchanged. Gentle release still never triggers a bounce. The older three-hop trajectory remains only for a 25-action compatibility catalog.
 - Helper `dragon.26` keeps a deliberate throw alive independently of animation completion, including floating-point end-of-clip boundaries. It settles at the bottom of the current screen’s available work area (above the Dock when reserved), not at the drag origin or release height. Work-area floor changes are re-evaluated; gentle release still stays where dropped.
 - Helper `dragon.27` gives release-spring movement its own monotonic clock on the existing 16ms tick. Short WebP stalls and 160ms pose blends hold the old picture without freezing the throw; each physics update is capped at 50ms, with no backlog catch-up. Ordinary autonomous/manual movement remains synchronized to decoded frames. No new timer, full-animation preload, or pixel-budget increase is introduced.
+- Helper `dragon.34` treats a deliberate release as a two-axis ball throw: measured horizontal and vertical velocities feed gravity integration directly. Floor/ceiling and side-wall contacts resolve normal rebound separately from tangential friction; landing no longer clears horizontal velocity, and rolling friction brings it to rest. Gentle-release thresholds and pose-loop behavior are unchanged.
 - **Right-click → 自主活动** offers scheduled-animation and movement switches plus a preview action. Disabling scheduled actions still permits drag-release movement; disabling movement stops both movement types.
 - Dragging, tasks, open menus/dialogs, hidden state and Reduce Motion take priority. Autonomous playback never initiates quota reads, chat, sounds or speech bubbles.
 
@@ -72,7 +76,7 @@ The motion layer reuses the original artwork; it does not generate new character
 
 ## Ten extra animations (integrated)
 
-The [extra-animation guide](docs/扩展动作素材与运行时接入.md) covers local extraction, lossless WebP conversion and the verified build-time overlay. The enhanced helper now includes 6 idle + 15 interaction + 5 work + 3 special + 6 movement actions. Use **待机差分动画** for the new idle clips, or **自主活动 → 走路 / 跑步 / 飞行** for movement previews. Scheduled action selection rotates through the complete idle/interaction pool (work clips are excluded); the manual “表演一套动作” command cannot be diverted into movement. Pose transitions stabilize the visible character bounds during the 160ms bridge and return to the target’s native pose at the endpoint. Rendering uses per-frame WebP durations; ordinary movement freezes with unavailable frames, while release-spring physics advances independently with the previous pose held during short stalls. This is a short blend, not generated in-between character poses; desktop acceptance is still pending.
+The [extra-animation guide](docs/扩展动作素材与运行时接入.md) covers local extraction, lossless WebP conversion and the verified build-time overlay. The enhanced helper now includes 6 idle + 15 interaction + 5 work + 3 special + 6 movement actions. Use **待机差分动画** for the new idle clips, or **自主活动 → 走路 / 跑步 / 飞行** for movement previews. Scheduled action selection rotates through all idle/interaction clips in a 2:1 category cadence (work clips are excluded); infeasible scheduled movement falls back to this action pool. The manual “表演一套动作” command cannot be diverted into movement. Non-drag transitions may use a measured pose bridge; drag-related transitions preserve fixed per-clip calibration and do not resize by silhouette bounds. Rendering uses per-frame WebP durations; ordinary movement freezes with unavailable frames, while release-spring physics advances independently with the previous pose held during short stalls. This is a short blend, not generated in-between character poses; desktop acceptance is still pending.
 
 ## Pet asset library
 
@@ -88,7 +92,7 @@ library, with path/link/size/hash/full-frame checks and rollback on failure. Imp
   --library .local/pet-library/test-library list
 ```
 
-The 0.6.10 / `dragon.30` app includes multi-pet windows, a **Pet Manager** menu entry,
+The 0.6.10 / `dragon.35` app includes multi-pet windows, a **Pet Manager** menu entry,
 same-package clones and per-instance settings. When the PySide6 build runtime is available, the app build
 bundles the graphical library as a separate helper app, exposed as **Open Pet Asset Library** in the menu.
 It imports `.petpack` files, validates package details and previews animations. The default library is
@@ -98,7 +102,7 @@ library does not affect running pets. See the [library guide](docs/宠物库与�
 
 The current priority is to finish the Codex white-dragon workflow before adding other characters.
 Version 0.6.10 shares a 48 MiB QImage cache, an 8 MiB QPixmap cache and one active decode slot across
-pet players in the Qt controller process. Helper build 24 passes 81 runtime regressions and 14 frozen self-checks; gentle releases do not hop. Real desktop rotation, drag smoothness and long-running resource acceptance remain pending.
+pet players in the Qt controller process. Helper build 29 preserves these budgets, prioritizes active frame requests over prefetch and uses a 2:1 interaction-to-idle schedule. Real desktop rotation, drag smoothness and long-running resource acceptance remain pending.
 These are pixel-cache budgets, not a total RAM limit. Generated upstream sources use
 `.local/pet-build/generated-source/`; retained runtime artwork stays in `.local/pet-build/source/outputs/`.
 
@@ -326,22 +330,20 @@ The layout does not require introducing npm tooling. An optional studio, shared 
 and cross-language contracts can be added later when they have real consumers.
 See [architecture](docs/架构与设计决策.md) and [roadmap](docs/roadmap.md).
 
-## Validation snapshot (2026-11-02)
+The `dragon.35` follow-up makes preference application change-aware: saving a release position no longer cancels its fresh spring or restarts the pose clock. Actual size/position changes stop old-coordinate motion, and held drags rebase their pointer and velocity samples after resize/clamping. Failed preference writes restore the live logical anchor rather than a stale saved position.
 
-The current host is **0.6.10 / build 19**, with enhanced helper **build 24 / `dragon.30`** and
+## Validation snapshot (2026-11-03)
+
+The current host is **0.6.10 / build 19**, with enhanced helper **build 29 / `dragon.35`** and
 35 actions. Both have been rebuilt from the relocated Monorepo sources. Animation files remain
 external to the default helper; the host now embeds its own App icon, separate from pet artwork.
 The helper input fingerprints match the current sources, deep ad-hoc signature verification
 passes, and `dragonctl --check` reports `ok=true` without launching a normal pet session.
 
-The executed suite includes 83 Swift tests, 10 project checks, 5 App-icon export checks,
-8 build-input/staging checks, 13 acquisition/source checks, 15 extra-asset checks, 41 library
-checks, 5 offscreen library-UI checks, 120 runtime checks, 9 real-pet adapter checks, 37 controller
-checks, 21 IPC checks and isolated control integration. These suites were rerun before the Git
-baseline commit with no skipped suites. The existing `dragon.30` build previously passed its
-18-check frozen isolated self-test; this Git/documentation pass did not rebuild the apps or rerun
-that frozen self-test. “Real-pet adapter” means offscreen tests of the real adapter
-code with synthetic fixtures, not desktop acceptance.
+The `dragon.35` runtime and frozen-helper verification, plus the earlier `dragon.31` offscreen
+multi-pet decoder comparison, are recorded in [the verification log](docs/实际验证记录.md).
+The decoder comparison was not repeated for `dragon.35`. “Real-pet adapter” means offscreen tests of the real
+adapter code with synthetic fixtures, not desktop acceptance.
 
 The original 25 clips were previously audited across 2,529 frames and the ten extra clips across
 1,897 frames. This round sampled 12 clips for character-description prompts; it is not a new

@@ -3,6 +3,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -57,6 +58,29 @@ class BuildInputsTests(unittest.TestCase):
         (self.root / 'integrations/bailong/new.patch').unlink()
         (self.root / 'integrations/bailong/pet.py.patch').unlink()
         with self.assertRaisesRegex(ValueError, 'pet.py.patch'): module.check(self.app, self.root)
+
+    def test_unified_patch_hunk_line_counts_match_contents(self):
+        header = re.compile(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@')
+        for patch_path in sorted((ROOT / 'integrations/bailong').glob('*.patch')):
+            lines = patch_path.read_text().splitlines()
+            for index, line in enumerate(lines):
+                match = header.match(line)
+                if not match:
+                    continue
+                old_count = new_count = 0
+                for content in lines[index + 1:]:
+                    if content.startswith('@@ ') or content.startswith('--- '):
+                        break
+                    if content.startswith((' ', '-')):
+                        old_count += 1
+                    if content.startswith((' ', '+')):
+                        new_count += 1
+                    if content.startswith('\\'):
+                        continue
+                    self.assertTrue(content.startswith((' ', '+', '-')),
+                                    f'{patch_path.name}: malformed hunk line {content!r}')
+                self.assertEqual(old_count, int(match.group(2) or 1), patch_path.name)
+                self.assertEqual(new_count, int(match.group(4) or 1), patch_path.name)
 
 
 class BuildStagingTests(unittest.TestCase):

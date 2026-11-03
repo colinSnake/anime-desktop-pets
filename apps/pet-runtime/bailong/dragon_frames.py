@@ -50,14 +50,18 @@ def decode_image(source, index, size):
 
 
 class AnimationResourceBudget:
-    """Distribute process-wide pixel budgets and serialize decode work."""
+    """Share pixel budgets and prioritize requested frames over prefetch work."""
     def __init__(self, image_bytes=48 * 1024 * 1024,
                  pixmap_bytes=8 * 1024 * 1024, max_decoders=1):
         if image_bytes < 0 or pixmap_bytes < 0 or max_decoders < 1:
             raise ValueError('动画资源预算无效')
         self.image_bytes = image_bytes
         self.pixmap_bytes = pixmap_bytes
-        self.decode_slots = threading.BoundedSemaphore(max_decoders)
+        self.max_decoders = max_decoders
+        self._decode_condition = threading.Condition()
+        self._decode_waiters = []
+        self._decode_sequence = 0
+        self._active_decoders = 0
         self._lock = threading.RLock()
         self._stores = set()
         self._owner_thread = threading.get_ident()
@@ -89,6 +93,41 @@ class AnimationResourceBudget:
             store._set_budgets(image_share + (index < image_remainder),
                                pixmap_share + (index < pixmap_remainder))
 
+    def acquire_decode_slot(self, priority, valid):
+        with self._decode_condition:
+            ticket = [self._decode_sequence, priority, valid]
+            self._decode_sequence += 1
+            self._decode_waiters.append(ticket)
+            try:
+                while True:
+                    if not valid():
+                        return False
+                    best = min(self._decode_waiters,
+                               key=lambda waiting: (waiting[1](), waiting[0]))
+                    if best is ticket and self._active_decoders < self.max_decoders:
+                        self._decode_waiters.remove(ticket)
+                        self._active_decoders += 1
+                        return True
+                    self._decode_condition.wait(.05)
+            finally:
+                if ticket in self._decode_waiters:
+                    self._decode_waiters.remove(ticket)
+                    self._decode_condition.notify_all()
+
+    def release_decode_slot(self):
+        with self._decode_condition:
+            self._active_decoders -= 1
+            self._decode_condition.notify_all()
+
+    def notify_decode_waiters(self):
+        with self._decode_condition:
+            self._decode_condition.notify_all()
+
+    @property
+    def pending_decodes(self):
+        with self._decode_condition:
+            return len(self._decode_waiters)
+
     @property
     def active_stores(self):
         with self._lock:
@@ -112,6 +151,7 @@ class AnimationFrameStore:
         self.pixmap_bytes = 0
         self.condition = threading.Condition()
         self.active = None
+        self.active_frame_ready = False
         self.generation = 0
         self.closed = False
         self.errors = {}
@@ -137,6 +177,15 @@ class AnimationFrameStore:
         while self.pixmaps and self.pixmap_bytes > self.pixmap_budget:
             _, (_, cost) = self.pixmaps.popitem(last=False)
             self.pixmap_bytes -= cost
+        with self.condition:
+            self._refresh_active_frame_ready_locked()
+
+    def _refresh_active_frame_ready_locked(self):
+        if self.active is None:
+            self.active_frame_ready = False
+            return
+        key = self.active[:3]
+        self.active_frame_ready = key in self.frames or key in self.pixmaps
 
     def activate(self, path, size, count):
         with self.condition:
@@ -144,7 +193,11 @@ class AnimationFrameStore:
                 return
             self.generation += 1
             self.active = (str(path), size, 0, count)
+            key = (str(path), size, 0)
+            self.active_frame_ready = key in self.frames or key in self.pixmaps
             self.condition.notify_all()
+        if self.resource_budget is not None:
+            self.resource_budget.notify_decode_waiters()
 
     def request(self, path, size, index, count):
         with self.condition:
@@ -154,7 +207,11 @@ class AnimationFrameStore:
             if self.active is None or self.active[:2] != (name, size):
                 self.generation += 1
             self.active = (name, size, index, count)
+            key = (name, size, index)
+            self.active_frame_ready = key in self.frames or key in self.pixmaps
             self.condition.notify_all()
+        if self.resource_budget is not None:
+            self.resource_budget.notify_decode_waiters()
 
     def error(self, path):
         with self.condition:
@@ -165,6 +222,9 @@ class AnimationFrameStore:
         key = (str(path), size, index)
         if key in self.pixmaps:
             self.pixmaps.move_to_end(key)
+            with self.condition:
+                if self.active is not None and self.active[:3] == key:
+                    self.active_frame_ready = True
             return self.pixmaps[key][0]
         with self.condition:
             entry = self.frames.get(key)
@@ -174,6 +234,8 @@ class AnimationFrameStore:
             self.frames.move_to_end(key)
             self.stats['cache_hits'] += 1
             image, cost = entry
+            if self.active is not None and self.active[:3] == key:
+                self.active_frame_ready = True
         pixmap = QPixmap.fromImage(image)
         if cost <= self.pixmap_budget:
             while self.pixmaps and self.pixmap_bytes + cost > self.pixmap_budget:
@@ -226,23 +288,29 @@ class AnimationFrameStore:
                         break
                 name, size, index, generation = job
                 try:
-                    slot = (self.resource_budget.decode_slots
-                            if self.resource_budget is not None else None)
                     acquired = False
-                    if slot is not None:
-                        while not acquired:
-                            acquired = slot.acquire(timeout=.1)
-                            if not acquired:
-                                with self.condition:
-                                    if self.closed:
-                                        break
-                    if slot is not None and not acquired:
-                        break
+                    if self.resource_budget is not None:
+                        def valid_job():
+                            return self._job_relevant(name, size, index, generation)
+
+                        def job_priority():
+                            with self.condition:
+                                active = self.active
+                                return 0 if active is not None and active[:2] == (name, size) and active[2] == index else 1
+
+                        acquired = self.resource_budget.acquire_decode_slot(job_priority, valid_job)
+                        if not acquired:
+                            with self.condition:
+                                if self.closed:
+                                    break
+                                if generation != self.generation:
+                                    self.stats['stale'] += 1
+                            continue
                     try:
                         with self.condition:
                             if self.closed:
                                 break
-                            if generation != self.generation:
+                            if not self._job_relevant_locked(name, size, index, generation):
                                 self.stats['stale'] += 1
                                 continue
                         started = time.perf_counter()
@@ -253,8 +321,8 @@ class AnimationFrameStore:
                             decoder_name = name
                         image = decode_image(decoder, index, size)
                     finally:
-                        if slot is not None:
-                            slot.release()
+                        if self.resource_budget is not None:
+                            self.resource_budget.release_decode_slot()
                     elapsed = (time.perf_counter() - started) * 1000
                 except Exception as error:
                     with self.condition:
@@ -264,7 +332,7 @@ class AnimationFrameStore:
                 with self.condition:
                     if self.closed:
                         break
-                    if generation != self.generation:
+                    if not self._job_relevant_locked(name, size, index, generation):
                         self.stats['stale'] += 1
                         continue
                     cost = image.sizeInBytes()
@@ -277,6 +345,7 @@ class AnimationFrameStore:
                         self.cached_bytes -= old_cost
                     self.frames[(name, size, index)] = (image, cost)
                     self.cached_bytes += cost
+                    self._refresh_active_frame_ready_locked()
                     self.stats['decoded'] += 1
                     self.stats['decode_ms'] += elapsed
                     self.stats['peak_bytes'] = max(self.stats['peak_bytes'], self.cached_bytes)
@@ -285,12 +354,26 @@ class AnimationFrameStore:
             if decoder is not None:
                 decoder.close()
 
+    def _job_relevant_locked(self, name, size, index, generation):
+        active = self.active
+        if (self.closed or generation != self.generation or active is None
+                or active[:2] != (name, size)
+                or not active[2] <= index < min(active[3], active[2] + self.prefetch)):
+            return False
+        return index == active[2] or self.active_frame_ready
+
+    def _job_relevant(self, name, size, index, generation):
+        with self.condition:
+            return self._job_relevant_locked(name, size, index, generation)
+
     def close(self, wait=True):
         if wait and self.resource_budget is not None:
             self.resource_budget._on_owner_thread()
         with self.condition:
             self.closed = True
             self.condition.notify_all()
+        if self.resource_budget is not None:
+            self.resource_budget.notify_decode_waiters()
         if not wait:
             return
         self.thread.join()  # 正常关闭时等待当前一个解码操作结束，不遗留 Qt 对象后台访问。
