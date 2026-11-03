@@ -85,7 +85,7 @@ with open(sys.argv[1],'wb') as out:
     plistlib.dump(dict(CFBundleName='Dragon Codex Companion', CFBundleDisplayName='Dragon Codex Companion',
         CFBundleExecutable='DragonCompanion', CFBundleIdentifier='local.dragon.codex-companion',
         CFBundleIconFile='AppIcon.icns',
-        CFBundlePackageType='APPL', CFBundleShortVersionString='0.6.10', CFBundleVersion='19',
+        CFBundlePackageType='APPL', CFBundleShortVersionString='0.7.3', CFBundleVersion='23',
         LSMinimumSystemVersion='13.0', LSUIElement=True, NSHighResolutionCapable=True),out)
 PY
 codesign --force --sign - "$BUNDLE"
