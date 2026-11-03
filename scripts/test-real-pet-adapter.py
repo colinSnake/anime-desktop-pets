@@ -60,6 +60,209 @@ class RealAdapterTests(unittest.TestCase):
         spin(lambda: self.controller.sessions[identifier].phase == 'running')
         return self.controller.sessions[identifier].window
 
+    def install_work(self):
+        assets = self.root / 'assets'
+        work = dict(id='work01', file='idle.webp', durationMs=300, name='synthetic work')
+        value = json.loads((assets / '素材清单.json').read_text())
+        value['workAnimations'] = [work, dict(work, id='work02'), dict(work, id='work03')]
+        (assets / '素材清单.json').write_text(json.dumps(value))
+
+    def test_task_following_starts_work_and_returns_to_idle_without_quota(self):
+        from dragon_tasks import apply_task_snapshot, TaskSnapshot
+        self.install_work()
+        window = self.start()
+        with patch.object(window.behavior, 'motion_reduced', return_value=False):
+            apply_task_snapshot(window, TaskSnapshot('working', 1))
+            self.assertTrue(window.task_active)
+            self.assertEqual(window.mode, 'work-start')
+            self.assertEqual(window.current['id'], 'work01')
+            clock = window.presentation
+            apply_task_snapshot(window, TaskSnapshot('working', 2))
+            self.assertIs(window.presentation, clock)
+            self.assertFalse(window.quota_inflight)
+            apply_task_snapshot(window, TaskSnapshot('idle'))
+            self.assertFalse(window.task_active)
+            self.assertEqual(window.mode, 'idle')
+            self.assertFalse(window.bubble.isVisible())
+
+    def test_followed_task_preserves_original_work_and_idle_mix(self):
+        from dragon_tasks import apply_task_snapshot, TaskSnapshot
+        self.install_work(); window = self.start()
+        with patch.object(window.behavior, 'motion_reduced', return_value=False):
+            apply_task_snapshot(window, TaskSnapshot('working', 1))
+            from unittest.mock import patch as mock_patch
+            selected_mode = ['idle']
+            weights_seen = []
+
+            def choose(population, weights=None):
+                if population and isinstance(population[0], tuple):
+                    weights_seen.append(weights)
+                    return [next(entry for entry in population if entry[0] == selected_mode[0])]
+                return [population[0]]
+
+            with mock_patch.object(pet.random, 'choices', side_effect=choose):
+                window.idle()
+            self.assertEqual(window.mode, 'idle')
+            self.assertEqual(weights_seen[-1], [35, 65])
+            selected_mode[0] = 'working'
+            with mock_patch.object(pet.random, 'choices', side_effect=choose):
+                window.idle()
+            self.assertEqual(window.mode, 'working')
+            apply_task_snapshot(window, TaskSnapshot('idle'))
+            self.assertEqual(window.mode, 'idle')
+
+    def test_work_start_returns_once_to_outer_work_idle_scheduler(self):
+        from dragon_tasks import apply_task_snapshot, TaskSnapshot
+        self.install_work(); window = self.start()
+        with patch.object(window.behavior, 'motion_reduced', return_value=False):
+            apply_task_snapshot(window, TaskSnapshot('working', 1))
+        self.assertEqual(window.mode, 'work-start')
+        clock = window.presentation
+        clock.waiting = False
+        chooser = lambda population, weights=None: [next(
+            entry for entry in population if entry[0] == 'idle')]
+        with patch.object(clock, 'advance', side_effect=lambda now, ready: setattr(clock, 'finished', True)), \
+             patch.object(window.behavior, 'tick'), \
+             patch.object(pet.random, 'choices', side_effect=chooser) as choices:
+            window.animate()
+        self.assertEqual(window.mode, 'idle')
+        self.assertEqual(window.current['id'], 'idle')
+        self.assertEqual(choices.call_args.kwargs['weights'], [35, 65])
+
+    def test_following_task_never_restarts_work_opening_each_idle_cycle(self):
+        from dragon_tasks import apply_task_snapshot, TaskSnapshot
+        self.install_work(); window = self.start()
+        with patch.object(window.behavior, 'motion_reduced', return_value=False):
+            apply_task_snapshot(window, TaskSnapshot('working', 1))
+        calls = []
+        original = window.task_started
+        window.task_started = lambda: (calls.append('started'), original())[1]
+        window.idle()
+        self.assertEqual(calls, [])
+        self.assertNotEqual(window.mode, 'work-start')
+        self.assertIn(window.mode, ('working', 'idle'))
+
+    def test_provider_balance_has_amount_without_percent_progress_bar(self):
+        from PySide6.QtWidgets import QProgressBar
+        window = self.start()
+        window.bubble.quota([dict(name='TiMi CC', remaining=12.5, unit='USD', kind='balance', resetsAt=None)],
+                            __import__('datetime').datetime(2026, 11, 3, 12, 30))
+        self.assertFalse(window.bubble.findChildren(QProgressBar))
+        self.assertTrue(window.bubble.is_quota_result)
+        self.assertTrue(any('12.50' in label.toPlainText() for label in window.bubble._views()))
+        self.assertTrue(any('12:30' in label.toPlainText() for label in window.bubble._views()))
+        window.bubble.hide()
+
+    def test_quota_bubble_has_manual_refresh_and_two_subscription_rows(self):
+        from PySide6.QtWidgets import QProgressBar, QToolButton
+        window = self.start(); called = []
+        window.bubble.quota([
+            dict(name='5小时', remaining=76, resetsAt=1793463780),
+            dict(name='一周', remaining=21, resetsAt=1793816400),
+        ], refresh=lambda: called.append(True))
+        bars = window.bubble.findChildren(QProgressBar)
+        self.assertEqual(len(bars), 2)
+        self.assertEqual([bar.value() for bar in bars], [76, 21])
+        button = window.bubble.findChild(QToolButton)
+        self.assertIsNotNone(button)
+        button.click()
+        self.assertEqual(called, [True])
+        window.bubble.hide()
+
+    def test_observer_diagnostics_contain_only_aggregate_state(self):
+        from dragon_tasks import apply_task_snapshot, TaskSnapshot, write_diagnostics
+        window = self.start(); window.dragging = True
+        with patch.object(window.behavior, 'motion_reduced', return_value=False):
+            apply_task_snapshot(window, TaskSnapshot('working', 2))
+        target = self.root / 'observer.json'
+        write_diagnostics(target, TaskSnapshot('working', 2), [window])
+        value = json.loads(target.read_text())
+        self.assertEqual(value['activeCount'], 2)
+        self.assertEqual(value['pets'][0]['blocked'], 'dragging')
+        self.assertIn('animation', value['pets'][0])
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn('turn_id', target.read_text())
+        window.dragging = False
+
+    def test_task_following_defers_pose_during_drag_and_quota(self):
+        from dragon_tasks import apply_task_snapshot, TaskSnapshot
+        self.install_work(); window = self.start()
+        with patch.object(window.behavior, 'motion_reduced', return_value=False):
+            for field in ('dragging', 'quota_inflight'):
+                setattr(window, field, True)
+                clock = window.presentation
+                apply_task_snapshot(window, TaskSnapshot('working', 1))
+                self.assertIs(window.presentation, clock)
+                self.assertFalse(window.task_active)
+                self.assertFalse(getattr(window, '_followed_task_active', False))
+                setattr(window, field, False)
+                apply_task_snapshot(window, TaskSnapshot('working', 1))
+                self.assertEqual(window.mode, 'work-start')
+                apply_task_snapshot(window, TaskSnapshot('idle'))
+
+    def test_task_following_waits_for_release_spring_and_manual_animation(self):
+        from dragon_tasks import apply_task_snapshot, TaskSnapshot
+        self.install_work(); window = self.start()
+        with patch.object(window.behavior, 'motion_reduced', return_value=False):
+            for mode, spring in (('autonomous-motion', object()), ('variant', None)):
+                window.mode = mode
+                window.behavior.release_spring = spring
+                clock = window.presentation
+                apply_task_snapshot(window, TaskSnapshot('working', 1))
+                self.assertIs(window.presentation, clock)
+                self.assertFalse(window.task_active)
+                self.assertTrue(window._task_pose_pending)
+                window.mode = 'idle'
+                window.behavior.release_spring = None
+                apply_task_snapshot(window, TaskSnapshot('working', 1))
+                self.assertEqual(window.mode, 'work-start')
+                apply_task_snapshot(window, TaskSnapshot('idle'))
+
+    def test_task_following_respects_reduced_motion_and_restores_when_disabled(self):
+        from dragon_tasks import apply_task_snapshot, TaskSnapshot
+        self.install_work(); window = self.start()
+        with patch.object(window.behavior, 'motion_reduced', return_value=True):
+            apply_task_snapshot(window, TaskSnapshot('working', 1))
+            self.assertFalse(window.task_active)
+            self.assertEqual(window.mode, 'idle')
+        with patch.object(window.behavior, 'motion_reduced', return_value=False):
+            apply_task_snapshot(window, TaskSnapshot('working', 1))
+            self.assertEqual(window.mode, 'work-start')
+            apply_task_snapshot(window, TaskSnapshot('disabled'))
+            self.assertFalse(window.task_active)
+            self.assertEqual(window.mode, 'idle')
+
+    def test_shared_monitor_uses_fixture_only_and_new_pet_joins_current_work(self):
+        from dragon_tasks import attach_task_follower
+        self.install_work()
+        lease = self.root / 'lease.json'
+        lease.write_text(json.dumps(dict(schemaVersion=1, enabled=True, observedAt=time.time())))
+        directory = self.root / 'codex/sessions/2020/01/01'; directory.mkdir(parents=True)
+        rollout = directory / 'rollout-fixture.jsonl'
+        rollout.write_text('{"type":"session_meta","payload":{"source":"vscode"}}\n'
+                           '{"type":"event_msg","payload":{"type":"task_started","turn_id":"test"}}\n')
+        monitor = None
+        try:
+            with patch.dict(os.environ, DRAGON_TASK_LEASE=str(lease), CODEX_HOME=str(self.root / 'codex')):
+                first = self.start()
+                monitor = attach_task_follower(first)
+                with patch.object(first.behavior, 'motion_reduced', return_value=False):
+                    spin(lambda: first.task_active)
+                    second = self.start('second')
+                    self.assertIs(attach_task_follower(second), monitor)
+                    with patch.object(second.behavior, 'motion_reduced', return_value=False):
+                        spin(lambda: second.task_active)
+                        with rollout.open('a') as stream:
+                            stream.write('{"type":"event_msg","payload":{"type":"task_complete","turn_id":"test"}}\n')
+                        spin(lambda: not first.task_active and not second.task_active)
+                        self.assertEqual(first.followed_task_state, 'idle')
+        finally:
+            if monitor:
+                monitor.close()
+                # Await only this bounded fixture worker before deleting its files.
+                monitor.executor.shutdown(wait=True)
+                del APP._dragon_task_monitor
+
     def test_real_first_frame_ready_and_instance_settings_are_isolated(self):
         first = self.start(); second = self.start('second')
         self.assertIsNotNone(first.displayed_frame)

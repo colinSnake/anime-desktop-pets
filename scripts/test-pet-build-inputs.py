@@ -38,6 +38,16 @@ class BuildInputsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'dragon_playback.py'):
             module.check(self.app, self.root)
 
+    def test_provider_quota_change_is_detected(self):
+        (self.root / 'apps/pet-runtime/bailong/dragon_quota.py').write_text('quota adapter changed')
+        with self.assertRaisesRegex(ValueError, 'dragon_quota.py'):
+            module.check(self.app, self.root)
+
+    def test_task_follower_change_is_detected(self):
+        (self.root / 'apps/pet-runtime/bailong/dragon_tasks.py').write_text('task reader changed')
+        with self.assertRaisesRegex(ValueError, 'dragon_tasks.py'):
+            module.check(self.app, self.root)
+
     def test_pre_monorepo_path_snapshot_is_rejected(self):
         old = {}
         for key, value in module.fingerprints(self.root).items():

@@ -7,7 +7,8 @@ from PySide6.QtCore import Qt, QSize, QRectF, QPointF, QPropertyAnimation, QEasi
 from PySide6.QtGui import (QFontDatabase, QFontMetricsF, QPainter, QColor,
                           QTextOption, QPainterPath, QPen, QPalette)
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QTextBrowser,
-                              QProgressBar, QPushButton, QMenu, QFrame, QSizePolicy,
+                              QProgressBar, QPushButton, QToolButton, QHBoxLayout,
+                              QMenu, QFrame, QLabel, QSizePolicy,
                               QProxyStyle, QStyle, QStyleOptionMenuItem, QStyleFactory,
                               QLayout)
 
@@ -138,7 +139,7 @@ class Bubble(QWidget):
         outer = margins.left() + margins.right()
         natural = max((QFontMetricsF(v.font()).horizontalAdvance(line)
                        for v in views for line in v.toPlainText().splitlines()), default=0)
-        minimum = 180 if self.kind in ('result', 'quota') else 128
+        minimum = 252 if self.kind == 'quota' else 180 if self.kind == 'result' else 128
         width = min(area.width() - 24, max(minimum, min(self.preferred_width, math.ceil(natural) + outer + 3)))
         width = max(80, width)
         chrome = margins.top() + margins.bottom() + self.layout.spacing() * max(0, self.layout.count() - 1)
@@ -231,28 +232,83 @@ class Bubble(QWidget):
         self.layout.addWidget(button, 0, Qt.AlignmentFlag.AlignRight)
         self.finish()
 
-    def quota(self, windows):
+    def quota(self, windows, refreshed_at=None, refresh=None):
         self.kind = 'quota'
         self.is_task_progress = False
         self.is_quota_result = True
-        self.configure_width(284)
+        is_balance = any(w.get('kind') == 'balance' for w in windows)
+        self.configure_width(316 if is_balance else 320)
         self.clear()
-        self.label('Codex 剩余额度', cap=24, title=True)
+        colors = card_colors(self)
+        header = QWidget(self)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(6)
+        title = QLabel('中转余额' if is_balance else 'Codex 额度', header)
+        title.setFont(system_font(10, bold=True))
+        title.setStyleSheet('color:'+colors['text']+';')
+        header_layout.addWidget(title)
+        header_layout.addStretch(1)
+        if refresh is not None:
+            button = QToolButton(header)
+            button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+            button.setAutoRaise(True)
+            button.setFixedSize(24, 24)
+            button.setToolTip('重新查询额度')
+            button.setAccessibleName('重新查询额度')
+            button.clicked.connect(lambda checked=False: refresh())
+            header_layout.addWidget(button)
+        self.layout.addWidget(header)
+        if is_balance:
+            window = next(w for w in windows if w.get('kind') == 'balance')
+            amount = FittedText(f"{window['remaining']:,.2f}", self, cap=38)
+            amount.setFont(system_font(23, bold=True))
+            amount.document().setDefaultFont(amount.font())
+            amount.setPalette(self.palette())
+            self.layout.addWidget(amount)
+            self.label(f"{window['name']} · {window['unit']}", cap=20)
+            if len(windows) > 1:
+                self.layout.addWidget(self.separator())
+                self.label('其他窗口', cap=18, title=True)
         for window in windows:
+            if window.get('kind') == 'balance' and is_balance:
+                continue
             value = window['remaining']
-            self.label(window['name'] + ' · ' + (f'剩余 {value:g}%' if value is not None else '暂未提供'), cap=42)
+            row = QWidget(self)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(4)
+            label = QLabel(window['name'], row)
+            label.setFont(system_font(9))
+            label.setStyleSheet('color:'+colors['text']+';')
+            row_layout.addWidget(label)
+            row_layout.addStretch(1)
+            remaining = QLabel(f"{value:g}% 剩余" if value is not None else '暂未提供', row)
+            remaining.setFont(system_font(9, bold=True))
+            remaining.setStyleSheet('color:'+colors['text']+';')
+            row_layout.addWidget(remaining)
+            self.layout.addWidget(row)
             bar = QProgressBar(self)
             bar.setRange(0, 100)
             bar.setValue(round(value) if value is not None else 0)
             bar.setTextVisible(False)
             bar.setFixedHeight(6)
-            colors = card_colors(self)
+            fill = '#35a36f' if value is not None and value >= 60 else '#d69a36' if value is not None and value >= 25 else '#d65c58'
             bar.setStyleSheet('QProgressBar {border:0;border-radius:3px;background:'+colors['separator']+';}'
-                              'QProgressBar::chunk {background:'+colors['accent']+';border-radius:3px;}')
+                              'QProgressBar::chunk {background:'+fill+';border-radius:3px;}')
             self.layout.addWidget(bar)
-            if window['resetsAt']:
-                self.label('重置：' + datetime.fromtimestamp(window['resetsAt']).strftime('%m月%d日 %H:%M'), cap=24)
+            if window.get('resetsAt'):
+                self.label('重置于 ' + datetime.fromtimestamp(window['resetsAt']).strftime('%m月%d日 %H:%M'), cap=20)
+        if refreshed_at:
+            self.label('查询于 ' + refreshed_at.strftime('%H:%M'), cap=18)
         self.finish()
+
+    def separator(self):
+        line = QFrame(self)
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFixedHeight(1)
+        line.setStyleSheet('QFrame {color:'+card_colors(self)['separator']+';}')
+        return line
 
 
 def reduced_motion():

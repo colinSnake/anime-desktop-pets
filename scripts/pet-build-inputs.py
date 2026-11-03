@@ -14,7 +14,7 @@ def fingerprints(root=ROOT):
              root / 'scripts/extra-animation-overlay.py', root / 'scripts/prepare-release-animations.py']
     paths += sorted(p for p in (root / 'integrations/bailong').iterdir() if p.is_file())
     paths += [root / 'apps/pet-runtime/bailong' / name for name in
-              ('dragon_frames.py', 'dragon_ui.py', 'dragon_behavior.py', 'dragon_playback.py')]
+              ('dragon_frames.py', 'dragon_ui.py', 'dragon_behavior.py', 'dragon_playback.py', 'dragon_tasks.py', 'dragon_quota.py')]
     paths += [root / 'apps/pet-runtime/pets' / name for name in
               ('dragon_instances.py', 'dragon_instance_ipc.py', 'dragon_pet_helper.py', 'pet_reference_lock.py', 'pet_library.py')]
     return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
@@ -34,7 +34,7 @@ def check(app, root=ROOT):
             raise ValueError('增强辅助程序缺少冻结可执行文件或 PyInstaller 归档检查器')
         listing = subprocess.run([str(viewer), '-r', '-b', str(executable)],
                                  check=True, capture_output=True, text=True).stdout
-        missing = [name for name in ('pet_reference_lock', 'pet_library') if name not in listing]
+        missing = [name for name in ('pet_reference_lock', 'pet_library', 'dragon_tasks', 'dragon_quota') if name not in listing]
         if missing:
             raise ValueError('增强辅助程序未冻结素材运行模块：' + ', '.join(missing))
     return metadata

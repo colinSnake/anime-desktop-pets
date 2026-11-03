@@ -16,6 +16,7 @@ public struct CompanionConfiguration: Codable, Equatable, Sendable {
     public var petImagePath = "pet/preview.png"
     public var petSize = 210.0
     public var hidePetInFullscreen = true
+    public var taskFollowingEnabled = true
     public var petBackend = "native"
     public var externalPetAppPath = ""
     public var externalPetAssetsPath = ""
@@ -27,7 +28,7 @@ public struct CompanionConfiguration: Codable, Equatable, Sendable {
         case schemaVersion, codexBundleIdentifier, codexAppPath, videoPath, holdAt
         case transitionStart, transitionEnd, launchTimeout, windowWaitTimeout, volume
         case playerMaxWidth, petEnabled, petImagePath, petSize, hidePetInFullscreen
-        case petBackend, externalPetAppPath, externalPetAssetsPath, themeEnabled
+        case petBackend, externalPetAppPath, externalPetAssetsPath, themeEnabled, taskFollowingEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -47,6 +48,7 @@ public struct CompanionConfiguration: Codable, Equatable, Sendable {
         petImagePath = try values.decode(String.self, forKey: .petImagePath)
         petSize = try values.decode(Double.self, forKey: .petSize)
         hidePetInFullscreen = try values.decode(Bool.self, forKey: .hidePetInFullscreen)
+        taskFollowingEnabled = try values.decodeIfPresent(Bool.self, forKey: .taskFollowingEnabled) ?? true
         petBackend = try values.decode(String.self, forKey: .petBackend)
         externalPetAppPath = try values.decode(String.self, forKey: .externalPetAppPath)
         externalPetAssetsPath = try values.decodeIfPresent(String.self, forKey: .externalPetAssetsPath) ?? ""

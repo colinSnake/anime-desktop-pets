@@ -89,7 +89,7 @@ struct DragonCompanionMain {
     }
 
     @MainActor private static func check(_ runtime: Runtime) async -> Bool {
-        var checks: [String: Any] = ["configuration": "valid", "theme": "disabled; awaiting original poster and explicit compatibility verification", "taskStatus": "not connected; no Codex task data read", "petBackend": runtime.configuration.petBackend]
+        var checks: [String: Any] = ["configuration": "valid", "theme": "disabled; awaiting original poster and explicit compatibility verification", "taskStatus": runtime.configuration.taskFollowingEnabled ? "local rollout following enabled for enhanced helper in launch/watch; check does not read sessions" : "disabled by configuration", "petBackend": runtime.configuration.petBackend]
         var ok = true
         do { checks["codexApp"] = try runtime.codexURL().path }
         catch { checks["codexApp"] = error.localizedDescription; ok = false }
@@ -119,7 +119,7 @@ struct DragonCompanionMain {
                     checks["petActions"] = catalog.actionCount
                     checks["petActionGroups"] = ["idle": catalog.idleCount, "interaction": catalog.interactionCount,
                                                 "work": catalog.workCount, "special": catalog.specialCount, "movement": catalog.movementCount]
-                    checks["pet"] = "full upstream animated pet; live Codex task following not connected"
+                    checks["pet"] = "full animated pet; task following requires enhanced helper in launch/watch"
                 }
             } catch { checks["externalPet"] = error.localizedDescription; ok = false }
         }

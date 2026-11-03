@@ -10,6 +10,16 @@ final class ConfigurationTests: XCTestCase {
     func testLegacyConfigurationDefaultsNewPetAssetPath() throws {
         let data = Data("{\"schemaVersion\":1,\"codexBundleIdentifier\":\"com.openai.codex\",\"codexAppPath\":\"\",\"videoPath\":\"media/startup.mp4\",\"holdAt\":11.3,\"transitionStart\":12.7,\"transitionEnd\":13.65,\"launchTimeout\":60,\"windowWaitTimeout\":30,\"volume\":1,\"playerMaxWidth\":1280,\"petEnabled\":true,\"petImagePath\":\"pet/preview.png\",\"petSize\":210,\"hidePetInFullscreen\":true,\"petBackend\":\"native\",\"externalPetAppPath\":\"\",\"themeEnabled\":false}".utf8)
         XCTAssertEqual(try CompanionConfiguration.decode(data).externalPetAssetsPath, "")
+        XCTAssertTrue(try CompanionConfiguration.decode(data).taskFollowingEnabled)
+    }
+    func testTaskFollowingCanBeDisabledAndRejectsInvalidType() throws {
+        var configuration = CompanionConfiguration()
+        configuration.taskFollowingEnabled = false
+        let data = try JSONEncoder().encode(configuration)
+        XCTAssertFalse(try CompanionConfiguration.decode(data).taskFollowingEnabled)
+        var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        fields["taskFollowingEnabled"] = "true"
+        XCTAssertThrowsError(try CompanionConfiguration.decode(JSONSerialization.data(withJSONObject: fields)))
     }
     func testOrderedTimings() {
         for values in [(0.0, 2.0, 3.0), (2, 1, 3), (1, 3, 3)] {

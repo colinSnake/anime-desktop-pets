@@ -5,6 +5,7 @@ import Foundation
 /// Swift host for the single Qt process that owns all real pet windows.
 @MainActor
 final class PetInstanceRuntime {
+    var taskFollowingAllowed = false
     private let runtime: Runtime
     private let profile: URL
     private let executable: URL
@@ -87,6 +88,7 @@ final class PetInstanceRuntime {
         child.currentDirectoryURL = executable.deletingLastPathComponent()
         var environment = ["BAILONG_DATA_DIR": profile.path]
         environment["BAILONG_PET_LIBRARY_DIR"] = runtime.petLibraryURL.path
+        environment["DRAGON_TASK_LEASE"] = taskFollowingAllowed ? runtime.state.appendingPathComponent("codex-task-lease.json").path : ""
         if let assetsURL = runtime.configuration.externalPetAssetsURL(relativeTo: runtime.resources) {
             environment["BAILONG_ASSETS_DIR"] = assetsURL.path
         }

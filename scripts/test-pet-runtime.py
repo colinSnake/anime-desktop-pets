@@ -19,7 +19,7 @@ os.environ.update(HOME=HOME.name, BAILONG_DATA_DIR=HOME.name, QT_QPA_PLATFORM='o
 sys.path[:0] = [str(ROOT / 'apps/pet-runtime/bailong'), str(ROOT / '.local/pet-build/generated-source/app')]
 from PIL import Image
 from PySide6.QtCore import QEvent
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 from dragon_frames import (AnimationFrameStore, AnimationResourceBudget,
                            LazyAnimationFrames, webp_frame_count, decode_image)
 from dragon_ui import Bubble, NativeMenu, FittedText
@@ -2252,10 +2252,11 @@ class QuotaBubbleTests(unittest.TestCase):
             {'name':'一周','remaining':83,'resetsAt':1793816400},
         ])
         APP.processEvents()
-        self.assertLessEqual(self.pet.bubble.width(),284)
-        self.assertIn('Codex 剩余额度',[v.toPlainText() for v in self.pet.bubble.findChildren(FittedText)])
+        self.assertLessEqual(self.pet.bubble.width(),320)
+        self.assertIn('Codex 额度',[v.text() for v in self.pet.bubble.findChildren(QLabel)])
         self.assertEqual(len(self.pet.bubble.findChildren(QProgressBar)),2)
-        self.assertTrue(any(v.toPlainText().startswith('重置：') for v in self.pet.bubble.findChildren(FittedText)))
+        self.assertTrue(any(v.toPlainText().startswith('重置于 ')
+                            for v in self.pet.bubble.findChildren(FittedText)))
         self.assertFalse(hasattr(self.pet,'usage'))
         self.assertFalse(hasattr(self.pet,'chat_controller'))
 
@@ -2268,12 +2269,12 @@ class QuotaBubbleTests(unittest.TestCase):
         self.pet.bubble.quota(windows)
         self.pet.bubble.fit_to_area(QRect(-200,40,220,420))
         APP.processEvents()
-        labels=[view.toPlainText() for view in self.pet.bubble.findChildren(FittedText)]
+        labels=[view.text() for view in self.pet.bubble.findChildren(QLabel)]
         self.assertLessEqual(self.pet.bubble.width(),196)
-        self.assertIn('5小时 · 剩余 62.5%',labels)
-        self.assertIn('一周 · 剩余 83%',labels)
-        self.assertTrue(all(view.horizontalScrollBar().maximum()==0
-                            for view in self.pet.bubble.findChildren(FittedText)))
+        self.assertIn('5小时',labels)
+        self.assertIn('62.5% 剩余',labels)
+        self.assertIn('一周',labels)
+        self.assertIn('83% 剩余',labels)
 
     def test_quota_bubble_position_stays_inside_the_selected_screen(self):
         from PySide6.QtCore import QPoint, QRect
@@ -2297,7 +2298,7 @@ class QuotaBubbleTests(unittest.TestCase):
         windows=[{'name':'5小时','remaining':62.5,'resetsAt':None}]
         with patch.object(self.pet.bubble_timer,'start') as start:
             self.pet.quota_ready(windows)
-        start.assert_called_once_with(12000)
+        start.assert_called_once_with(20000)
         self.assertTrue(self.pet.bubble_timer.isSingleShot())
         self.pet.dismiss_bubble()
         self.assertFalse(self.pet.bubble.isVisible())

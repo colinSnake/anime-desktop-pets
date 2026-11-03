@@ -23,8 +23,8 @@ SOURCE = ROOT.parent.parent / 'github/codex-pet/bailong-desktop-pet-macos'
 STAGE = LOCAL / 'generated-source'
 APP = LOCAL / 'dist/BailongPet.app'
 PYTHON = LOCAL / 'venv/bin/python'
-VERSION = 'dragon.35'
-BUNDLE_VERSION = '29'
+VERSION = 'dragon.38'
+BUNDLE_VERSION = '32'
 
 
 def digest(path):
@@ -82,7 +82,7 @@ def stage(source, bundle_assets=False):
     pet_source.write_text(pet_text.replace(
         default_assets,
         "ASSETS=Path(os.environ.get('BAILONG_ASSETS_DIR', ROOT/'outputs/白龙桌宠素材')).expanduser().resolve()", 1))
-    for name in ('dragon_frames.py', 'dragon_ui.py', 'dragon_behavior.py', 'dragon_playback.py'):
+    for name in ('dragon_frames.py', 'dragon_ui.py', 'dragon_behavior.py', 'dragon_playback.py', 'dragon_tasks.py', 'dragon_quota.py'):
         shutil.copy2(RUNTIME_BAILONG / name, STAGE / 'app' / name)
     for name in ('dragon_instances.py', 'dragon_instance_ipc.py', 'dragon_pet_helper.py', 'pet_reference_lock.py', 'pet_library.py'):
         shutil.copy2(RUNTIME_PETS / name, STAGE / 'app' / name)

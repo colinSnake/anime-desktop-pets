@@ -27,6 +27,7 @@ final class Coordinator: NSObject {
     private var movieID: UUID?
     private var workspaceObservers: [NSObjectProtocol] = []
     private var poll: Timer?
+    private var taskLeaseTimer: Timer?
     private var pendingSince = 0.0
     private var lastFrame: NSRect?
     private var stableFrames = 0
@@ -39,6 +40,8 @@ final class Coordinator: NSObject {
         diagnostics = Diagnostics(root: runtime.state); pet = PetController(runtime: runtime)
         multiPet = PetInstanceRuntime(runtime: runtime)
         super.init()
+        pet.taskFollowingAllowed = mode == .watch || mode == .launch
+        multiPet?.taskFollowingAllowed = mode == .watch || mode == .launch
         pet.onError = { [weak self] message in self?.diagnostics.record("pet.error \(message)") }
         pet.onHide = { [weak self] in _ = self?.handle(.init(.hide)) }
         pet.onDismiss = { [weak self] in _ = self?.handle(.init(.dismiss)) }
@@ -58,6 +61,10 @@ final class Coordinator: NSObject {
         if mode == .previewAnimation {
             play(frame: nil, pid: nil, ready: { true }); return
         }
+        refreshTaskLease()
+        taskLeaseTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshTaskLease() }
+        }
         let center = NSWorkspace.shared.notificationCenter
         workspaceObservers.append(center.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] n in
             guard let app = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
@@ -70,6 +77,16 @@ final class Coordinator: NSObject {
         if let existing = runningCodex() {
             observed(existing, alreadyRunning: true)
         } else if mode == .launch { launchCodex() }
+    }
+
+    private func refreshTaskLease(disabled: Bool = false) {
+        let enabled = !disabled && !paused && runtime.configuration.taskFollowingEnabled && runningCodex() != nil
+        let snapshot: [String: Any] = ["schemaVersion": 1, "enabled": enabled,
+                                      "observedAt": Date().timeIntervalSince1970]
+        guard let data = try? JSONSerialization.data(withJSONObject: snapshot) else { return }
+        let url = runtime.state.appendingPathComponent("codex-task-lease.json")
+        try? data.write(to: url, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     private func runningCodex() -> NSRunningApplication? {
@@ -182,12 +199,13 @@ final class Coordinator: NSObject {
             session.showPet()
             if !paused && (mode == .previewPet || (session.pid != nil && session.phase == .accompanying)) { showPetRuntime(near: lastFrame) }
         case .pause:
-            paused = true; poll?.invalidate(); poll = nil
+            paused = true; refreshTaskLease(disabled: true); poll?.invalidate(); poll = nil
             if let pid = session.pid { _ = session.finishAnimation(pid: pid) }
             movie?.finish(.skipped, immediate: true); movie = nil; hidePetRuntime()
         case .resume:
             guard paused else { return snapshot("已经在联动") }
             paused = false
+            refreshTaskLease()
             if mode == .previewPet { showPetRuntime(near: nil) }
             if mode == .watch || mode == .launch {
                 if let app = runningCodex() {
@@ -209,6 +227,8 @@ final class Coordinator: NSObject {
                         petState: multiPet?.state ?? pet.state, petError: multiPet?.lastError ?? pet.lastError)
     }
     func stop() {
+        taskLeaseTimer?.invalidate(); taskLeaseTimer = nil
+        refreshTaskLease(disabled: true)
         paused = true
         poll?.invalidate(); poll = nil; movie?.finish(.targetExited, immediate: true); movie = nil
         dismissPetRuntime()

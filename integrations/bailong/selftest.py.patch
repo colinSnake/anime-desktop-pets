@@ -18,12 +18,27 @@
          if '--quota-only' in sys.argv:
              from quota import read_quota,quota_windows
              windows=quota_windows(read_quota())
-@@ -37,58 +26,204 @@
+@@ -37,58 +26,219 @@
          from types import SimpleNamespace
          report.update(version=VERSION,frozen=bool(getattr(sys,'frozen',False)))
          app=QApplication([]);pet=Pet();pet.tick.stop()
 -        items=[pet.manifest['idle']]+pet.manifest.get('additionalIdleAnimations',[])+pet.variants+[pet.manifest[k] for k in ('dragAnimation','landingAnimation','quotaAnimation')]+[v for v in pet.work_slots if v]
 +        report['patchVersion']='@DRAGON_PATCH_VERSION@'
++        from dragon_tasks import Cursor,TaskSnapshot,apply_task_snapshot
++        cursor=Cursor((0,0))
++        cursor.feed(b'{"type":"session_meta","payload":{"source":"vscode"}}\n')
++        cursor.feed(b'{"type":"event_msg","payload":{"type":"task_started","turn_id":"fixture"}}\n')
++        assert cursor.supported and cursor.turns=={'fixture'}
++        cursor.feed(b'{"type":"event_msg","payload":{"type":"task_complete","turn_id":"other"}}\n')
++        assert cursor.turns=={'fixture'}
++        cursor.feed(b'{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"fixture"}}\n')
++        assert not cursor.turns
++        original_reduced=pet.behavior.motion_reduced
++        pet.behavior.motion_reduced=lambda:False
++        apply_task_snapshot(pet,TaskSnapshot('working',1));assert pet.task_active and pet.mode=='work-start'
++        apply_task_snapshot(pet,TaskSnapshot('idle'));assert not pet.task_active and pet.mode=='idle'
++        pet.behavior.motion_reduced=original_reduced
++        report['checks'].append('任务生命周期按turn_id去重，工作差分与待机切换；不读取真实会话或调用额度')
 +        def settle_first_frame():
 +            deadline=time.monotonic()+15
 +            while pet.waiting_first_frame:
@@ -135,11 +150,11 @@
 +        assert not any('对话模式' in text or '历史对话' in text for text in labels)
 +        assert [a.text() for a in menu.actions() if a.menu()]==['桌宠大小','自主活动','互动差分动画','工作差分动画','待机差分动画']
 +        from PySide6.QtWidgets import QProgressBar
-+        from dragon_ui import FittedText
 +        windows=quota_windows({'rateLimits':{'primary':{'usedPercent':20,'windowDurationMins':300},'secondary':{'usedPercent':35,'windowDurationMins':10080}}})
 +        pet.bubble.quota(windows);app.processEvents()
-+        assert pet.bubble.width()<=300 and len(pet.bubble.findChildren(QProgressBar))==2
-+        assert any('Codex 剩余额度' in label.toPlainText() for label in pet.bubble.findChildren(FittedText))
++        assert pet.bubble.width()<=340 and len(pet.bubble.findChildren(QProgressBar))==2
++        from PySide6.QtWidgets import QLabel
++        assert any(label.text()=='Codex 额度' for label in pet.bubble.findChildren(QLabel))
 +        pet.bubble.hide()
 +        report['checks'].append('移除对话/历史入口；右键额度展示为参考项目同款窄气泡与进度条')
 +        assert pet.mode=='idle'

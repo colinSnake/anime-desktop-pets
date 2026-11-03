@@ -58,6 +58,7 @@ private final class ExternalLaunchTicket { var cancelled = false }
 
 @MainActor
 final class PetController: NSObject {
+    var taskFollowingAllowed = false
     var onHide: (() -> Void)?
     var onDismiss: (() -> Void)?
     var onError: ((String) -> Void)?
@@ -203,6 +204,8 @@ final class PetController: NSObject {
         if let assetsURL = descriptor.assetsURL {
             options.environment = ProcessInfo.processInfo.environment.merging(["BAILONG_ASSETS_DIR": assetsURL.path]) { _, new in new }
         }
+        options.environment = ProcessInfo.processInfo.environment.merging(options.environment) { _, new in new }.merging(
+            ["DRAGON_TASK_LEASE": taskFollowingAllowed ? runtime.state.appendingPathComponent("codex-task-lease.json").path : ""]) { _, new in new }
         // 不传自动启动、查询或聊天参数；仅启动上游完整桌宠。
         NSWorkspace.shared.openApplication(at: descriptor.url, configuration: options) { [weak self, ticket] app, error in
             Task { @MainActor [weak self] in
