@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Naming/migration regressions. Install fixtures use temporary HOME and stub OS tools only."""
+"""App publication and lifecycle regressions with isolated HOME fixtures."""
 import importlib.util
 import os
 from pathlib import Path
@@ -49,22 +49,27 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual((target / 'marker').read_text(), 'new')
         self.assertEqual(archives, [])
 
-    def test_both_owned_names_are_archived_not_duplicated(self):
-        for name in (publisher.APP_NAME, publisher.LEGACY_APP_NAME):
-            bundle(self.build / name)
+    def test_publish_archives_only_current_bundle_name(self):
+        bundle(self.build / publisher.APP_NAME)
+        unrelated_name = bundle(self.build / 'Unrecognized.app')
         target, archives = publisher.publish(self.staged, self.build)
-        self.assertEqual(len(archives), 2)
-        self.assertFalse((self.build / publisher.LEGACY_APP_NAME).exists())
+        self.assertEqual(len(archives), 1)
+        self.assertTrue(unrelated_name.exists())
         self.assertEqual((target / 'marker').read_text(), 'new')
         self.assertTrue(all(cleaner.HOST_PATTERN.fullmatch(p.name) for p in archives))
 
-    def test_unrelated_legacy_rejected_before_any_move(self):
+    def test_unrecognized_bundle_name_is_not_touched(self):
         current = bundle(self.build / publisher.APP_NAME)
-        bundle(self.build / publisher.LEGACY_APP_NAME, identity='unrelated')
-        with self.assertRaises(ValueError): publisher.publish(self.staged, self.build)
-        self.assertEqual((current / 'marker').read_text(), 'old')
-        self.assertTrue(self.staged.exists())
-        self.assertFalse(list(self.build.glob('*.previous.*')))
+        unrelated = bundle(self.build / 'Unrecognized.app', identity='unrelated')
+        target, archives = publisher.publish(self.staged, self.build)
+        self.assertEqual((target / 'marker').read_text(), 'new')
+        self.assertEqual(len(archives), 1)
+        self.assertTrue(unrelated.exists())
+        self.assertTrue(current.exists())
+        self.assertFalse(self.staged.exists())
+        archives = list(self.build.glob('桌边小崽.previous.*.app'))
+        self.assertEqual(len(archives), 1)
+        self.assertEqual((archives[0] / 'marker').read_text(), 'old')
 
     def test_symlink_and_dangling_symlink_refused(self):
         link = self.build / publisher.APP_NAME
@@ -73,16 +78,15 @@ class PublicationTests(unittest.TestCase):
             with self.assertRaises(ValueError): publisher.publish(self.staged, self.build)
             self.assertTrue(link.is_symlink()); link.unlink()
 
-    def test_failed_publish_restores_both_prior_apps(self):
-        for name in (publisher.APP_NAME, publisher.LEGACY_APP_NAME): bundle(self.build / name)
+    def test_failed_publish_restores_prior_app(self):
+        bundle(self.build / publisher.APP_NAME)
         rename = os.rename
         def fail(source, target):
             if source == self.staged: raise OSError('synthetic publication failure')
             return rename(source, target)
         with patch.object(publisher.os, 'rename', side_effect=fail):
             with self.assertRaises(OSError): publisher.publish(self.staged, self.build)
-        for name in (publisher.APP_NAME, publisher.LEGACY_APP_NAME):
-            self.assertEqual((self.build / name / 'marker').read_text(), 'old')
+        self.assertEqual((self.build / publisher.APP_NAME / 'marker').read_text(), 'old')
         self.assertTrue(self.staged.exists())
         self.assertFalse(list(self.build.glob('*.previous.*')))
 
@@ -101,10 +105,11 @@ class PublicationTests(unittest.TestCase):
         owned = bundle(self.build / '桌边小崽.previous.20261104-120000-1.app')
         bundle(self.build / '桌边小崽.previous.20261104-120000-2.app', identity='other')
         bundle(self.build / publisher.APP_NAME)
-        legacy = bundle(self.build / 'Dragon Codex Companion.previous.20261104-120000-3.app')
+        unrecognized = bundle(self.build / 'Unrecognized.previous.20261104-120000-3.app')
         (self.build / '桌边小崽.previous.20261104-120000-4.app').symlink_to(owned)
         with patch.object(cleaner, 'HOST_HISTORY', self.build):
-            self.assertEqual(set(cleaner.candidates(helper=False)), {owned, legacy})
+            self.assertEqual(set(cleaner.candidates(helper=False)), {owned})
+        self.assertTrue(unrecognized.exists())
 
     def test_cleanup_without_candidates_does_not_scan_processes(self):
         with patch.object(cleaner.subprocess, 'run') as run:
@@ -144,18 +149,24 @@ class InstallFixtureTests(unittest.TestCase):
         self.assertFalse((self.home / 'Applications').exists())
         self.assertFalse((self.home / 'tool-calls').exists())
 
-    def test_install_migrates_old_name_and_agent_target(self):
-        bundle(self.home / 'Applications' / publisher.LEGACY_APP_NAME)
+    def test_install_rejects_unrecognized_agent_target(self):
         self.agent.parent.mkdir(parents=True)
         with self.agent.open('wb') as stream:
             plistlib.dump(dict(Label='local.dragon.codex-companion.watch', ProgramArguments=[
-                str(self.home / 'Applications' / publisher.LEGACY_APP_NAME / 'Contents/MacOS/DragonCompanion'), '--watch']), stream)
+                str(self.home / 'Applications' / 'Unrecognized.app' / 'Contents/MacOS/DragonCompanion'), '--watch']), stream)
+        result = self.run_script('install.sh', '--confirm')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('ownership mismatch', result.stderr)
+        self.assertFalse((self.home / 'Applications' / publisher.APP_NAME).exists())
+
+    def test_install_publishes_current_name_and_agent_target(self):
         result = self.run_script('install.sh', '--confirm')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse((self.home / 'Applications' / publisher.LEGACY_APP_NAME).exists())
+        destination = self.home / 'Applications' / publisher.APP_NAME
+        self.assertTrue((destination / 'Contents/Info.plist').is_file())
         with self.agent.open('rb') as stream: info = plistlib.load(stream)
-        self.assertEqual(info['ProgramArguments'][0], str(self.home / 'Applications' / publisher.APP_NAME / 'Contents/MacOS/DragonCompanion'))
-        self.assertEqual(len(list((self.home / 'Applications').glob('*.previous.*.app'))), 1)
+        self.assertEqual(info['ProgramArguments'][0], str(destination / 'Contents/MacOS/DragonCompanion'))
+        self.assertIn('bootstrap', (self.home / 'tool-calls').read_text())
 
     def test_install_refuses_same_label_with_unrelated_agent_executable(self):
         self.agent.parent.mkdir(parents=True)
@@ -166,18 +177,19 @@ class InstallFixtureTests(unittest.TestCase):
         self.assertIn('ownership mismatch', result.stderr)
         self.assertFalse((self.home / 'Applications' / publisher.APP_NAME).exists())
 
-    def test_uninstall_accepts_both_names_and_preserves_data(self):
-        for name in [publisher.APP_NAME, publisher.LEGACY_APP_NAME]: bundle(self.home / 'Applications' / name)
+    def test_uninstall_removes_only_current_app_and_preserves_data(self):
+        bundle(self.home / 'Applications' / publisher.APP_NAME)
+        unrelated = bundle(self.home / 'Applications' / 'Unrecognized.app')
         data = self.home / 'Library/Application Support/DragonCodexCompanion/keep.txt'
         data.parent.mkdir(parents=True); data.write_text('keep')
         result = self.run_script('uninstall.sh', '--confirm')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(list((self.home / '.Trash').glob('*.app'))), 2)
+        self.assertEqual(len(list((self.home / '.Trash').glob('*.app'))), 1)
+        self.assertTrue(unrelated.exists())
         self.assertEqual(data.read_text(), 'keep')
 
-    def test_uninstall_rejects_unrelated_legacy_before_moving_current(self):
-        current = bundle(self.home / 'Applications' / publisher.APP_NAME)
-        bundle(self.home / 'Applications' / publisher.LEGACY_APP_NAME, identity='other')
+    def test_uninstall_rejects_unrelated_current_app(self):
+        current = bundle(self.home / 'Applications' / publisher.APP_NAME, identity='other')
         result = self.run_script('uninstall.sh', '--confirm')
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(current.exists()); self.assertFalse((self.home / '.Trash').exists())

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish a verified host bundle; preserve compatible old names and roll back failed moves."""
+"""Publish the verified host bundle and roll back failed moves."""
 import argparse
 from datetime import datetime
 import os
@@ -8,7 +8,6 @@ import plistlib
 import time
 
 APP_NAME = '桌边小崽.app'
-LEGACY_APP_NAME = 'Dragon Codex Companion.app'
 BUNDLE_ID = 'local.dragon.codex-companion'
 
 
@@ -28,9 +27,8 @@ def publish(bundle, build_dir):
     target = build_dir / APP_NAME
     if bundle.resolve() == target.resolve():
         raise ValueError('Staging bundle must differ from the published app')
-    existing = [build_dir / name for name in (APP_NAME, LEGACY_APP_NAME)
-                if os.path.lexists(build_dir / name)]
-    # Validate all names first: never move one app then discover the other is unrelated.
+    existing = [target] if os.path.lexists(target) else []
+    # Validate the destination before moving it; unrelated paths are never considered.
     for path in existing:
         require_owned(path)
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S') + f'-{time.time_ns()}'

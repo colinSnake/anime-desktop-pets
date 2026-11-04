@@ -10,7 +10,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 HOST_HISTORY = ROOT / 'build'
 HELPER_HISTORY = ROOT / '.local/pet-build/previous'
-HOST_PATTERN = re.compile(r'^(?:桌边小崽|Dragon Codex Companion)\.previous\.\d{8}-\d{6}-\d+\.app$')
+HOST_PATTERN = re.compile(r'^桌边小崽\.previous\.\d{8}-\d{6}-\d+\.app$')
 HELPER_PATTERN = re.compile(r'^\d{8}-\d{6}$')
 
 

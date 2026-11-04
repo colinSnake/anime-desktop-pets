@@ -24,7 +24,7 @@
 
 最后更新：2026-11-04。当前桌边小崽应用 **0.7.10 / build 30**，增强辅助应用 **build 36 / `dragon.42`**。App文件名及系统显示名为「桌边小崽」；Bundle ID、内部可执行名和数据路径保持兼容。文稿文件夹与辅助功能权限需按新签名由用户确认，未替用户授权。
 
-- **2026-11-04 应用包名与启动响应**：构建包名和`CFBundleName/CFBundleDisplayName`从`Dragon Codex Companion`更名为「桌边小崽」，构建发布器会先验证新旧路径均属于本Bundle ID，再归档旧包；失败时恢复原路径。安装在临时HOME完成迁移回归，卸载覆盖新旧包名、LaunchAgent路径、无关App防护及用户数据保留。首次以新ad-hoc签名运行时系统重新要求文稿文件夹／辅助功能授权；不得代用户点击授权。真实打开曾暴露`ExternalPetDescriptor.inspect`在AppKit主线程同步扫描外部动作目录并被TCC阻塞，已改为单个后台utility校验任务；隐藏/退出期间丢弃结果，重复显示复用同一检查。构建版本0.7.10/build30；需用户在系统权限确认后再完成真实预览复测。证据见`docs/实际验证记录.md`。
+- **2026-11-04 应用命名与启动响应**：构建产物和`CFBundleName/CFBundleDisplayName`统一为「桌边小崽」。发布、清理、安装和卸载脚本只识别当前中文包路径，不迁移或删除其他名称的App；失败时恢复当前目标包。隔离HOME回归覆盖替换回滚、LaunchAgent路径、无关App防护及用户数据保留。真实打开曾暴露`ExternalPetDescriptor.inspect`在AppKit主线程同步扫描外部动作目录并被TCC阻塞，已改为单个后台utility校验任务；隐藏/退出期间丢弃结果，重复显示复用同一检查。构建版本0.7.10/build30；单宠预览、显隐和退出清理已复测，Codex与多屏等仍待验收。证据见`docs/实际验证记录.md`。
 
 - **2026-11-04 名称与菜单收敛**：先将文案统一为「桌边小崽」，继而按用户要求把App文件名、系统名称也统一；当前构建0.7.10/build30、helper36/dragon.42。Bundle ID／内部可执行／数据路径不迁移。单宠主菜单只显示／隐藏，多宠明确启停，动作差分归入预览，移除重复占位入口。真实预览发现256px窗口误判及`NSRunningApplication.hide()`无效，改为实际窗口识别和有界Qt控制协议；退出排空回归亦修复。此前0.7.9单宠显隐／恢复和退出真实验证通过。新名称ad-hoc签名令macOS文稿目录与辅助功能授权待用户确认；新启动的同步素材校验已移至utility线程，权限等待不应冻结AppKit。14项新名发布／迁移测试通过；最终全量重测与用户授权后预览结果见`docs/实际验证记录.md`。Codex未重启。
 
@@ -211,7 +211,7 @@ python3 scripts/build-pet-runtime.py build
 - **磁盘空间有限，每次构建新版本必须清理上一个构建版本，不得长期累积旧版 App 或完整备份。**
   构建前先清除已确认不再需要的历史构建；新版构建并验证成功后，清除本次被替换的旧版，默认只保留当前有效构建。
   构建失败时保留最后一个可用版本，不得为了省空间先删掉唯一可用产物。
-- 清理范围以本工程生成的旧版产物为准，重点检查 `build/桌边小崽.previous.*.app`、旧兼容名 `build/Dragon Codex Companion.previous.*.app`
+- 清理范围以本工程生成的旧版产物为准，重点检查 `build/桌边小崽.previous.*.app`
   和 `.local/pet-build/previous/`。现有构建脚本自动归档旧版不代表可以永久保留；每轮构建完成后必须检查并清理。
 - 仅清理已确认不再使用的临时打包目录与中间产物；先确认没有其他会话或构建进程正在使用，
   不得整体删除 `.local/`、`.build/` 或其他共享构建目录，也不得自动退出或强制结束正在运行的桌宠来清理文件。
@@ -262,7 +262,7 @@ python3 scripts/build-pet-runtime.py build
   [docs/实际验证记录.md](docs/实际验证记录.md) 为准；本文件保存入口和稳定约定，不替代详细记录。
 - 修改功能、命令或运行状态时同步双语 README 与相关文档；修改验证结论须有实际证据。
 - 用户可见产品称呼统一使用 **「桌边小崽」**；描述应用时用「桌边小崽应用」或「宿主应用」。
-  不再使用旧称；App文件名及CFBundleName/DisplayName统一为「桌边小崽」。Bundle ID、内部可执行文件、数据目录/配置键、Swift类型和历史命令标识保持兼容；旧App名称仅用于迁移兼容及历史记录。
+  App文件名及CFBundleName/DisplayName统一为「桌边小崽」。Bundle ID、内部可执行文件、数据目录/配置键、Swift类型和历史命令标识保持兼容。
 - 开工先检查 `git status`。未跟踪文件不等于临时文件，不得据此删除；保留已有工作。
   仅在用户明确要求时创建提交，不自动推送、清理或覆盖已有工作。不要在 Swift 业务代码中硬编码本机绝对路径。
 
@@ -332,7 +332,7 @@ python3 scripts/build-pet-runtime.py build
 - 同包多实例已接入：同一 `package.id + version` 允许多个实例ID，素材只读共享，实例偏好/位置/状态目录独立。
 - `clone_pet`、状态栏「创建小分身」、逐只/全部启停、尺寸调整和持久化已完成；克隆默认登记为停止状态。
 - 宿主恢复遵守默认最多3只的并发上限：先保留当前运行实例，再按剩余名额恢复启用实例，超额实例保持停止。
-- 已在迁移前目录 `/Users/ming/Documents/coding/mywebsite/dragon-codex-companion/build/Dragon Codex Companion.app` 完成构建；该历史路径现迁移至 `/Users/ming/Documents/coding/desktop-app/anime-desktop-pets`，
+- 项目曾在旧工作目录完成构建，源码现迁移至 `/Users/ming/Documents/coding/desktop-app/anime-desktop-pets`，
   通过 Swift/Qt/IPC 回归、项目总测试、签名检查和 `dragonctl --check`。
 - 当前未完成：真实桌面菜单与多屏/Space/焦点验收、素材激活/引用保护、全局资源预算和正式发布安装。
 - 参考工程仍为只读参考；不得修改 `/Users/ming/Documents/coding/github/codex-pet`，不得恢复桌宠聊天或历史 UI。
