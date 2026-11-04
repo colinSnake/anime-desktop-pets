@@ -10,15 +10,35 @@ public struct LaunchSession {
     public private(set) var phase: SessionPhase = .idle
     public private(set) var hidden = false
     public private(set) var dismissed = false
+    private var awaitingProcess = false
     public init() {}
 
+    /// Reserve the startup movie before NSWorkspace reports the new process.
+    @discardableResult
+    public mutating func prepareLaunch() -> Bool {
+        guard pid == nil, !awaitingProcess else { return false }
+        awaitingProcess = true
+        hidden = false
+        dismissed = false
+        phase = .playing
+        return true
+    }
+    public mutating func cancelPendingLaunch() {
+        guard awaitingProcess, pid == nil else { return }
+        self = LaunchSession()
+    }
     @discardableResult
     public mutating func begin(pid newPID: Int32, alreadyRunning: Bool = false) -> Bool {
         guard pid != newPID else { return false }
         pid = newPID
-        hidden = false
-        dismissed = false
-        phase = alreadyRunning ? .accompanying : .waitingWindow
+        if awaitingProcess {
+            // Keep a movie already playing, or an early skip/failure, when the PID arrives.
+            awaitingProcess = false
+        } else {
+            hidden = false
+            dismissed = false
+            phase = alreadyRunning ? .accompanying : .waitingWindow
+        }
         return true
     }
     public mutating func startAnimation(pid expected: Int32) {
@@ -26,8 +46,8 @@ public struct LaunchSession {
         phase = .playing
     }
     @discardableResult
-    public mutating func finishAnimation(pid expected: Int32) -> Bool {
-        guard pid == expected else { return false }
+    public mutating func finishAnimation(pid expected: Int32?) -> Bool {
+        guard pid == expected, expected != nil || awaitingProcess else { return false }
         phase = dismissed ? .petDismissed : hidden ? .petHidden : .accompanying
         return !dismissed && !hidden
     }

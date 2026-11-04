@@ -12,7 +12,7 @@
 +from dragon_frames import AnimationFrameStore, LazyAnimationFrames, GLOBAL_ANIMATION_BUDGET
 +from dragon_ui import Bubble, NativeMenu, decorate_action
 +from dragon_behavior import AutonomousBehavior
-+from dragon_tasks import attach_task_follower
++from dragon_tasks import attach_task_follower, show_work_feedback
 +from dragon_playback import PresentationClock, pose_pixmap, pose_bridge, blend_pose, transition_profile, calibrate_flight_sizes, canvas_padding
  
  ROOT=resource_root()
@@ -100,7 +100,8 @@
          fresh=self.context_menu()
          self.tray_menu.clear()
 @@ -174,10 +187,6 @@
-         if self.speech_hidden() and not getattr(self.bubble,'is_task_progress',False) and self.bubble.isVisible():self.bubble.hide()
+-        if self.speech_hidden() and not getattr(self.bubble,'is_task_progress',False) and self.bubble.isVisible():self.bubble.hide()
++        if self.speech_hidden() and not getattr(self.bubble,'is_task_progress',False) and not getattr(self.bubble,'is_followed_work',False) and self.bubble.isVisible():self.bubble.hide()
          if self.dialogue_hidden():
              if self.bubble.isVisible():self.bubble.hide()
 -            if self.chat and self.chat.composer.isVisible():self.chat.composer.hide()
@@ -171,7 +172,7 @@
      def asset_path(self,item):
          # Optional playbackFile allows future formats without changing the manifest's video source.
          return ASSETS/(item.get('playbackFile') or item['file'].replace('.webm','.webp'))
-@@ -275,11 +283,27 @@
+@@ -275,11 +283,28 @@
          self.cache[key]=frames
          while len(self.cache)>2:self.cache.popitem(last=False)
          return frames
@@ -196,6 +197,7 @@
          if getattr(self,'hidden_since',None) is not None:self.hidden_since=self.started
          self.transition=None
          self.sync_dialogue_visibility()
++        show_work_feedback(self)
 +    def presentation_elapsed(self,now=None):
 +        return self.presentation.elapsed if self.presentation else 0.
      def idle(self):
@@ -448,11 +450,11 @@
 -        if self.quota_generation==self.generation:self.say('主人，我暂时没查到额度，过一会儿再看看好不好？\n'+error,8000)
 +        if self.quota_generation==self.generation:self.say('额度查询未完成\n'+error,10000)
      def mousePressEvent(self,event):
-+        self.behavior.pause()
          if event.button()==Qt.MouseButton.RightButton:
              self.click_timer.stop();self.last_click=None
              menu=self.context_menu();menu.exec(event.globalPosition().toPoint());menu.deleteLater();return
          if event.button()==Qt.MouseButton.LeftButton:
++            self.behavior.pause()
 +            self.behavior.begin_drag()
              self.press_pos=event.globalPosition().toPoint();self.origin=self.pos();self.dragging=False
      def mouseDoubleClickEvent(self,event):

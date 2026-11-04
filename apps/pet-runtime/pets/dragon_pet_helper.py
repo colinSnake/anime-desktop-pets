@@ -131,6 +131,10 @@ def _factory(row, state):
                 self.hide()
                 self.tray.hide()
                 self.bubble.close()
+                # Bubble is an independent top-level window, not a Qt child of
+                # Pet. Release it on the GUI thread rather than leaving its
+                # Python wrapper/signals to an arbitrary later GC cycle.
+                self.bubble.deleteLater()
                 app = QApplication.instance()
                 for signal, slot in [(app.screenAdded, self.watch_screen), (app.screenRemoved, self.screen_removed)]:
                     signal.disconnect(slot)

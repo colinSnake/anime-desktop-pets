@@ -3,7 +3,7 @@ import AVKit
 import DragonCore
 
 @MainActor
-private final class MovieWindow: NSWindow {
+private final class MovieWindow: NSPanel {
     var onSkip: (() -> Void)?
     override var canBecomeKey: Bool { true }
     override func keyDown(with event: NSEvent) {
@@ -18,6 +18,8 @@ final class BootPlayer: NSObject {
     private let config: CompanionConfiguration
     private let diagnostics: Diagnostics
     private let targetReady: () -> Bool
+    private let preservesTargetActivation: Bool
+    private var followsTargetWindow = false
     private let onFinish: (Outcome) -> Void
     private var window: MovieWindow?
     private var player: AVPlayer?
@@ -30,8 +32,9 @@ final class BootPlayer: NSObject {
     private var waiting = false
     private var waitingLabel: NSTextField?
 
-    init(config: CompanionConfiguration, diagnostics: Diagnostics, ready: @escaping () -> Bool, onFinish: @escaping (Outcome) -> Void) {
+    init(config: CompanionConfiguration, diagnostics: Diagnostics, ready: @escaping () -> Bool, preservesTargetActivation: Bool = false, onFinish: @escaping (Outcome) -> Void) {
         self.config = config; self.diagnostics = diagnostics; self.targetReady = ready; self.onFinish = onFinish
+        self.preservesTargetActivation = preservesTargetActivation
     }
 
     func start(url: URL, matching frame: NSRect?) {
@@ -42,7 +45,11 @@ final class BootPlayer: NSObject {
         let width = min(config.playerMaxWidth, visible.width * 0.9, visible.height * 0.9 * 16 / 9)
         let fallback = NSRect(x: visible.midX - width / 2, y: visible.midY - width * 9 / 32, width: width, height: width * 9 / 16)
         let rect = frame ?? fallback
-        let movie = MovieWindow(contentRect: rect, styleMask: .borderless, backing: .buffered, defer: false)
+        let style: NSWindow.StyleMask = preservesTargetActivation ? [.borderless, .nonactivatingPanel] : [.borderless]
+        let movie = MovieWindow(contentRect: rect, styleMask: style, backing: .buffered, defer: false)
+        movie.hidesOnDeactivate = false
+        movie.becomesKeyOnlyIfNeeded = true
+        followsTargetWindow = frame != nil
         movie.title = "Dragon · 启动动画"
         movie.isReleasedWhenClosed = false; movie.isOpaque = false; movie.backgroundColor = .clear
         movie.level = .floating; movie.hasShadow = true
@@ -53,9 +60,9 @@ final class BootPlayer: NSObject {
         root.layer?.backgroundColor = NSColor.black.cgColor
         let video = AVPlayerView(frame: root.bounds)
         video.autoresizingMask = [.width, .height]; video.controlsStyle = .none
-        video.videoGravity = frame == nil ? .resizeAspect : .resizeAspectFill
+        video.videoGravity = .resizeAspect
         root.addSubview(video)
-        let button = NSButton(title: "跳过  Esc", target: self, action: #selector(skip))
+        let button = NSButton(title: preservesTargetActivation ? "跳过" : "跳过  Esc", target: self, action: #selector(skip))
         button.bezelStyle = .rounded; button.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(button)
         let label = NSTextField(labelWithString: "正在等待 Codex 主窗口…")
@@ -79,12 +86,23 @@ final class BootPlayer: NSObject {
         ended = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.finish(.completed) }
         }
-        movie.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if preservesTargetActivation {
+            // Keep the real client active and able to initialize its foreground UI.
+            movie.orderFrontRegardless()
+        } else {
+            movie.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
         diagnostics.record("animation.start")
         timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
+    }
+
+    func match(frame: NSRect) {
+        guard !finishing, !followsTargetWindow else { return }
+        followsTargetWindow = true
+        window?.setFrame(frame, display: true)
     }
 
     @objc private func skip() { finish(.skipped) }

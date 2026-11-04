@@ -25,6 +25,7 @@ final class Coordinator: NSObject {
     private var multiPet: PetInstanceRuntime?
     private var movie: BootPlayer?
     private var movieID: UUID?
+    private var launchRequestID: UUID?
     private var workspaceObservers: [NSObjectProtocol] = []
     private var poll: Timer?
     private var taskLeaseTimer: Timer?
@@ -59,7 +60,7 @@ final class Coordinator: NSObject {
         if multiPet != nil, mode != .previewAnimation { multiPet?.start() }
         if mode == .previewPet { showPetRuntime(near: nil); return }
         if mode == .previewAnimation {
-            play(frame: nil, pid: nil, ready: { true }); return
+            play(frame: nil, ready: { true }); return
         }
         refreshTaskLease()
         taskLeaseTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
@@ -93,7 +94,7 @@ final class Coordinator: NSObject {
         NSRunningApplication.runningApplications(withBundleIdentifier: runtime.configuration.codexBundleIdentifier).first { !$0.isTerminated }
     }
     private func observed(_ app: NSRunningApplication, alreadyRunning: Bool) {
-        guard !paused, app.bundleIdentifier == runtime.configuration.codexBundleIdentifier,
+        guard !paused, !app.isTerminated, app.bundleIdentifier == runtime.configuration.codexBundleIdentifier,
               session.pid != app.processIdentifier else { return }
         if let previous = session.pid {
             _ = session.terminate(pid: previous)
@@ -103,49 +104,72 @@ final class Coordinator: NSObject {
         guard session.begin(pid: app.processIdentifier, alreadyRunning: alreadyRunning) else { return }
         target = app
         diagnostics.record("codex.detected pid=\(app.processIdentifier) existing=\(alreadyRunning)")
-        if alreadyRunning { showPetRuntime(near: WindowGeometry.codexWindow(pid: app.processIdentifier)); return }
+        if alreadyRunning && movie == nil {
+            showPetRuntime(near: WindowGeometry.codexWindow(pid: app.processIdentifier)); return
+        }
+        // Activating only at movie completion can defer foreground initialization until then.
+        let activated = app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        diagnostics.record("codex.foreground-requested accepted=\(activated)")
+        if session.phase != .playing && session.phase != .waitingWindow {
+            // The user skipped (or media failed) before the asynchronous launch callback.
+            if !session.hidden && !session.dismissed {
+                showPetRuntime(near: WindowGeometry.codexWindow(pid: app.processIdentifier))
+            }
+            return
+        }
         pendingSince = ProcessInfo.processInfo.systemUptime; lastFrame = nil; stableFrames = 0
         poll?.invalidate()
         poll = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.pollWindow() }
         }
+        if movie == nil {
+            session.startAnimation(pid: app.processIdentifier)
+            play(frame: nil, ready: { [weak self] in self?.startupWindowReady ?? false })
+        }
         pollWindow()
+    }
+    private var startupWindowReady: Bool {
+        guard let target, !target.isTerminated, target.isFinishedLaunching, stableFrames >= 2 else { return false }
+        // A stable visible window is only a handoff signal, not proof that network/UI loading finished.
+        return WindowGeometry.codexWindow(pid: target.processIdentifier) != nil
     }
     private func pollWindow() {
         guard !paused, let target, !target.isTerminated else { poll?.invalidate(); poll = nil; return }
-        let pid = target.processIdentifier
-        if let frame = WindowGeometry.codexWindow(pid: pid) {
+        if let frame = WindowGeometry.codexWindow(pid: target.processIdentifier) {
             stableFrames = frame == lastFrame ? stableFrames + 1 : 1; lastFrame = frame
             if stableFrames >= 2 {
-                poll?.invalidate(); poll = nil; session.startAnimation(pid: pid)
-                play(frame: frame, pid: pid, ready: { [weak target] in
-                    guard let target, !target.isTerminated else { return false }
-                    return WindowGeometry.codexWindow(pid: target.processIdentifier) != nil
-                })
-                return
+                movie?.match(frame: frame)
+                if target.isFinishedLaunching {
+                    poll?.invalidate(); poll = nil
+                    diagnostics.record("codex.window-ready")
+                    return
+                }
             }
+        } else {
+            stableFrames = 0; lastFrame = nil
         }
         if ProcessInfo.processInfo.systemUptime - pendingSince > runtime.configuration.windowWaitTimeout {
             poll?.invalidate(); poll = nil
-            diagnostics.record("animation.skipped no-visible-window")
-            // No overlay is created if the real client never acquired a visible window.
-            _ = session.finishAnimation(pid: pid)
+            diagnostics.record("animation.timed-out no-visible-window")
+            movie?.finish(.timedOut)
         }
     }
-    private func play(frame: NSRect?, pid: pid_t?, ready: @escaping () -> Bool) {
+    private func play(frame: NSRect?, ready: @escaping () -> Bool) {
         let id = UUID(); movieID = id
-        movie = BootPlayer(config: runtime.configuration, diagnostics: diagnostics, ready: ready) { [weak self] outcome in
+        movie = BootPlayer(config: runtime.configuration, diagnostics: diagnostics, ready: ready,
+                           preservesTargetActivation: mode != .previewAnimation) { [weak self] outcome in
             guard let self, self.movieID == id else { return }
             self.movieID = nil; self.movie = nil
+            self.poll?.invalidate(); self.poll = nil
             if self.mode == .previewAnimation {
                 // Preview is isolated: no Codex launch, no external pet, no theme.
                 self.diagnostics.record("preview.finished \(outcome.rawValue)")
                 return
             }
-            guard let pid, self.session.pid == pid else { return }
-            if !self.paused, let app = self.target, !app.isTerminated {
-                _ = app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-                if self.session.finishAnimation(pid: pid) { self.showPetRuntime(near: WindowGeometry.codexWindow(pid: pid)) }
+            let pid = self.session.pid
+            let showPet = self.session.finishAnimation(pid: pid)
+            if !self.paused, let app = self.target, !app.isTerminated, showPet {
+                self.showPetRuntime(near: WindowGeometry.codexWindow(pid: app.processIdentifier))
             }
         }
         movie?.start(url: runtime.videoURL, matching: frame)
@@ -157,14 +181,33 @@ final class Coordinator: NSObject {
         dismissPetRuntime(); diagnostics.record("codex.exited")
     }
     private func launchCodex() {
+        if let existing = runningCodex() {
+            observed(existing, alreadyRunning: true)
+            _ = existing.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            return
+        }
+        guard launchRequestID == nil else { return }
         do {
             let url = try runtime.codexURL()
+            let requestID = UUID(); launchRequestID = requestID
+            if !paused && session.prepareLaunch() {
+                stableFrames = 0; lastFrame = nil
+                // Start covering immediately, while NSWorkspace launches Codex in parallel.
+                play(frame: nil, ready: { [weak self] in self?.startupWindowReady ?? false })
+            }
             let options = NSWorkspace.OpenConfiguration(); options.activates = true; options.createsNewApplicationInstance = false
+            diagnostics.record("codex.launch-requested")
             NSWorkspace.shared.openApplication(at: url, configuration: options) { [weak self] app, error in
                 Task { @MainActor in
-                    guard let self else { return }
+                    guard let self, self.launchRequestID == requestID else { return }
+                    self.launchRequestID = nil
                     if let app { self.observed(app, alreadyRunning: false) }
-                    else { self.diagnostics.record("codex.launch-failed"); self.showError(error?.localizedDescription ?? "Codex 启动失败") }
+                    else if self.target == nil {
+                        self.session.cancelPendingLaunch()
+                        self.movie?.finish(.targetExited, immediate: true)
+                        self.diagnostics.record("codex.launch-failed")
+                        if !self.paused { self.showError(error?.localizedDescription ?? "Codex 启动失败") }
+                    }
                 }
             }
         } catch { showError(error.localizedDescription) }
@@ -230,6 +273,7 @@ final class Coordinator: NSObject {
         taskLeaseTimer?.invalidate(); taskLeaseTimer = nil
         refreshTaskLease(disabled: true)
         paused = true
+        launchRequestID = nil; session.cancelPendingLaunch()
         poll?.invalidate(); poll = nil; movie?.finish(.targetExited, immediate: true); movie = nil
         dismissPetRuntime()
         for observer in workspaceObservers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }

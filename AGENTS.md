@@ -22,7 +22,17 @@
 
 ## 当前基线与用户已认可的决定
 
-最后更新：2026-11-03。当前桌边小伙伴应用 **0.7.3 / build 23**，增强辅助应用 **build 32 / `dragon.38`**。
+最后更新：2026-11-04（补充拖拽防回归约定；构建基线仍为2026-11-03验证结果）。当前桌边小伙伴应用 **0.7.7 / build 27**，增强辅助应用 **build 35 / `dragon.41`**。下方首条为已验证基线；进行中的未验证改动不提前写为当前构建状态。
+
+- **2026-11-03 任务期间拖拽甩动恢复**：任务工作态原本在 `blocked()` 中拦截所有窗口运动，导致真实拖拽松手无法创建甩动弹簧，或弹簧下一 tick 被清除。仅真实松手触发的 released motion 可在任务活跃时通过门禁；后台自主移动仍被拦截。helper35/dragon.41、宿主0.7.7/build27完整验证及桌面边界见 `docs/实际验证记录.md`。
+
+- **2026-11-03 开机并行加载修复**：宿主0.7.6/build26在启动请求前显示视频，Codex同步启动并立即激活；非激活浮动覆盖层不再主动抢焦点，窗口稳定只作贴合与交接。提前跳过／PID延迟／隐藏意图有6项新增回归；最终项目入口、90项Swift、签名／指纹及只读检查通过。正常联动点击跳过，预览／覆盖层持键盘焦点时支持Esc和Command+.。未冷启动或重启Codex，不能保证客户端网络／内部loading在14秒内完成；证据见`docs/实际验证记录.md`与`.local/startup-handoff/`。
+
+- **2026-11-03 Qt 气泡／屏幕生命周期修复**：本机复现 PySide6 6.9.2 的 `QWidget.screen()` 返回值父级关联会将共享屏幕包装器挂到气泡，销毁后使其失效。气泡改为应用级 `screenAt`／主屏查询，保留同工作树已增加的停止时显式销毁独立气泡。新增24轮启停／焦点／GC与多宠屏幕回归；项目、多宠、22项冻结自检、helper34/dragon.40与宿主0.7.6/build26签名和只读检查通过。未启动或重启，长期稳定性待观察。清理733.4MiB闲置归档，运行中的旧宿主保留。Bash清理入口新增`bash scripts/clean-builds.sh --dry-run`；`.py`仍用Python执行。详见`docs/实际验证记录.md`。
+
+- **2026-11-03 任务轮次反馈与工作气泡**：同工作树的轮次识别与固定文案气泡修订已随helper34/dragon.40、宿主0.7.6/build26构建，通过最终37项合成读取器、36项真实Adapter、完整项目／多宠及22项冻结自检；未读取正文标题，真实桌面反馈待验收。
+
+- **2026-11-03 连续甩动状态修复**：修复增强补丁在任意鼠标按下时调用`pause()`、使右键菜单打断活动弹簧的问题。仅左键新拖拽中断旧轨迹；真实 Adapter 离屏事件覆盖首次弹簧、右键期间推进、收敛清理和第二次拖拽甩动。宿主0.7.4/build24、helper33/dragon.39构建与签名通过；项目与多宠测试通过。未启动或重启桌边小伙伴/Codex，真实桌面鼠标待人工验收，证据见`docs/实际验证记录.md`。
 
 - **2026-11-03 开机动画本地 4K 超分**：原 1920×1080/24fps 视频经 Real-ESRGAN `realesr-animevideov3-x2` 逐帧超分至3840×2160；原AAC压缩数据直接复用。338帧、PTS/DTS、时长、完整FFmpeg解码及本机AVFoundation解码通过；宿主0.7.3/build23已构建、签名和`dragonctl --check`通过，未启动或重启。原片、独立成片及处理报告留在`.local/video-upscale/`。超分进程12帧批次最大驻留内存实测914,915,328 bytes；非整条流程总峰值。完整证据与macOS应用实现评估见`docs/实际验证记录.md`和`docs/开机动画4K超分.md`。
 
@@ -76,9 +86,39 @@
   自绘外观不宣称是 AppKit NSMenu 或系统毛玻璃。
 - 播放器使用后台顺序解码、最多 8 帧受限预取、generation 过期取消、首帧就绪后计时，
   `dragon.27`起上述冻结仅指姿态时间；明确甩动的弹簧独立计时，短时缺帧／混合仍继续位移；其它移动保持呈现同步。
-  冷切换期间保留旧画面。白龙单 Qt 控制进程内 QImage 总预算 48MiB + QPixmap 总预算 8MiB，由活动实例平分并共享单解码闸门；是像素缓存预算，不是总 RSS。当前基线为 build 32 / `dragon.38`，真实长时 CPU/RSS 仍待验收。
+  冷切换期间保留旧画面。白龙单 Qt 控制进程内 QImage 总预算 48MiB + QPixmap 总预算 8MiB，由活动实例平分并共享单解码闸门；是像素缓存预算，不是总 RSS。当前基线为 build 35 / `dragon.41`，真实长时 CPU/RSS 仍待验收。
   QPixmap 仅在 GUI 线程使用；真实绘制不得退回同步 WebP 解码。
 - 预乘 alpha 已用于合成；源素材仍含浅色描边与局部底色，不宣称素材级灰边已全部消除。
+
+## macOS Python/PySide6 原生崩溃排查（2026-11-04）
+
+macOS 的“Python 已退出”提示只说明进程崩溃，不足以证明 Python 解释器本身有问题。2026-11-03 本机诊断报告确认了两种不同的 Qt 原生崩溃路径；按原生栈分类处理，不要把所有 Python 崩溃归为一个根因：
+
+- **离屏预览的原生 macOS 样式绘制**：`SIGSEGV` 栈顶出现 `objc_msgSend → libqmacstyle → QToolButton::paintEvent`。预览使用 `QT_QPA_PLATFORM=offscreen` 时若继承或强制 macOS 原生样式，会进入不适合该平台插件的按钮绘制路径。仅对离屏预览在导入任何 Qt 模块前设置 `QT_STYLE_OVERRIDE=Fusion`，并在创建 `QApplication` 后显式设为 Fusion；不要因此更改真实桌面应用的原生样式。防回归见 `scripts/test-preview-pet-ui.py`。
+- **共享 `QScreen` 包装器生命周期**：PySide6 6.9.2 下，访问 `QWidget.screen()` 返回的应用级共享屏幕对象时，绑定层可能把 Python 包装器错误地关联到短生命周期的气泡；销毁气泡后包装器失效。`QObject::property → PySide::getWrapperForQObject → primaryScreen`、`QScreen::virtualSiblings → screenAt` 等栈曾与此路径相符，且已通过检查包装器父级／有效性复现。窗口需要可用屏幕区域时，使用 `QApplication.screenAt(widget.frameGeometry().center()) or QApplication.primaryScreen()`，不要把共享 `QScreen` 包装器设为气泡或其他短生命周期控件的子对象。Adapter 停止时仍须关闭并 `deleteLater()` 自己拥有的独立气泡。回归见 `scripts/test-qt-lifecycle.py`，包括反复启停、焦点、延迟销毁、GC 和多宠场景。
+- 曾另有 `QToolButton::focusOutEvent` 崩溃报告；若其栈没有屏幕包装器证据，应作为独立签名检查，不仅凭 `QToolButton` 名称断言同一根因。更早的 `QDialog/QObject` 销毁及 `QPixmap` 初始化报告也没有被上述两项修复证明已解决：分别检查对象销毁顺序／回调生命周期和 GUI 线程约束，尤其 `QPixmap` 只能在 GUI 线程使用。
+
+**下次排查步骤**：
+
+1. 只检查最新新增的 `~/Library/Logs/DiagnosticReports/Python*.ips` 与 `BailongPet*.ips`；记录发生时间、进程／父进程、异常信号、顶部原生栈符号和 Qt 版本，以判断是预览、helper 还是其他 Python 进程。没有项目归属证据时明确标为未确认，不归咎于整个 Python 环境。
+2. 用栈签名对照上面的已知类别；不要只看崩溃弹窗或某个类名。不要为确认而反复触发已知崩溃，也不要复制或提交完整 `.ips`（其中可能包含路径、环境或用户数据）。
+3. 修复后使用临时输出／临时 HOME、Qt offscreen 和合成输入运行对应回归；本项目统一回归入口是 `./scripts/test.sh`。预览样式检查与 screen 生命周期测试已接入该入口。不要启动、退出或重启真实桌宠／Codex 来做自动验证。
+4. 不要把升级／重装系统 Python 或 Qt 当作首选修复。先定位应用层 Qt 调用、对象所有权、线程和销毁顺序；没有新增报告只表示观察期间未捕获到报告，不等于长期稳定性已证明。
+
+## 拖拽／松手甩动防回归约定（2026-11-04）
+
+此问题曾多次出现“能拖动，但松手后不跳”；修改任务跟随、气泡、偏好保存或动画调度时，必须同时审查真实 Qt 事件与 Adapter 链路，不能仅凭纯物理测试通过宣称修复。
+
+- **用户甩动与后台自主移动必须分开门禁**：`task_active` 应阻止后台自主位移，不能阻止明确拖拽松手触发的甩动。`release_drag()` → `perform_movement(released=True)` → `tick()` 三处门禁必须一致；只放行创建入口仍会在下一 tick 被 `pause()` 清除。当前实现用 `allow_task` 定向放行，不得改为所有手动菜单动作／自主运动一概绕过任务态，也不得通过清空 `task_active` 绕过门禁。
+- **任务跟随让位于用户交互**：拖动、活动弹簧及手动动作期间不得抢播工作姿态／气泡或调用 `behavior.pause()` 清除轨迹；新轮次反馈等待交互结束。保持 `work01` 每个新轮次只开场一次，`unknown` 不误判为完成。
+- **不要从无关回调取消弹簧**：右键按下不能调用 `pause()`；左键开始新拖拽才中断旧轨迹并重置锚点／速度采样。松手后位置持久化引发的 `apply_preferences()`，相同尺寸及无变化行为开关必须是无副作用操作，不能重设姿态时钟或清除刚创建的弹簧；真正改尺寸／位置、隐藏及减少动态效果等仍保留各自安全处理。
+- **保持甩动判定与物理语义**：至少24逻辑像素位移和最近150ms合速度至少280逻辑像素/秒；轻放／停稳不跳，不能降低阈值或强制每次松手跳动来掩盖状态错误。保留二维初速、碰撞／摩擦、屏幕边界及独立物理时钟，短时缺帧或姿态混合不能暂停弹簧；35动作路径收敛后清空弹簧、物理时钟、运动及朝向，再回默认待机。
+- **必须保留并运行的回归**（`scripts/test-real-pet-adapter.py`）：
+  - `test_mouse_flick_keeps_spring_running_during_followed_task`：任务已活跃且工作气泡可见 → 真实 Qt 合成按下／移动／松开 → 弹簧创建并继续推进。
+  - `test_right_click_and_completed_flick_leave_second_drag_available`：首次甩动 → 右键不清轨迹 → 收敛清理 → 第二次甩动仍创建并推进，采样／锚点不继承旧值。
+  - `test_release_position_save_does_not_cancel_flick_or_reset_pose_clock`：松手位置保存不取消新弹簧或重置姿态时钟。
+  - 同时运行 `scripts/test-pet-runtime.py`，尤其 `test_release_respects_settings_tasks_and_timed_toggle`：任务期间允许用户甩动，但后台移动、关闭位移和减少动态效果的约束仍有效；轻放、横／竖甩动和缺帧推进回归不可删除。
+- **验收与交付**：以上均为离屏／合成验证，不等于真实桌面手感验收。修改增强层后按固定上游重建 helper 再重建宿主，检查输入指纹、签名和 `dragonctl --check`；旧实例不会热加载修复，不自动重启桌宠或 Codex，让用户选择安全时机切换。历史证据见 [实际验证记录](docs/实际验证记录.md) 的2026-11-03任务期间甩动、连续甩动及透明盒适配记录。
 
 ## 白龙优先完成目标
 

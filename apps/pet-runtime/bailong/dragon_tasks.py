@@ -24,6 +24,7 @@ EVENTS = {'task_started', 'turn_started', 'task_complete', 'turn_complete', 'tur
 class TaskSnapshot:
     state: str = 'unknown'
     active_count: int = 0
+    start_serial: int = 0  # Latest still-active live start; no session/turn identity leaves the worker.
 
     @property
     def active(self):
@@ -90,10 +91,19 @@ class Cursor:
     synchronized: bool = False
     supported: bool = False
     uncertain: bool = False
+    feed_offset: int = 0
+    replay_until: int = 0
+    line_live: bool = False
+    seen: dict = field(default_factory=dict)
+    live_turns: dict = field(default_factory=dict)
+    next_serial: object = None
 
     def feed(self, data):
         # Project oversized records from structural JSON keys, never text matches.
         for part in data.splitlines(keepends=True):
+            if not self.pending and not self.skipping and not self.skip_until_newline:
+                self.line_live = self.feed_offset >= self.replay_until
+            self.feed_offset += len(part)
             complete = part.endswith(b'\n')
             if self.skip_until_newline:
                 if complete:
@@ -109,16 +119,16 @@ class Cursor:
                     self.pending += part
             if complete:
                 if not self.skipping:
-                    self.consume(self.pending)
+                    self.consume(self.pending, self.line_live)
                 elif self.large_record is not None:
-                    self.consume(json.dumps(self.large_record).encode())
+                    self.consume(json.dumps(self.large_record).encode(), self.line_live)
                 else:
                     self.uncertain = True
                 self.pending = b''
                 self.skipping = False
                 self.large_record = None
 
-    def consume(self, line):
+    def consume(self, line, live=False):
         try:
             record = json.loads(line)
             if not isinstance(record, dict):
@@ -140,14 +150,28 @@ class Cursor:
                 return
             self.recognized = True
             if payload['type'] in ('task_started', 'turn_started'):
+                if turn in self.seen and turn not in self.turns:
+                    return  # Late duplicate after completion must not resurrect work.
                 if not self.turns:
                     self.uncertain = False
-                if len(self.turns) >= 64:
+                if len(self.turns) >= 64 and turn not in self.turns:
+                    self.live_turns.clear()
                     self.turns.clear()
                     self.uncertain = True
+                if turn not in self.turns and turn not in self.seen:
+                    if live and self.next_serial is not None:
+                        self.live_turns[turn] = self.next_serial()
                 self.turns.add(turn)
+                self.seen[turn] = None
+                while len(self.seen) > 256:
+                    self.seen.pop(next(iter(self.seen)))
             else:
                 self.turns.discard(turn)
+                self.live_turns.pop(turn, None)
+                # Remember out-of-order terminal events as well as starts.
+                self.seen[turn] = None
+                while len(self.seen) > 256:
+                    self.seen.pop(next(iter(self.seen)))
         except (ValueError, UnicodeError, RecursionError):
             self.uncertain = True
         # record/payload and any content fields die here. No payload enters state.
@@ -162,18 +186,31 @@ class RolloutReader:
         self.candidates = []
         self.discover_at = 0
         self.next_path = None
+        self.serial = 0
+        self.baselines = {}
+        self.discovered = False
+        self.suppress_new_files = False
+
+    def _next_serial(self):
+        self.serial += 1
+        return self.serial
 
     def reset(self):
+        # Serial never rolls back across lease expiry; pets retain their watermark.
         self.cursors.clear()
         self.candidates.clear()
         self.discover_at = 0
         self.next_path = None
+        self.suppress_new_files = True
 
     def _discover(self, now):
+        was_discovered = self.discovered
+        previously_selected = set(self.candidates)
         candidates = []
         # Visit at most year/month/day directories, newest first, with a hard
         # entry budget. Resumed older threads retain their original date path.
         remaining = 20000
+        sizes = {}
         pending = [(self.root, 0)]
         while pending and remaining > 0:
             directory, depth = pending.pop()
@@ -191,13 +228,34 @@ class RolloutReader:
                         elif depth == 3 and entry.name.startswith('rollout-') and entry.name.endswith('.jsonl'):
                             info = entry.stat(follow_symlinks=False)
                             if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid():
-                                candidates.append((info.st_mtime, Path(entry.path)))
+                                path = Path(entry.path)
+                                identity = (info.st_dev, info.st_ino)
+                                old = self.baselines.get(path)
+                                reentered = was_discovered and old is not None and path not in previously_selected
+                                if old is None or old[0] != identity or info.st_size < old[1] or reentered:
+                                    # Initial inventory, replacement and re-entry are replay boundaries.
+                                    boundary = info.st_size if (not was_discovered or reentered or self.suppress_new_files) else 0
+                                    self.baselines[path] = (identity, boundary)
+                                sizes[path] = info.st_size
+                                candidates.append((info.st_mtime, path))
                     pending.extend((child, depth + 1) for child in sorted(children))
             except OSError:
                 continue
+        self.discovered = True
+        self.suppress_new_files = False
+        # Keep identities for files outside MAX_FILES too, so if a pre-existing
+        # old rollout later becomes recent it cannot masquerade as new work.
         previous = self.next_path
         self.candidates = [p for _, p in sorted(candidates, reverse=True)[:MAX_FILES]]
         self.cursors = {p: c for p, c in self.cursors.items() if p in self.candidates}
+        # If a file was outside the selected set, advance its baseline while
+        # it is unobserved. Re-entry must not replay events written meanwhile.
+        for path, size in sizes.items():
+            if path not in self.candidates:
+                # Files outside the selected set advance while unobserved;
+                # re-entry must not replay events written in that interval.
+                identity = self.baselines[path][0]
+                self.baselines[path] = (identity, size)
         if previous not in self.candidates:
             self.next_path = self.candidates[0] if self.candidates else None
         self.discover_at = now + 5
@@ -225,7 +283,11 @@ class RolloutReader:
                 identity = (info.st_dev, info.st_ino)
                 cursor = self.cursors.get(path)
                 if cursor is None or cursor.identity != identity or info.st_size < cursor.offset:
-                    cursor = Cursor(identity)
+                    baseline = self.baselines.get(path)
+                    boundary = baseline[1] if baseline and baseline[0] == identity else info.st_size
+                    if cursor is not None:  # replacement/truncation is not a new task
+                        boundary = info.st_size
+                    cursor = Cursor(identity, replay_until=boundary, next_serial=self._next_serial)
                     # Read the small header to identify producer, then a bounded tail.
                     header = os.read(fd, min(info.st_size, 16384))
                     if b'\n' in header:
@@ -234,6 +296,7 @@ class RolloutReader:
                     if cursor.offset:
                         os.lseek(fd, cursor.offset - 1, os.SEEK_SET)
                         cursor.skip_until_newline = os.read(fd, 1) != b'\n'
+                    cursor.feed_offset = cursor.offset
                     self.cursors[path] = cursor
                 os.lseek(fd, cursor.offset, os.SEEK_SET)
                 amount = min(max(0, info.st_size - cursor.offset), 512 * 1024, budget)
@@ -243,6 +306,7 @@ class RolloutReader:
                     self.next_path = candidates[(candidates.index(path) + 1) % len(candidates)]
                 cursor.offset += len(data)
                 cursor.feed(data)
+                self.baselines[path] = (identity, max(cursor.replay_until, cursor.offset))
                 caught_up = cursor.offset >= info.st_size
                 cursor.synchronized |= caught_up
             except (OSError, ValueError):
@@ -253,6 +317,7 @@ class RolloutReader:
                     os.close(fd)
         # Include cursors skipped after this poll's I/O budget. Otherwise an
         # active turn in a later file disappears from the aggregate every tick.
+        latest_start = 0
         for path, cursor in self.cursors.items():
             if not cursor.supported:
                 continue
@@ -266,9 +331,10 @@ class RolloutReader:
                 uncertain |= cursor.uncertain or not cursor.synchronized
                 if cursor.synchronized and not cursor.uncertain:
                     active += len(cursor.turns)
+                    latest_start = max(latest_start, max(cursor.live_turns.values(), default=0))
             elif cursor.turns:
                 uncertain = True
-        return TaskSnapshot('working', active) if active else TaskSnapshot('unknown' if uncertain or not known else 'idle')
+        return TaskSnapshot('working', active, latest_start) if active else TaskSnapshot('unknown' if uncertain or not known else 'idle')
 
 
 def lease_enabled(path, now=None):
@@ -371,21 +437,36 @@ def apply_task_snapshot(pet, snapshot):
         return
     from PySide6.QtWidgets import QApplication
     previous = getattr(pet, '_followed_task_active', False)
-    active = snapshot.active and not pet.behavior.motion_reduced()
+    # `unknown` means the bounded reader cannot prove a transition yet (for
+    # example while a rollout file is being rotated or a large record is
+    # skipped). Keep the last confirmed task state until an explicit idle or
+    # disabled snapshot arrives; treating uncertainty as completion makes the
+    # work pose flicker during normal Codex writes.
+    desired_active = previous if snapshot.state == 'unknown' else snapshot.active
+    active = desired_active and not pet.behavior.motion_reduced()
     pet.followed_task_state = snapshot.state
     blocked = next((name for name, value in (
         ('dragging', pet.dragging), ('quota', pet.quota_inflight), ('hidden', pet.desktop_hidden()),
         ('release_spring', pet.behavior.release_spring is not None),
         ('user_animation', pet.mode in ('variant', 'autonomous-motion', 'landing')),
-        ('click', pet.click_timer.isActive()), ('bubble', pet.bubble.isVisible()),
+        ('click', pet.click_timer.isActive()),
+        ('bubble', pet.bubble.isVisible() and not getattr(pet.bubble, 'is_followed_work', False)),
         ('mouse', bool(QApplication.mouseButtons())), ('menu', QApplication.activePopupWidget()),
         ('dialog', QApplication.activeModalWidget())) if value), None)
+    seen = getattr(pet, '_followed_start_serial', 0)
+    new_start = snapshot.active and snapshot.start_serial > seen
     pet._task_pose_blocked = blocked or ('reduced_motion' if snapshot.active and not active else None)
     if blocked:
-        pet._task_pose_pending = previous != active
+        pet._task_pose_pending = previous != active or new_start
         return
     pet._task_pose_pending = False
-    if previous == active:
+    if snapshot.state in ('disabled', 'disconnected'):
+        pet._followed_start_serial = max(seen, snapshot.start_serial)
+    if snapshot.state != 'unknown':
+        # Consume only when unblocked. A completed short task has no live serial
+        # and therefore cannot replay later when an interaction ends.
+        pet._followed_start_serial = max(seen, snapshot.start_serial)
+    if previous == active and not (active and new_start):
         return
     pet._followed_task_active = active
     pet.task_active = active
@@ -393,7 +474,48 @@ def apply_task_snapshot(pet, snapshot):
         pet.behavior.pause()
         pet.task_started()
     elif previous:
+        clear_work_feedback(pet)
         pet.task_finished()
+
+
+# Authored companion copy, never derived from a prompt, reply, title or tool output.
+WORK_COPY = {
+    'work01': '收到新任务啦，陪你一起认真开工！',
+    'work02': '小爪爪准备好了，陪你专心处理任务。',
+    'work03': '整理一下思路，陪你把线索摆整齐。',
+    'work04': '翻翻资料，陪你寻找下一步的灵感。',
+    'work05': '认真检查一下，陪你留意小细节。',
+}
+
+
+def clear_work_feedback(pet):
+    if getattr(pet.bubble, 'is_followed_work', False):
+        pet.bubble_timer.stop()
+        pet.bubble.is_followed_work = False
+        pet.bubble.hide()
+
+
+def show_work_feedback(pet):
+    """Called by play on GUI thread; preserve manual/quota bubbles and interactions."""
+    if pet.mode not in ('work-start', 'working'):
+        clear_work_feedback(pet)
+        return
+    if not getattr(pet, '_followed_task_active', False) or not pet.task_active:
+        return
+    from PySide6.QtWidgets import QApplication
+    if (pet.desktop_hidden() or pet.dragging or pet.quota_inflight
+            or pet.behavior.motion_reduced() or pet.behavior.release_spring is not None
+            or pet.click_timer.isActive() or QApplication.mouseButtons()
+            or QApplication.activePopupWidget() or QApplication.activeModalWidget()
+            or (pet.bubble.isVisible() and not getattr(pet.bubble, 'is_followed_work', False))):
+        return
+    text = WORK_COPY.get((pet.current or {}).get('id'))
+    if text:
+        pet.bubble_timer.stop()
+        pet.bubble.message(text)
+        pet.bubble.is_followed_work = True
+        pet.position_bubble()
+        pet.bubble_timer.start(4000)
 
 
 def write_diagnostics(path, snapshot, pets):

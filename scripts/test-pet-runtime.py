@@ -919,7 +919,7 @@ class BehaviorTests(unittest.TestCase):
                     self.behavior._check_motion_at = 0
                     self.pet.task_active = reason == 'task'
                     distance, duration, pause = {
-                        'gentle': (6, .1, 0), 'slow-long': (100, 2, 0),
+                        'gentle': (6, .1, 0), 'task': (6, .1, 0), 'slow-long': (100, 2, 0),
                         'short-fast': (12, .02, 0), 'held': (100, .05, .09),
                     }.get(reason, (40, .1, 0))
                     self.behavior.drag_samples.clear()
@@ -2122,8 +2122,14 @@ class ReleasePresentationTests(unittest.TestCase):
         self.behavior.enabled=False
         self.assertTrue(self.behavior.release_drag())
         self.behavior.pause();self.pet.task_active=True
-        self.assertFalse(self.behavior.release_drag())
-        self.pet.task_active=False;self.behavior.motion_enabled=False
+        self.assertFalse(self.behavior.perform_movement(preview=True))
+        self.assertTrue(self.behavior.release_drag())
+        spring=self.behavior.release_spring
+        self.now += .02
+        self.behavior.tick()
+        self.assertIs(self.behavior.release_spring,spring)
+        self.assertGreater(spring.elapsed,0)
+        self.behavior.pause();self.pet.task_active=False;self.behavior.motion_enabled=False
         self.assertFalse(self.behavior.release_drag())
         self.behavior.motion_enabled=True;self.behavior.reduce_motion=lambda:True
         self.behavior._check_motion_at=0

@@ -67,6 +67,114 @@ class RealAdapterTests(unittest.TestCase):
         value['workAnimations'] = [work, dict(work, id='work02'), dict(work, id='work03')]
         (assets / '素材清单.json').write_text(json.dumps(value))
 
+    def test_stop_deletes_independent_work_bubble_on_gui_thread(self):
+        from dragon_tasks import apply_task_snapshot, TaskSnapshot
+        from shiboken6 import isValid
+        self.install_work(); window = self.start()
+        bubble = window.bubble
+        with patch.object(window.behavior, 'motion_reduced', return_value=False):
+            apply_task_snapshot(window, TaskSnapshot('working', 1, 1))
+        self.assertTrue(bubble.isVisible())
+        self.controller.stop('first')
+        spin(lambda: 'first' not in self.controller.sessions)
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        self.assertFalse(isValid(bubble))
+
+    def test_each_live_turn_opens_once_even_with_unchanged_count(self):
+        from dragon_tasks import apply_task_snapshot, TaskSnapshot
+        self.install_work(); window = self.start()
+        with patch.object(window.behavior, 'motion_reduced', return_value=False), \
+             patch.object(window, 'task_started', wraps=window.task_started) as started:
+            apply_task_snapshot(window, TaskSnapshot('working', 1, 1))
+            first = window.presentation
+            apply_task_snapshot(window, TaskSnapshot('working', 1, 1))
+            self.assertIs(window.presentation, first)
+            apply_task_snapshot(window, TaskSnapshot('working', 1, 2))
+            self.assertIsNot(window.presentation, first)
+            apply_task_snapshot(window, TaskSnapshot('unknown'))
+            apply_task_snapshot(window, TaskSnapshot('working', 1, 2))
+            self.assertEqual(started.call_count, 2)
+            apply_task_snapshot(window, TaskSnapshot('working', 1, 1))
+            self.assertEqual(started.call_count, 2)
+
+    def test_work_feedback_bubble_tracks_pose_and_does_not_block_completion(self):
+        from dragon_tasks import apply_task_snapshot, TaskSnapshot, WORK_COPY
+        self.install_work(); window = self.start()
+        with patch.object(window.behavior, 'motion_reduced', return_value=False):
+            apply_task_snapshot(window, TaskSnapshot('working', 1, 1))
+            self.assertTrue(window.bubble.isVisible())
+            self.assertTrue(window.bubble.is_followed_work)
+            self.assertEqual(window.bubble.result_view.toPlainText(), WORK_COPY['work01'])
+            window.play(window.work_slots[1], 'working')
+            self.assertTrue(window.bubble.isVisible())
+            window.sync_dialogue_visibility()
+            self.assertTrue(window.bubble.isVisible())
+            self.assertEqual(window.bubble.result_view.toPlainText(), WORK_COPY['work02'])
+            apply_task_snapshot(window, TaskSnapshot('idle'))
+            self.assertFalse(window.bubble.isVisible())
+            self.assertFalse(window.bubble.is_followed_work)
+            self.assertFalse(window.task_active)
+
+    def test_new_turn_waits_for_interaction_and_coalesces_only_active_start(self):
+        from dragon_tasks import apply_task_snapshot, TaskSnapshot
+        self.install_work(); window = self.start()
+        with patch.object(window.behavior, 'motion_reduced', return_value=False), \
+             patch.object(window, 'task_started', wraps=window.task_started) as started:
+            apply_task_snapshot(window, TaskSnapshot('working', 1, 1))
+            window.dragging = True
+            apply_task_snapshot(window, TaskSnapshot('working', 2, 2))
+            self.assertTrue(window._task_pose_pending)
+            self.assertEqual(started.call_count, 1)
+            window.dragging = False
+            apply_task_snapshot(window, TaskSnapshot('working', 1, 1))
+            self.assertEqual(started.call_count, 1)  # brief turn ended while dragging
+            window.dragging = True
+            apply_task_snapshot(window, TaskSnapshot('working', 2, 3))
+            apply_task_snapshot(window, TaskSnapshot('working', 3, 4))
+            window.dragging = False
+            apply_task_snapshot(window, TaskSnapshot('working', 3, 4))
+            self.assertEqual(started.call_count, 2)
+            self.assertEqual(window._followed_start_serial, 4)
+
+    def test_quota_or_manual_message_replaces_feedback_owner_and_blocks_new_turn(self):
+        from dragon_tasks import apply_task_snapshot, TaskSnapshot
+        self.install_work(); window = self.start()
+        with patch.object(window.behavior, 'motion_reduced', return_value=False):
+            apply_task_snapshot(window, TaskSnapshot('working', 1, 1))
+            for kind in ('message', 'quota', 'result'):
+                if kind == 'message': window.bubble.message('manual fixture')
+                elif kind == 'quota': window.bubble.quota([])
+                else: window.bubble.task_result('manual', 'fixture', lambda: None)
+                self.assertFalse(window.bubble.is_followed_work)
+                clock = window.presentation
+                apply_task_snapshot(window, TaskSnapshot('working', 2, 2))
+                self.assertIs(window.presentation, clock)
+                self.assertEqual(window._task_pose_blocked, 'bubble')
+            window.dismiss_bubble()
+            apply_task_snapshot(window, TaskSnapshot('working', 2, 2))
+            self.assertEqual(window._followed_start_serial, 2)
+
+    def test_feedback_dismisses_for_manual_pose_and_stays_absent_without_follower(self):
+        from dragon_tasks import apply_task_snapshot, TaskSnapshot
+        self.install_work(); window = self.start()
+        with patch.object(window.behavior, 'motion_reduced', return_value=False):
+            apply_task_snapshot(window, TaskSnapshot('working', 1, 1))
+            window.play(window.idles[0], 'variant')
+            self.assertFalse(window.bubble.isVisible())
+            window.play(window.idles[0], 'idle')
+            apply_task_snapshot(window, TaskSnapshot('disabled'))
+            window.task_started()
+            self.assertFalse(window.bubble.isVisible())
+
+    def test_shared_start_serial_is_handled_independently_by_each_pet(self):
+        from dragon_tasks import apply_task_snapshot, TaskSnapshot
+        self.install_work(); first = self.start(); second = self.start('second')
+        for window in (first, second):
+            with patch.object(window.behavior, 'motion_reduced', return_value=False):
+                apply_task_snapshot(window, TaskSnapshot('working', 2, 3))
+                self.assertEqual(window._followed_start_serial, 3)
+                self.assertTrue(window.bubble.is_followed_work)
+
     def test_task_following_starts_work_and_returns_to_idle_without_quota(self):
         from dragon_tasks import apply_task_snapshot, TaskSnapshot
         self.install_work()
@@ -84,6 +192,19 @@ class RealAdapterTests(unittest.TestCase):
             self.assertFalse(window.task_active)
             self.assertEqual(window.mode, 'idle')
             self.assertFalse(window.bubble.isVisible())
+
+    def test_unknown_task_snapshot_keeps_last_confirmed_work_state(self):
+        from dragon_tasks import apply_task_snapshot, TaskSnapshot
+        self.install_work(); window = self.start()
+        with patch.object(window.behavior, 'motion_reduced', return_value=False):
+            apply_task_snapshot(window, TaskSnapshot('working', 1))
+            clock = window.presentation
+            apply_task_snapshot(window, TaskSnapshot('unknown'))
+            self.assertTrue(window.task_active)
+            self.assertTrue(window._followed_task_active)
+            self.assertIs(window.presentation, clock)
+            apply_task_snapshot(window, TaskSnapshot('idle'))
+            self.assertFalse(window.task_active)
 
     def test_followed_task_preserves_original_work_and_idle_mix(self):
         from dragon_tasks import apply_task_snapshot, TaskSnapshot
@@ -341,6 +462,37 @@ class RealAdapterTests(unittest.TestCase):
                          Qt.MouseButton.LeftButton,Qt.MouseButton.NoButton,Qt.KeyboardModifier.NoModifier)
         window.mouseReleaseEvent(event)
 
+    def mouse_flick(self, window):
+        from PySide6.QtGui import QMouseEvent
+        window.manifest['movementAnimations']=[dict(window.idles[0],id='move02',
+            sourceFacing='right',moveStartMs=0,moveStopMs=250)]
+        area=APP.primaryScreen().availableGeometry()
+        window.move(area.center()-QPoint(window.width()//2,window.height()//2))
+        local=QPointF(20,20)
+        press_global=QPointF(window.pos()+QPoint(20,20))
+        press=QMouseEvent(QEvent.Type.MouseButtonPress,local,press_global,
+                          Qt.MouseButton.LeftButton,Qt.MouseButton.LeftButton,
+                          Qt.KeyboardModifier.NoModifier)
+        window.mousePressEvent(press)
+        self.assertEqual(len(window.behavior.drag_samples),1)
+        self.assertEqual(window.behavior.drag_origin,(window.x(),window.y()))
+        self.assertEqual(window.behavior.drag_distance,0)
+        self.assertIsNone(window.behavior.release_spring)
+        initial_sample=window.behavior.drag_samples[0]
+        time.sleep(.02)
+        move_global=press_global+QPointF(60,0)
+        move=QMouseEvent(QEvent.Type.MouseMove,local+QPointF(60,0),move_global,
+                         Qt.MouseButton.NoButton,Qt.MouseButton.LeftButton,
+                         Qt.KeyboardModifier.NoModifier)
+        window.mouseMoveEvent(move)
+        self.assertTrue(window.dragging)
+        self.assertGreaterEqual(window.behavior.drag_distance,24)
+        release=QMouseEvent(QEvent.Type.MouseButtonRelease,local+QPointF(60,0),move_global,
+                            Qt.MouseButton.LeftButton,Qt.MouseButton.NoButton,
+                            Qt.KeyboardModifier.NoModifier)
+        window.mouseReleaseEvent(release)
+        return initial_sample
+
     def test_release_position_save_does_not_cancel_flick_or_reset_pose_clock(self):
         window=self.start()
         self.release_flick(window)
@@ -355,6 +507,68 @@ class RealAdapterTests(unittest.TestCase):
         self.assertIs(window.presentation,clock)
         spin(lambda:spring.elapsed>0)
         self.assertIs(window.behavior.release_spring,spring)
+
+    def test_mouse_flick_keeps_spring_running_during_followed_task(self):
+        from dragon_tasks import apply_task_snapshot, TaskSnapshot
+        self.install_work(); window=self.start()
+        with patch.object(window.behavior,'motion_reduced',return_value=False):
+            apply_task_snapshot(window,TaskSnapshot('working',1,1))
+        self.assertTrue(window.task_active)
+        self.assertTrue(window.bubble.isVisible())
+        self.mouse_flick(window)
+        spring=window.behavior.release_spring
+        self.assertIsNotNone(spring)
+        self.assertTrue(window.task_active)
+        spin(lambda:spring.elapsed>0)
+        self.assertIs(window.behavior.release_spring,spring)
+        self.assertEqual(window.mode,'autonomous-motion')
+
+    def test_right_click_and_completed_flick_leave_second_drag_available(self):
+        from PySide6.QtGui import QMouseEvent
+        from types import SimpleNamespace
+
+        window=self.start()
+        self.mouse_flick(window)
+        first_spring=window.behavior.release_spring
+        first_motion=window.behavior.motion
+        first_clock=window.behavior.release_tick_at
+        first_presentation=window.presentation
+        first_samples=tuple(window.behavior.drag_samples)
+        self.assertIsNotNone(first_spring)
+
+        menu=SimpleNamespace(exec=lambda position:None, deleteLater=lambda:None)
+        right_press=QMouseEvent(QEvent.Type.MouseButtonPress,QPointF(80,80),QPointF(window.pos()),
+                                Qt.MouseButton.RightButton,Qt.MouseButton.RightButton,
+                                Qt.KeyboardModifier.NoModifier)
+        with patch.object(window,'context_menu',return_value=menu):
+            window.mousePressEvent(right_press)
+        self.assertIs(window.behavior.release_spring,first_spring)
+        self.assertIs(window.behavior.motion,first_motion)
+        self.assertEqual(window.behavior.release_tick_at,first_clock)
+        spin(lambda:first_spring.elapsed>0)
+        self.assertIs(window.behavior.release_spring,first_spring)
+
+        first_spring.x=(first_spring.left+first_spring.right)/2
+        first_spring.y=first_spring.bottom
+        first_spring.vx=first_spring.vy=0
+        first_spring.grounded=True
+        window.behavior.tick()
+        self.assertTrue(first_spring.settled)
+        self.assertIsNone(window.behavior.release_spring)
+        self.assertIsNone(window.behavior.release_tick_at)
+        self.assertIsNone(window.behavior.release_facing)
+        self.assertIsNone(window.behavior.motion)
+        self.assertEqual(window.mode,'idle')
+
+        second_initial_sample=self.mouse_flick(window)
+        second_spring=window.behavior.release_spring
+        self.assertIsNotNone(second_spring)
+        self.assertIsNot(second_spring,first_spring)
+        self.assertNotIn(second_initial_sample,first_samples)
+        self.assertIsNot(window.presentation,first_presentation)
+        self.assertEqual(window.mode,'autonomous-motion')
+        spin(lambda:second_spring.elapsed>0)
+        self.assertIs(window.behavior.release_spring,second_spring)
 
     def test_host_resize_write_failure_restores_live_anchor_not_old_saved_position(self):
         window=self.start()

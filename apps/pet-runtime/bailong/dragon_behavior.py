@@ -386,10 +386,11 @@ class AutonomousBehavior:
         queue.remove(item)
         return item
 
-    def blocked(self, moving=False, allow_pointer=False, allow_disabled=False, allow_action=False):
+    def blocked(self, moving=False, allow_pointer=False, allow_disabled=False, allow_action=False,
+                allow_task=False):
         pet = self.pet
         return (self.closed or (not self.enabled and not allow_disabled) or pet.desktop_hidden() or not pet.isVisible()
-                or pet.dragging or pet.task_active or pet.quota_inflight
+                or pet.dragging or (pet.task_active and not allow_task) or pet.quota_inflight
                 or pet.click_timer.isActive() or pet.bubble.isVisible()
                 or QApplication.activePopupWidget() is not None
                 or QApplication.activeModalWidget() is not None
@@ -434,10 +435,13 @@ class AutonomousBehavior:
             self.update_drag()
             return
         if self.motion:
-            if self.blocked(moving=True, allow_disabled=self.motion.kind == 'settle' or getattr(self.motion, 'manual', False)) or (not self.motion_enabled and not getattr(self.motion, 'manual', False)) or self.motion_reduced():
+            spring = self.release_spring
+            released = spring is not None or getattr(self.motion, 'released', False)
+            if self.blocked(moving=True,
+                            allow_disabled=self.motion.kind == 'settle' or getattr(self.motion, 'manual', False),
+                            allow_task=released) or (not self.motion_enabled and not getattr(self.motion, 'manual', False)) or self.motion_reduced():
                 self.pause()
                 return
-            spring = self.release_spring
             if spring is not None:
                 # 窗口物理不等待 WebP、姿态混合或动画换片；每个GUI tick只消费
                 # 有上限的单调时钟增量，卡顿/恢复后绝不追赶一大段位移。
@@ -542,7 +546,8 @@ class AutonomousBehavior:
 
     def perform_movement(self, item=None, preview=False, *, released=False, velocity=(0., 0.)):
         """菜单只增加动作入口，定时调用静默；任务和减少动态效果始终优先。"""
-        if (self.blocked(moving=preview, allow_pointer=preview, allow_disabled=preview, allow_action=preview) or
+        if (self.blocked(moving=preview, allow_pointer=preview, allow_disabled=preview,
+                         allow_action=preview, allow_task=released) or
                 (self.pet.waiting_first_frame and not (preview or released)) or
                 (not self.motion_enabled and not preview) or self.motion_reduced()):
             self.defer()
@@ -709,7 +714,7 @@ class AutonomousBehavior:
         """只处理窗口动量，无鼠标合成、碰撞扫描或桌面内容读取。"""
         self.defer()
         self.drag_item = None
-        if self.blocked(moving=True, allow_disabled=True) or not self.motion_enabled or self.motion_reduced():
+        if self.blocked(moving=True, allow_disabled=True, allow_task=True) or not self.motion_enabled or self.motion_reduced():
             return False
         now = self.clock()
         samples = [sample for sample in self.drag_samples if 0 <= now - sample[0] <= .15]

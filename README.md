@@ -55,18 +55,24 @@ instance. For Codex launch/watch modes and local configuration, see the
 
 ## Features and Boundaries
 
+- The 4K startup video begins with the Codex launch request. A floating panel keeps Codex active underneath so its loading overlaps the video; existing processes do not replay it. This does not detect completion of Codex network/UI loading.
 - Full animated white-dragon pet, multi-instance management and a local pet asset library.
 - Startup presentation and coordination run in the macOS host; animation and interaction run in a
   separate Python/PySide6 helper.
+- Release flick physics continues while the context menu is open; starting another left drag deliberately interrupts and resets the prior motion.
+- A deliberate drag-release flick continues during task following; task state still blocks background autonomous movement.
 - A local script can upscale the startup video from 1080p to 4K while keeping 24 fps and the original AAC audio. See the [4K workflow](docs/开机动画4K超分.md); desktop playback still needs manual acceptance.
 - Quota queries require an explicit user action. Official accounts show subscription windows; TiMi CC uses a matching, enabled CC Switch usage configuration to show provider balance. See [quota details](docs/额度气泡说明.md).
 - Local task following reads bounded rollout records in memory, retains lifecycle state only, and never saves or displays chat contents.
-  It rotates work animations while local interactive tasks remain active; it does not identify the foreground chat. See [task following](docs/Codex任务跟随.md).
+  It plays one opening per newly observed task turn, then rotates work animations with short authored work-difference bubbles. It does not read task titles or identify the foreground chat. See [task following](docs/Codex任务跟随.md).
 - The app does not provide its own chat/history. Quota queries remain explicit user actions.
 - Poster generation and automatic theme application are not enabled.
 
 Implementation and package details are maintained in the [technical documentation](docs/文档索引.md),
 not duplicated here.
+
+Preview old build cleanup with `python3 scripts/clean-builds.py --dry-run` or
+`bash scripts/clean-builds.sh --dry-run`. Use Python for the `.py` entry point.
 
 ## Validation
 
@@ -79,7 +85,9 @@ The prepared PySide6 environment can generate network-isolated UI snapshots with
 `scripts/preview-pet-ui.py`; see the [local guide](docs/本地开发与使用指南.md).
 Offscreen previews use Fusion (including an override of inherited Qt style settings),
 not native macOS styling; this does not change the desktop application's appearance.
-The project suite includes preview and refresh-button lifecycle regression tests.
+The project suite includes preview, refresh-button and repeated pet-stop lifecycle regression tests.
+Bubble screen lookup uses application-level APIs to avoid a locally reproduced PySide6 6.9.2
+return-parent ownership issue; stopped adapters explicitly dispose of independent bubble windows.
 
 ## Documentation
 

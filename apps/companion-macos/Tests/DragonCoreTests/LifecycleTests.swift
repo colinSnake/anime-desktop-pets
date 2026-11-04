@@ -8,6 +8,63 @@ final class LifecycleTests: XCTestCase {
         XCTAssertTrue(s.finishAnimation(pid: 123)); XCTAssertEqual(s.phase, .accompanying)
         XCTAssertFalse(s.begin(pid: 123))
     }
+    func testMovieCanCoverLaunchBeforeProcessAndWindowExist() {
+        var s = LaunchSession()
+        XCTAssertTrue(s.prepareLaunch())
+        XCTAssertNil(s.pid)
+        XCTAssertEqual(s.phase, .playing)
+        XCTAssertFalse(s.prepareLaunch())
+        XCTAssertTrue(s.begin(pid: 123))
+        XCTAssertEqual(s.phase, .playing)
+        XCTAssertFalse(s.begin(pid: 123)) // workspace notification and open callback race
+        XCTAssertTrue(s.finishAnimation(pid: 123))
+        XCTAssertEqual(s.phase, .accompanying)
+    }
+    func testEarlySkipDoesNotReplayWhenProcessArrives() {
+        var s = LaunchSession()
+        XCTAssertTrue(s.prepareLaunch())
+        XCTAssertTrue(s.finishAnimation(pid: nil))
+        XCTAssertTrue(s.begin(pid: 123))
+        XCTAssertEqual(s.phase, .accompanying)
+    }
+    func testEarlyUserDismissalSurvivesProcessBinding() {
+        var s = LaunchSession()
+        XCTAssertTrue(s.prepareLaunch())
+        s.dismissPet()
+        XCTAssertFalse(s.finishAnimation(pid: nil))
+        XCTAssertTrue(s.begin(pid: 123))
+        XCTAssertTrue(s.dismissed)
+        XCTAssertEqual(s.phase, .petDismissed)
+    }
+    func testHideBeforeProcessBindingSurvivesMovieCompletion() {
+        var s = LaunchSession()
+        XCTAssertTrue(s.prepareLaunch())
+        s.hidePet()
+        XCTAssertTrue(s.begin(pid: 123))
+        XCTAssertEqual(s.phase, .playing)
+        XCTAssertFalse(s.finishAnimation(pid: 123))
+        XCTAssertEqual(s.phase, .petHidden)
+    }
+    func testLaunchFailureCanRetryAndRejectsLateMovieCompletion() {
+        var s = LaunchSession()
+        XCTAssertTrue(s.prepareLaunch())
+        s.cancelPendingLaunch()
+        XCTAssertEqual(s.phase, .idle)
+        XCTAssertFalse(s.finishAnimation(pid: nil))
+        XCTAssertTrue(s.prepareLaunch())
+        XCTAssertTrue(s.begin(pid: 124))
+        XCTAssertFalse(s.finishAnimation(pid: nil))
+        XCTAssertEqual(s.phase, .playing)
+    }
+    func testCancelPendingLaunchDoesNotResetBoundProcess() {
+        var s = LaunchSession()
+        XCTAssertTrue(s.prepareLaunch())
+        XCTAssertTrue(s.begin(pid: 123))
+        s.cancelPendingLaunch()
+        XCTAssertEqual(s.pid, 123)
+        XCTAssertEqual(s.phase, .playing)
+        XCTAssertFalse(s.prepareLaunch())
+    }
     func testAlreadyRunningDoesNotReplay() {
         var s = LaunchSession(); s.begin(pid: 123, alreadyRunning: true); XCTAssertEqual(s.phase, .accompanying)
     }

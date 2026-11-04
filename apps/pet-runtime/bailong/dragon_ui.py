@@ -110,6 +110,7 @@ class Bubble(QWidget):
         # 6px 阴影 + 卡片内部左右 10px、上下 8px。
         self.layout.setContentsMargins(16, 14, 16, 14)
         self.layout.setSpacing(4)
+        self.is_followed_work = False
         self.is_task_progress = self.is_quota_result = False
         self.kind = 'message'
         self.preferred_width = 260
@@ -119,9 +120,17 @@ class Bubble(QWidget):
         self.fade.setEasingCurve(QEasingCurve.Type.OutCubic)
         self.setFont(system_font())
 
+    def available_area(self):
+        # PySide6 6.9 的 QWidget.screen() 返回值父级启发式会把共享 QScreen
+        # 挂到此气泡的包装器下；气泡销毁时连带使屏幕包装器失效。
+        # 应用级查询不建立该所有权关联，并沿用角色按窗口中心选屏的约定。
+        screen = (QApplication.screenAt(self.frameGeometry().center()) or
+                  QApplication.primaryScreen())
+        return screen.availableGeometry()
+
     def configure_width(self, preferred):
         self.preferred_width = preferred
-        area = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        area = self.available_area()
         self.text_cap = max(40, min(168, int(area.height() * .32)))
 
     def _views(self):
@@ -201,12 +210,13 @@ class Bubble(QWidget):
         return label
 
     def finish(self):
-        area = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        area = self.available_area()
         self._reflow(area)
         self.show()
 
     def message(self, text):
         self.kind = 'message'
+        self.is_followed_work = False
         self.is_task_progress = self.is_quota_result = False
         self.configure_width(284)
         self.clear()
@@ -215,6 +225,7 @@ class Bubble(QWidget):
 
     def task_result(self, title, text, details):
         self.kind = 'result'
+        self.is_followed_work = False
         self.is_task_progress = False
         self.is_quota_result = True
         self.configure_width(316)
@@ -234,6 +245,7 @@ class Bubble(QWidget):
 
     def quota(self, windows, refreshed_at=None, refresh=None):
         self.kind = 'quota'
+        self.is_followed_work = False
         self.is_task_progress = False
         self.is_quota_result = True
         is_balance = any(w.get('kind') == 'balance' for w in windows)

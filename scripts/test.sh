@@ -34,4 +34,6 @@ fi
 if [[ -x "$ROOT/.local/pet-build/venv/bin/python" && -f "$ROOT/.local/pet-build/generated-source/DRAGON_PATCH.json" ]]; then
   /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network*)' \
     "$ROOT/.local/pet-build/venv/bin/python" "$ROOT/scripts/test-real-pet-adapter.py"
+  /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network*)' \
+    "$ROOT/.local/pet-build/venv/bin/python" "$ROOT/scripts/test-qt-lifecycle.py"
 fi

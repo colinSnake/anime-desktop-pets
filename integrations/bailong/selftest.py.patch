@@ -18,7 +18,7 @@
          if '--quota-only' in sys.argv:
              from quota import read_quota,quota_windows
              windows=quota_windows(read_quota())
-@@ -37,58 +26,219 @@
+@@ -37,58 +26,227 @@
          from types import SimpleNamespace
          report.update(version=VERSION,frozen=bool(getattr(sys,'frozen',False)))
          app=QApplication([]);pet=Pet();pet.tick.stop()
@@ -36,7 +36,15 @@
 +        original_reduced=pet.behavior.motion_reduced
 +        pet.behavior.motion_reduced=lambda:False
 +        apply_task_snapshot(pet,TaskSnapshot('working',1));assert pet.task_active and pet.mode=='work-start'
++        assert pet.bubble.isVisible() and pet.bubble.is_followed_work
++        clock=pet.presentation
++        apply_task_snapshot(pet,TaskSnapshot('working',1,1));assert pet.presentation is not clock
++        clock=pet.presentation
++        apply_task_snapshot(pet,TaskSnapshot('working',1,1));assert pet.presentation is clock
++        apply_task_snapshot(pet,TaskSnapshot('unknown'));assert pet.presentation is clock and pet.task_active
 +        apply_task_snapshot(pet,TaskSnapshot('idle'));assert not pet.task_active and pet.mode=='idle'
++        assert not pet.bubble.isVisible() and not pet.bubble.is_followed_work
++        report['checks'].append('新轮次工作开场仅一次，固定工作文案气泡不阻塞完成，unknown保留工作态')
 +        pet.behavior.motion_reduced=original_reduced
 +        report['checks'].append('任务生命周期按turn_id去重，工作差分与待机切换；不读取真实会话或调用额度')
 +        def settle_first_frame():

@@ -46,6 +46,106 @@ class TaskReaderTests(unittest.TestCase):
             stream.write(data)
         os.utime(path, (self.now, self.now))
 
+    def test_live_new_turn_while_busy_and_same_count_replacement(self):
+        p = self.rollout(); self.assertEqual(self.reader.poll().start_serial, 0)
+        self.append(p, event('task_started', 'b'))
+        b = self.reader.poll(); self.assertEqual(b.active_count, 2)
+        self.assertGreater(b.start_serial, 0)
+        self.append(p, event('turn_started', 'b'))
+        self.assertEqual(self.reader.poll().start_serial, b.start_serial)
+        self.append(p, event('task_complete', 'b') + event('task_started', 'c'))
+        c = self.reader.poll(); self.assertEqual(c.active_count, 2)
+        self.assertGreater(c.start_serial, b.start_serial)
+        self.append(p, event('turn_complete', 'c'))
+        self.assertEqual(self.reader.poll().start_serial, 0)
+
+    def test_new_file_and_resumed_old_date_have_live_starts(self):
+        self.rollout(); self.reader.poll()
+        q = self.rollout('new', directory=self.home / 'sessions/2025/01/01')
+        self.now += 6
+        result = self.reader.poll(); self.assertGreater(result.start_serial, 0)
+        self.append(q, event('turn_complete') + event('turn_started', 'resumed'))
+        self.assertGreater(self.reader.poll().start_serial, result.start_serial)
+
+    def test_append_after_inventory_boundary_is_live_not_cold_history(self):
+        p = self.rollout(data=event('task_started', 'historical'))
+        self.reader._discover(self.now)
+        self.append(p, event('task_started', 'live'))
+        snapshot = self.reader.poll()
+        self.assertEqual(snapshot.active_count, 2)
+        self.assertGreater(snapshot.start_serial, 0)
+
+    def test_lease_reset_rebaselines_new_files_without_replaying_them(self):
+        p = self.rollout()
+        self.assertTrue(self.reader.poll().active)
+        self.reader.reset()
+        q = self.rollout('created-while-disabled', data=event('task_started', 'disabled-era'))
+        self.assertEqual(self.reader.poll().start_serial, 0)
+        self.append(q, event('task_started', 'after-enable'))
+        self.assertGreater(self.reader.poll().start_serial, 0)
+
+    def test_live_start_and_finish_in_one_poll_is_not_announced(self):
+        p = self.rollout(); self.reader.poll()
+        self.append(p, event('task_started', 'brief') + event('task_complete', 'brief'))
+        self.assertEqual(self.reader.poll().start_serial, 0)
+
+    def test_cold_large_replay_suppresses_history_but_keeps_live_append(self):
+        padding = (json.dumps(dict(type='response_item', payload=dict(output='x' * (MAX_LINE * 4)))) + '\n').encode()
+        p = self.rollout(data=event('task_started') + padding)
+        self.assertEqual(self.reader.poll().start_serial, 0)
+        self.append(p, event('task_started', 'live'))
+        for _ in range(4): result = self.reader.poll()
+        self.assertEqual(result.active_count, 2)
+        self.assertGreater(result.start_serial, 0)
+        self.assertEqual(self.reader.serial, 1)
+
+    def test_partial_cold_start_line_does_not_become_live(self):
+        line = event('task_started')
+        p = self.rollout(data=line[:40]); self.reader.poll()
+        self.append(p, line[40:]); self.assertEqual(self.reader.poll().start_serial, 0)
+        line = event('task_started', 'live')
+        self.append(p, line[:40]); self.reader.poll()
+        self.append(p, line[40:]); self.assertGreater(self.reader.poll().start_serial, 0)
+
+    def test_reset_preserves_serial_and_does_not_replay_existing_tasks(self):
+        p = self.rollout(); self.reader.poll()
+        self.append(p, event('task_started', 'live')); serial = self.reader.poll().start_serial
+        self.reader.reset(); self.assertEqual(self.reader.poll().start_serial, 0)
+        self.append(p, event('task_started', 'new'))
+        self.assertGreater(self.reader.poll().start_serial, serial)
+
+    def test_replacement_and_truncation_are_history_not_live(self):
+        p = self.rollout(); self.reader.poll()
+        replacement = p.with_suffix('.new')
+        replacement.write_bytes(meta() + event('task_started', 'replacement'))
+        os.utime(replacement, (self.now, self.now)); replacement.replace(p)
+        self.assertEqual(self.reader.poll().start_serial, 0)
+        p.write_bytes(meta() + event('task_started', 'x')); os.utime(p, (self.now, self.now))
+        self.assertEqual(self.reader.poll().start_serial, 0)
+        self.append(p, event('task_started', 'genuine'))
+        self.assertGreater(self.reader.poll().start_serial, 0)
+
+    def test_cold_inventory_outside_selected_files_cannot_replay_starts(self):
+        paths = [self.rollout(str(i)) for i in range(3)]
+        with patch('dragon_tasks.MAX_FILES', 1):
+            self.reader.poll()
+            old = next(p for p in paths if p not in self.reader.cursors)
+            self.now += 6; os.utime(old, (self.now, self.now))
+            self.assertEqual(self.reader.poll().start_serial, 0)
+            self.append(old, event('task_started', 'live'))
+            serial = self.reader.poll().start_serial
+            other = next(p for p in paths if p != old)
+            self.now += 6; os.utime(other, (self.now, self.now)); self.reader.poll()
+            self.now += 6; os.utime(old, (self.now, self.now))
+            self.assertEqual(self.reader.poll().start_serial, 0)
+            self.assertEqual(self.reader.serial, serial)
+
+    def test_late_duplicate_after_completion_does_not_resurrect(self):
+        p = self.rollout(); self.reader.poll()
+        self.append(p, event('task_complete') + event('turn_started'))
+        self.assertEqual(self.reader.poll().state, 'idle')
+        self.assertEqual(self.reader.serial, 0)
+
     def test_start_finish_and_duplicate_events(self):
         p = self.rollout()
         self.assertEqual(self.reader.poll(), TaskSnapshot('working', 1))
