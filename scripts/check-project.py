@@ -103,6 +103,8 @@ class ProjectChecks(unittest.TestCase):
         self.assertNotIn('"全部显示"', coordinator)
         self.assertNotIn('"隐藏 \\(title)"', coordinator)
         self.assertNotIn('"结束本次桌宠"', pet_controller)
+        self.assertIn('"允许关联窗口大小"', coordinator)
+        self.assertNotIn('允许同步 Codex 窗口尺寸', coordinator)
 
     def test_old_app_name_is_removed_from_text_references(self):
         old_name = '桌边' + '小伙伴'

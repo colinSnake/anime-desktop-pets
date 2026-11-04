@@ -354,7 +354,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
         let advanced = NSMenu()
         advanced.title = "高级"
         if !AXIsProcessTrusted() {
-            let permission = NSMenuItem(title: "允许同步 Codex 窗口尺寸…", action: #selector(openWindowPermissionSettings), keyEquivalent: "")
+            let permission = NSMenuItem(title: "允许关联窗口大小", action: #selector(openWindowPermissionSettings), keyEquivalent: "")
             permission.target = self; advanced.addItem(permission)
         }
         let settings = NSMenuItem(title: "打开配置文件夹", action: #selector(openSettings), keyEquivalent: "")
