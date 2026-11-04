@@ -23,7 +23,8 @@ with tempfile.TemporaryDirectory(prefix='dragon-card-preview-') as home:
   if theme=='dark':
    palette=QPalette(app.palette());palette.setColor(QPalette.ColorRole.Window,QColor('#242426'));palette.setColor(QPalette.ColorRole.WindowText,QColor('#fafafa'));palette.setColor(QPalette.ColorRole.Text,QColor('#fafafa'));app.setPalette(palette)
   menu=pet.context_menu();menu.popup(QPoint(20,20));menu.setActiveAction(next(a for a in menu.actions() if a.isCheckable()));app.processEvents();menu.grab().save(str(out/f'menu-{theme}.png'))
-  submenu=next(a.menu() for a in menu.actions() if a.menu() and a.menu().title()=='互动差分动画');submenu.popup(QPoint(300,20));submenu.setActiveAction(submenu.actions()[0]);app.processEvents();submenu.grab().save(str(out/f'submenu-{theme}.png'));submenu.hide();menu.hide()
+  previews=next(a.menu() for a in menu.actions() if a.text()=='动作预览')
+  submenu=next(a.menu() for a in previews.actions() if a.menu() and a.menu().title()=='互动差分动画');submenu.popup(QPoint(300,20));submenu.setActiveAction(submenu.actions()[0]);app.processEvents();submenu.grab().save(str(out/f'submenu-{theme}.png'));submenu.hide();menu.hide()
   activity=next(a.menu() for a in menu.actions() if a.menu() and a.menu().title()=='自主活动');activity.popup(QPoint(300,20));app.processEvents();activity.grab().save(str(out/f'activity-{theme}.png'));activity.hide()
   bubble=Bubble()
   bubble.message('主人，我在这里。');app.processEvents();bubble.grab().save(str(out/f'message-short-{theme}.png'));print(theme,'short',bubble.size().toTuple())

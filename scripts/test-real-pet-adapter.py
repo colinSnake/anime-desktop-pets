@@ -660,6 +660,45 @@ class RealAdapterTests(unittest.TestCase):
         self.assertFalse(window.behavior.enabled); self.assertFalse(window.behavior.motion_enabled)
         self.assertFalse(window.auto_hide_fullscreen)
 
+    def visibility_request(self, control, command, pid=None):
+        import socket
+        import threading
+        result = []
+        def request():
+            with socket.socket(socket.AF_UNIX) as connection:
+                connection.settimeout(2)
+                connection.connect(str(control.path))
+                connection.sendall(json.dumps(dict(pid=os.getpid() if pid is None else pid,
+                                                   command=command)).encode() + b'\n')
+                result.append(connection.recv(1024))
+        thread = threading.Thread(target=request); thread.start()
+        spin(lambda: not thread.is_alive()); thread.join()
+        return json.loads(result[0]) if result and result[0] else None
+
+    def test_window_control_hides_and_reveals_without_tray_or_activation(self):
+        from dragon_visibility import VisibilityControl
+        window = self.start(); control = VisibilityControl(window)
+        try:
+            self.assertTrue(self.visibility_request(control, 'hide')['hidden'])
+            self.assertFalse(window.isVisible()); self.assertFalse(window.tick.isActive())
+            window.check_fullscreen()
+            self.assertFalse(window.isVisible())
+            self.assertTrue(self.visibility_request(control, 'show')['visible'])
+            self.assertTrue(window.isVisible()); self.assertTrue(window.tick.isActive())
+        finally:
+            control.server.close(); control.deleteLater()
+
+    def test_window_control_rejects_wrong_pid_and_unknown_commands(self):
+        from dragon_visibility import VisibilityControl
+        window = self.start(); control = VisibilityControl(window)
+        try:
+            self.assertIsNone(self.visibility_request(control, 'hide', os.getpid() + 1))
+            self.assertTrue(window.isVisible())
+            self.assertIsNone(self.visibility_request(control, 'unsupported'))
+            self.assertTrue(window.isVisible())
+        finally:
+            control.server.close(); control.deleteLater()
+
     def test_saved_offscreen_position_is_clamped_on_start(self):
         self.controller.set_preferences('first', dict(x=-90000, y=90000))
         window = self.start()

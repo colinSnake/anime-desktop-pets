@@ -1,19 +1,20 @@
-# 桌边小伙伴 App 标识：伴星窗口（青蓝粉紫版）
+# 桌边小崽 App 标识：伴星窗口（青蓝粉紫版）
 
-更新：2026-11-02，设计第二稿。用户可见称呼改为 **桌边小伙伴**，配文 **「让喜欢的角色，陪在桌边。」**。
+图标设计：2026-11-02第二稿；产品文案更新：2026-11-04。用户可见称呼改为 **桌边小崽**，配文 **「让喜欢的角色，陪在桌边。」**。
 这是 Anime Desktop Pets 管理/宿主 App 的独立标识，不是白龙桌宠头像；当前稿仍待用户视觉确认。
 
 ## 文案与兼容边界
 
-- 菜单栏、提示标题与辅助功能名称：`桌边小伙伴`。
+- 菜单栏、提示标题与辅助功能名称：`桌边小崽`。
 - 菜单栏悬停说明与 CLI 帮助配文：`让喜欢的角色，陪在桌边。`。
-- 默认状态：`桌边小伙伴已就绪`；退出菜单：`退出桌边小伙伴`。
-- 单实例提示：`桌边小伙伴已经在运行了；用 --status 查看状态，或用 --show 显示桌宠`。
-- 未启动提示：`桌边小伙伴还没启动，先打开 App 再试试吧`。
+- 默认状态：`桌边小崽已就绪`；退出菜单：`退出桌边小崽`。
+- 单实例提示：`桌边小崽已经在运行了；用 --status 查看状态，或用 --show 显示桌宠`。
+- 未启动提示：`桌边小崽还没启动，先打开 App 再试试吧`。
 
 文案集中在 `apps/companion-macos/Sources/DragonCompanion/AppCopy.swift`，属于用户可见表达，
-不是应用包重命名。项目展示名仍为 Anime Desktop Pets；App 文件名、CFBundleName/DisplayName、
-Bundle ID、可执行文件、配置/数据目录、Socket、登录项标识和现有 CLI 参数都不变。
+App文件名与CFBundleName/DisplayName现也统一为「桌边小崽」（宿主0.7.10/build30）。项目展示名仍为 Anime Desktop Pets；
+Bundle ID、内部可执行文件、配置/数据目录、Socket、登录项标识和现有CLI参数保持兼容。
+ad-hoc签名更新后，文稿文件夹及辅助功能授权可能需要用户在macOS系统设置重新确认；应用不会自动授予。
 不迁移或覆盖用户配置，不把「已就绪」描述为已连接真实任务。
 
 ## 配色与图形
@@ -60,7 +61,7 @@ python3 scripts/test-app-icon.py
 
 模型名保持 `gpt-image-2.5`；服务参数与首次付费请求确认仍是前置条件。
 
-> Design an independent macOS desktop-pet manager icon for Anime Desktop Pets, with the friendly Chinese UI name 桌边小伙伴 (do not render text inside the icon). Preserve an original desktop-window outline, a soft four-lobed companion star emerging from it, and a small satellite dot. A generous pearl-white rounded outer tile surrounds a luminous cyan-to-blue upper field, blending softly into lavender, pink and pale peach below. Use a muted deep violet-gray window outline for small-size contrast, a milky-white star, and a tiny cream satellite. Restrained layering, clean vector-like curves, generous negative space, legible at 16–32 pixels. Transparent outside the outer tile. Borrow only the reference image's color relationship, not its camera-lens motif or geometry. No pet portrait, dragon, anime girl, moon, paw print, camera lens, lettering, chat bubble, or existing AI-platform logo. Output a single centered icon, not a mockup or grid.
+> Design an independent macOS desktop-pet manager icon for Anime Desktop Pets, with the friendly Chinese UI name 桌边小崽 (do not render text inside the icon). Preserve an original desktop-window outline, a soft four-lobed companion star emerging from it, and a small satellite dot. A generous pearl-white rounded outer tile surrounds a luminous cyan-to-blue upper field, blending softly into lavender, pink and pale peach below. Use a muted deep violet-gray window outline for small-size contrast, a milky-white star, and a tiny cream satellite. Restrained layering, clean vector-like curves, generous negative space, legible at 16–32 pixels. Transparent outside the outer tile. Borrow only the reference image's color relationship, not its camera-lens motif or geometry. No pet portrait, dragon, anime girl, moon, paw print, camera lens, lettering, chat bubble, or existing AI-platform logo. Output a single centered icon, not a mockup or grid.
 
 本标识为本项目新绘制的几何资产，不由第三方桌宠素材描摹而来。参考截图的品牌及权属未识别，
 不把截图本身作为可发布资产；未进行商标查重，不宣称独占权。第三方角色/媒体授权边界不变。

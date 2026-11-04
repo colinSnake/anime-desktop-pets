@@ -1,6 +1,6 @@
 --- a/app/pet.py
 +++ b/app/pet.py
-@@ -7,10 +7,14 @@
+@@ -7,10 +7,15 @@
  from PySide6.QtGui import QImage, QPixmap, QPainter, QRegion, QCursor, QIcon
  from PySide6.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QProgressBar, QMenu, QMessageBox, QProgressDialog, QPushButton, QSystemTrayIcon, QTextBrowser
  from PySide6.QtNetwork import QLocalServer, QLocalSocket
@@ -12,6 +12,7 @@
 +from dragon_frames import AnimationFrameStore, LazyAnimationFrames, GLOBAL_ANIMATION_BUDGET
 +from dragon_ui import Bubble, NativeMenu, decorate_action
 +from dragon_behavior import AutonomousBehavior
++from dragon_visibility import attach_visibility_control
 +from dragon_tasks import attach_task_follower, show_work_feedback
 +from dragon_playback import PresentationClock, pose_pixmap, pose_bridge, blend_pose, transition_profile, calibrate_flight_sizes, canvas_padding
  
@@ -75,11 +76,12 @@
          self.idle()
          # On macOS, pin lightweight animation handles while frames share a bounded
          # cache. Other platforms keep the original preloading behavior.
-@@ -140,13 +151,14 @@
+@@ -140,13 +151,15 @@
          self.visibility_timer=QTimer(self);self.visibility_timer.setInterval(500)
          self.visibility_timer.timeout.connect(self.check_fullscreen)
          if QApplication.platformName()!='offscreen':self.visibility_timer.start()
 +        self.task_follower=attach_task_follower(self)
++        self.visibility_control=attach_visibility_control(self)
      def showEvent(self,event):
          super().showEvent(event)
          from desktop_visibility import configure_macos_window
@@ -358,7 +360,7 @@
          action=menu.addAction('显示桌宠' if self.manual_hidden or self.fullscreen_hidden else '隐藏桌宠')
          action.triggered.connect(lambda checked=False:self.set_manual_hidden(not self.manual_hidden if not self.fullscreen_hidden else False))
          if self.fullscreen_hidden:
-@@ -422,25 +474,73 @@
+@@ -422,25 +474,74 @@
          menu.addSeparator()
          automatic=menu.addAction('全屏时自动隐藏');automatic.setCheckable(True)
          automatic.setChecked(self.auto_hide_fullscreen);automatic.toggled.connect(self.set_auto_hide_fullscreen)
@@ -386,19 +388,24 @@
 +                action=decorate_action(movement.addAction(item['name']),item,self.current)
 +                action.setCheckable(False)
 +                action.triggered.connect(lambda checked=False,v=item:QTimer.singleShot(0,lambda:self.behavior.perform_movement(v,preview=True)))
-         interaction=menu.addMenu('互动差分动画')
++        previews=menu.addMenu('动作预览')
+-        interaction=menu.addMenu('互动差分动画')
++        interaction=previews.addMenu('互动差分动画')
          for item in self.variants:
 -            action=interaction.addAction(item['id']+' · '+item['name'])
 +            action=decorate_action(interaction.addAction(item['name']),item,self.current)
              action.triggered.connect(lambda checked=False,v=item:self.choose(v))
-         work=menu.addMenu('工作差分动画')
+-        work=menu.addMenu('工作差分动画')
++        work=previews.addMenu('工作差分动画')
          available=[item for item in self.work_slots if item and self.asset_path(item).is_file()]
          for item in available:
 -            action=work.addAction(item['id']+' · '+item['name'])
 +            action=decorate_action(work.addAction(item['name']),item,self.current)
              action.triggered.connect(lambda checked=False,v=item:self.choose(v))
-         if not available:work.addAction('暂无动作（已预留6个位置）').setEnabled(False)
-         idle=menu.addMenu('待机差分动画')
+-        if not available:work.addAction('暂无动作（已预留6个位置）').setEnabled(False)
++        work.menuAction().setVisible(bool(available))
+-        idle=menu.addMenu('待机差分动画')
++        idle=previews.addMenu('待机差分动画')
          for index,item in enumerate(self.idles):
 -            name='默认待机' if index==0 else '待机动作02'
 -            action=idle.addAction(name);action.triggered.connect(lambda checked=False,v=item:self.preview_idle(v))

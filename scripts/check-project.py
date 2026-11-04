@@ -2,6 +2,7 @@
 """Offline project checks. Does not launch Codex, register services or make API calls."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import unittest
@@ -9,6 +10,20 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 class ProjectChecks(unittest.TestCase):
+    def test_startup_cover_keeps_painting_and_avoids_letterboxing(self):
+        host = ROOT/'apps/companion-macos/Sources/DragonCompanion'
+        player = (host/'BootPlayer.swift').read_text()
+        coordinator = (host/'Coordinator.swift').read_text()
+        self.assertIn('preservesTargetActivation ? .resizeAspectFill : .resizeAspect', player)
+        self.assertEqual(player.count('StartupPresentation.opacity('), 2, 'initial display and every fade tick must cap opacity')
+        self.assertNotIn('followsTargetWindow', player, 'keep following actual frame changes until handoff')
+        self.assertIn('options.arguments = runtime.startupLaunchArguments(at: url)', coordinator)
+        self.assertIn('StartupWindowSizing.request(', coordinator)
+        self.assertIn('content-readiness=unknown', coordinator)
+        sizing = (host/'StartupWindowSizing.swift').read_text()
+        self.assertNotIn('AXIsProcessTrustedWithOptions', sizing, 'never auto-prompt for Accessibility')
+        self.assertNotIn('kAXTitleAttribute', sizing, 'window sizing must not inspect UI text')
+
     def test_config_safe_defaults(self):
         config = json.loads((ROOT/'config/companion.example.json').read_text())
         self.assertFalse(config['themeEnabled'])
@@ -46,7 +61,7 @@ class ProjectChecks(unittest.TestCase):
     def test_friendly_copy_keeps_persistent_identity(self):
         source = ROOT/'apps/companion-macos/Sources/DragonCompanion'
         copy = (source/'AppCopy.swift').read_text()
-        self.assertIn('static let name = "桌边小伙伴"', copy)
+        self.assertIn('static let name = "桌边小崽"', copy)
         self.assertIn('让喜欢的角色，陪在桌边。', copy)
         self.assertNotIn('伴侣', copy)
         coordinator = (source/'Coordinator.swift').read_text()
@@ -57,7 +72,46 @@ class ProjectChecks(unittest.TestCase):
         self.assertIn('DragonCodexCompanion', (source/'Runtime.swift').read_text())
         build = (ROOT/'scripts/build.sh').read_text()
         self.assertIn("CFBundleIdentifier='local.dragon.codex-companion'", build)
-        self.assertIn('build/Dragon Codex Companion.app', build)
+        self.assertIn('build/桌边小崽.app', build)
+        self.assertIn("CFBundleName='桌边小崽', CFBundleDisplayName='桌边小崽'", build)
+        self.assertIn("CFBundleShortVersionString='0.7.10', CFBundleVersion='30'", build)
+        self.assertIn('scripts/publish-app-bundle.py', build)
+
+    def test_external_catalog_validation_never_blocks_appkit_main_actor(self):
+        controller = (ROOT/'apps/companion-macos/Sources/DragonCompanion/PetController.swift').read_text()
+        self.assertIn('Task.detached(priority: .utility)', controller)
+        self.assertIn('descriptorLoadTask == nil', controller)
+        self.assertIn('guard self.desiredVisible else { return }', controller)
+        self.assertIn('private func launchExternal(_ descriptor: ExternalPetDescriptor)', controller)
+
+    def test_pet_menu_uses_truthful_lifecycle_actions(self):
+        source = ROOT/'apps/companion-macos/Sources/DragonCompanion'
+        coordinator = (source/'Coordinator.swift').read_text()
+        pet_controller = (source/'PetController.swift').read_text()
+        runtime = (source/'PetInstanceRuntime.swift').read_text()
+        controller = (source/'PetController.swift').read_text()
+        self.assertIn('togglePetAvailability', coordinator)
+        self.assertIn('"停止全部桌宠"', coordinator)
+        self.assertIn('"启动全部桌宠"', coordinator)
+        self.assertIn('"停止实例"', coordinator)
+        self.assertIn('"启动实例"', coordinator)
+        self.assertIn('运行异常：', coordinator)
+        self.assertIn('func startEnabledInstances()', runtime)
+        self.assertIn('func stopAllInstances()', runtime)
+        self.assertIn('WindowGeometry.hasVisibleWindow(pid: $0.processIdentifier)', controller)
+        self.assertNotIn('expectedSize: $0.bundleIdentifier', controller)
+        self.assertNotIn('"全部显示"', coordinator)
+        self.assertNotIn('"隐藏 \\(title)"', coordinator)
+        self.assertNotIn('"结束本次桌宠"', pet_controller)
+
+    def test_old_app_name_is_removed_from_text_references(self):
+        old_name = '桌边' + '小伙伴'
+        for directory, folders, names in os.walk(ROOT):
+            folders[:] = [name for name in folders if name not in {'.git', '.build', '.local', 'build'}]
+            for name in names:
+                path = Path(directory) / name
+                if path.suffix in {'.md', '.swift', '.py', '.sh'}:
+                    self.assertNotIn(old_name, path.read_text(errors='replace'), str(path))
 
     def test_sources_have_no_hardcoded_user_paths(self):
         sources = list((ROOT/'apps/companion-macos/Sources').rglob('*.swift'))

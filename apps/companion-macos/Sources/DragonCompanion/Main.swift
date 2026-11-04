@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import AVFoundation
 import DragonCore
 import Foundation
@@ -11,6 +12,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
     private var lock: InstanceLock?
     private var server: ControlSocket?
     private var coordinator: Coordinator?
+    private var terminating = false
     private(set) var exitStatus: Int32 = 0
     init(runtime: Runtime, mode: Coordinator.Mode) { self.runtime = runtime; self.mode = mode }
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -28,8 +30,19 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
         }
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let coordinator else { return .terminateNow }
+        guard !terminating else { return .terminateLater }
+        terminating = true
+        coordinator.stop()
+        coordinator.finishStopping {
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
     func applicationWillTerminate(_ notification: Notification) {
-        coordinator?.stop(); server = nil; lock = nil
+        if !terminating { coordinator?.stop() }
+        server = nil; lock = nil
     }
 }
 
@@ -39,7 +52,7 @@ struct DragonCompanionMain {
         let args = Array(CommandLine.arguments.dropFirst())
         if args.contains("--help") || args.contains("-h") {
             print("""
-            \(AppCopy.name) · Dragon Codex Companion
+            \(AppCopy.name) · Anime Desktop Pets
             \(AppCopy.tagline)
             --launch                 启动/复用 Codex（默认）；只对新进程播放动画
             --watch                  监视后续 Codex 启动；已有 Codex 只显示桌宠
@@ -91,7 +104,13 @@ struct DragonCompanionMain {
     @MainActor private static func check(_ runtime: Runtime) async -> Bool {
         var checks: [String: Any] = ["configuration": "valid", "theme": "disabled; awaiting original poster and explicit compatibility verification", "taskStatus": runtime.configuration.taskFollowingEnabled ? "local rollout following enabled for enhanced helper in launch/watch; check does not read sessions" : "disabled by configuration", "petBackend": runtime.configuration.petBackend]
         var ok = true
-        do { checks["codexApp"] = try runtime.codexURL().path }
+        checks["startupWindowSizing"] = AXIsProcessTrusted() ? "authorized; new launch only" : "accessibility permission required; video fills actual client frame without resizing"
+        checks["startupContentReadiness"] = "not observable; visible window is not proof that client loading finished"
+        do {
+            let url = try runtime.codexURL()
+            checks["codexApp"] = url.path
+            checks["startupLaunchArguments"] = runtime.startupLaunchArguments(at: url)
+        }
         catch { checks["codexApp"] = error.localizedDescription; ok = false }
         do {
             let asset = AVURLAsset(url: runtime.videoURL)

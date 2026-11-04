@@ -12,7 +12,7 @@ import stat
 
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description='隔离测试本地控制接口，不启动 Codex 或桌宠')
-parser.add_argument('--binary',type=Path,default=ROOT/'build/Dragon Codex Companion.app/Contents/MacOS/DragonCompanion')
+parser.add_argument('--binary',type=Path,default=ROOT/'build/桌边小崽.app/Contents/MacOS/DragonCompanion')
 BIN = parser.parse_args().binary.resolve(strict=True)
 with tempfile.TemporaryDirectory(prefix='dragon-control-', dir='/tmp') as directory:
     env = dict(os.environ, DRAGON_DATA_DIR=directory)
@@ -48,7 +48,7 @@ with tempfile.TemporaryDirectory(prefix='dragon-control-', dir='/tmp') as direct
         # A second instance cannot own or delete the first instance's socket.
         second = subprocess.run([str(BIN),'--control-test-server'],env=env,capture_output=True,text=True,timeout=6)
         # 保持原有AppKit单实例契约：提示拒绝，且不能接管/删除现有Socket。
-        assert '桌边小伙伴已经在运行了' in second.stderr
+        assert '桌边小崽已经在运行了' in second.stderr
         assert control('status')['ok']
         control('quit'); server.wait(timeout=6)
         assert not path.exists(), 'socket not cleaned up'

@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import DragonCore
 
 private final class PetMenuAction: NSObject {
@@ -14,7 +15,7 @@ private final class PetMenuAction: NSObject {
 }
 
 @MainActor
-final class Coordinator: NSObject {
+final class Coordinator: NSObject, NSMenuDelegate {
     enum Mode: Equatable { case launch, watch, previewAnimation, previewPet, controlTest }
     private let runtime: Runtime
     private let mode: Mode
@@ -32,6 +33,9 @@ final class Coordinator: NSObject {
     private var pendingSince = 0.0
     private var lastFrame: NSRect?
     private var stableFrames = 0
+    private var windowSizeRequested = false
+    private var reportedWindowReady = false
+    private var requestedStartupFrame: NSRect?
     private var statusItem: NSStatusItem?
     private var menu: NSMenu?
     private(set) var paused = false
@@ -44,8 +48,8 @@ final class Coordinator: NSObject {
         pet.taskFollowingAllowed = mode == .watch || mode == .launch
         multiPet?.taskFollowingAllowed = mode == .watch || mode == .launch
         pet.onError = { [weak self] message in self?.diagnostics.record("pet.error \(message)") }
+        pet.onChanged = { [weak self] in self?.rebuildMenu() }
         pet.onHide = { [weak self] in _ = self?.handle(.init(.hide)) }
-        pet.onDismiss = { [weak self] in _ = self?.handle(.init(.dismiss)) }
         multiPet?.onChanged = { [weak self] in
             let state = self?.multiPet?.state ?? "unknown"
             self?.diagnostics.record("multi-pet.changed state=\(state)")
@@ -118,6 +122,7 @@ final class Coordinator: NSObject {
             return
         }
         pendingSince = ProcessInfo.processInfo.systemUptime; lastFrame = nil; stableFrames = 0
+        windowSizeRequested = false; reportedWindowReady = false; requestedStartupFrame = nil
         poll?.invalidate()
         poll = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.pollWindow() }
@@ -138,17 +143,33 @@ final class Coordinator: NSObject {
         if let frame = WindowGeometry.codexWindow(pid: target.processIdentifier) {
             stableFrames = frame == lastFrame ? stableFrames + 1 : 1; lastFrame = frame
             if stableFrames >= 2 {
+                if !windowSizeRequested {
+                    windowSizeRequested = true
+                    let screen = WindowGeometry.screen(for: frame)
+                    let visible = screen?.visibleFrame ?? frame
+                    let desired = StartupPresentation.videoFrame(near: frame, visible: visible,
+                                                                 maximumWidth: runtime.configuration.playerMaxWidth)
+                    requestedStartupFrame = desired
+                    let result = StartupWindowSizing.request(pid: target.processIdentifier, matching: frame, desired: desired,
+                                                           visible: visible, primaryTop: Double(NSScreen.screens.first?.frame.maxY ?? 0))
+                    diagnostics.record("codex.window-size result=\(result.rawValue)")
+                    if result == .requested {
+                        lastFrame = nil; stableFrames = 0
+                        return // Read the actual post-resize window before handoff.
+                    }
+                }
                 movie?.match(frame: frame)
-                if target.isFinishedLaunching {
-                    poll?.invalidate(); poll = nil
-                    diagnostics.record("codex.window-ready")
-                    return
+                if target.isFinishedLaunching && !reportedWindowReady {
+                    reportedWindowReady = true
+                    let matched = requestedStartupFrame.map { StartupPresentation.framesMatch(frame, $0) } ?? false
+                    let elapsed = ProcessInfo.processInfo.systemUptime - pendingSince
+                    diagnostics.record("codex.window-visible elapsed=\(String(format: "%.2f", elapsed)) sizeMatched=\(matched); content-readiness=unknown")
                 }
             }
         } else {
             stableFrames = 0; lastFrame = nil
         }
-        if ProcessInfo.processInfo.systemUptime - pendingSince > runtime.configuration.windowWaitTimeout {
+        if !reportedWindowReady && ProcessInfo.processInfo.systemUptime - pendingSince > runtime.configuration.windowWaitTimeout {
             poll?.invalidate(); poll = nil
             diagnostics.record("animation.timed-out no-visible-window")
             movie?.finish(.timedOut)
@@ -196,7 +217,8 @@ final class Coordinator: NSObject {
                 play(frame: nil, ready: { [weak self] in self?.startupWindowReady ?? false })
             }
             let options = NSWorkspace.OpenConfiguration(); options.activates = true; options.createsNewApplicationInstance = false
-            diagnostics.record("codex.launch-requested")
+            options.arguments = runtime.startupLaunchArguments(at: url)
+            diagnostics.record("codex.launch-requested occlusionSwitch=\(!options.arguments.isEmpty)")
             NSWorkspace.shared.openApplication(at: url, configuration: options) { [weak self] app, error in
                 Task { @MainActor in
                     guard let self, self.launchRequestID == requestID else { return }
@@ -219,14 +241,14 @@ final class Coordinator: NSObject {
 
     private func showPetRuntime(near frame: NSRect?) {
         if let multiPet {
-            multiPet.show()
+            multiPet.startEnabledInstances()
         } else {
             pet.show(near: frame)
         }
     }
 
     private func hidePetRuntime() {
-        if let multiPet { multiPet.hide() } else { pet.hide() }
+        if let multiPet { multiPet.stopAllInstances() } else { pet.hide() }
     }
 
     private func dismissPetRuntime() {
@@ -279,6 +301,8 @@ final class Coordinator: NSObject {
         for observer in workspaceObservers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
         workspaceObservers.removeAll(); diagnostics.record("controller.stop")
     }
+    func finishStopping(completion: @escaping @MainActor () -> Void) { pet.finishWindowCommands(completion: completion) }
+
     private func createMenu() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem?.button?.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: AppCopy.name)
@@ -287,14 +311,36 @@ final class Coordinator: NSObject {
     }
     private func rebuildMenu() {
         guard statusItem != nil else { return }
-        let menu = NSMenu()
+        let menu = self.menu ?? NSMenu()
+        menu.delegate = self; menu.removeAllItems()
         let backendLabel = runtime.configuration.petBackend == "external" ? "动画桌宠" : "静态预览"
-        let label = NSMenuItem(title: "\(AppCopy.name) · \(paused ? "已暂停" : backendLabel)", action: nil, keyEquivalent: "")
+        let statusLabel = (multiPet?.lastError ?? pet.lastError).map { "运行异常：\($0.prefix(72))" }
+            ?? (paused ? "已暂停" : backendLabel)
+        let label = NSMenuItem(title: "\(AppCopy.name) · \(statusLabel)", action: nil, keyEquivalent: "")
         label.isEnabled = false; menu.addItem(label); menu.addItem(.separator())
+        if let multiPet {
+            let enabled = multiPet.instances.filter(\.enabled).count
+            let active = multiPet.instances.filter { [.starting, .running, .stopping].contains($0.phase) }.count
+            let summary = NSMenuItem(title: "\(active) / \(enabled) 个实例运行中", action: nil, keyEquivalent: "")
+            summary.isEnabled = false; menu.addItem(summary)
+        }
         func item(_ title: String, _ selector: Selector) { let i = NSMenuItem(title: title, action: selector, keyEquivalent: ""); i.target = self; menu.addItem(i) }
-        item("显示桌宠", #selector(showPet)); item("隐藏桌宠", #selector(hidePet)); item("结束本次桌宠", #selector(dismissPet))
+        let activeManagedPets = multiPet?.instances.contains { [.starting, .running, .stopping].contains($0.phase) } == true
+        let primaryAction = multiPet != nil
+            ? (activeManagedPets ? "停止全部桌宠" : "启动全部桌宠")
+            : (pet.isVisible ? "隐藏桌宠" : "显示桌宠")
+        if mode != .previewAnimation {
+            if paused {
+                item("恢复陪伴", #selector(togglePause))
+            } else if mode == .watch && session.pid == nil {
+                let waiting = NSMenuItem(title: "等待 Codex 启动", action: nil, keyEquivalent: "")
+                waiting.isEnabled = false; menu.addItem(waiting)
+            } else {
+                item(primaryAction, #selector(togglePetAvailability))
+            }
+        }
         if let management = petManagementMenu() {
-            let managementItem = NSMenuItem(title: "宠物管理", action: nil, keyEquivalent: "")
+            let managementItem = NSMenuItem(title: "实例管理", action: nil, keyEquivalent: "")
             managementItem.submenu = management
             menu.addItem(managementItem)
         }
@@ -302,23 +348,29 @@ final class Coordinator: NSObject {
             menu.addItem(.separator())
             item("打开宠物素材库…", #selector(openPetLibrary))
         }
-        menu.addItem(.separator()); item(paused ? "恢复联动" : "暂停联动", #selector(togglePause))
-        item("打开 Codex", #selector(openCodex)); item("打开配置目录", #selector(openSettings))
+        if mode == .watch || mode == .launch {
+            menu.addItem(.separator()); item(paused ? "恢复 Codex 联动" : "暂停 Codex 联动", #selector(togglePause))
+        }
+        let advanced = NSMenu()
+        advanced.title = "高级"
+        if !AXIsProcessTrusted() {
+            let permission = NSMenuItem(title: "允许同步 Codex 窗口尺寸…", action: #selector(openWindowPermissionSettings), keyEquivalent: "")
+            permission.target = self; advanced.addItem(permission)
+        }
+        let settings = NSMenuItem(title: "打开配置文件夹", action: #selector(openSettings), keyEquivalent: "")
+        settings.target = self; advanced.addItem(settings)
+        let advancedItem = NSMenuItem(title: "高级", action: nil, keyEquivalent: "")
+        advancedItem.submenu = advanced
+        menu.addItem(advancedItem)
         menu.addItem(.separator()); item(AppCopy.quitTitle, #selector(quit))
         statusItem?.menu = menu; self.menu = menu
     }
 
+    func menuNeedsUpdate(_ menu: NSMenu) { rebuildMenu() }
+
     private func petManagementMenu() -> NSMenu? {
         guard let multiPet, multiPet.isConfigured else { return nil }
-        let menu = NSMenu(title: "宠物管理")
-        func item(_ title: String, _ selector: Selector, action: PetMenuAction? = nil,
-                  state: NSControl.StateValue = .off, enabled: Bool = true) {
-            let entry = NSMenuItem(title: title, action: selector, keyEquivalent: "")
-            entry.target = self; entry.representedObject = action
-            entry.state = state; entry.isEnabled = enabled; menu.addItem(entry)
-        }
-        item("全部显示", #selector(showManagedPets))
-        item("全部隐藏", #selector(hideManagedPets))
+        let menu = NSMenu(title: "实例管理")
         let cloneMenu = NSMenu(title: "创建小分身")
         let allRows = multiPet.instances.sorted { $0.id < $1.id }
         for row in allRows {
@@ -340,13 +392,16 @@ final class Coordinator: NSObject {
             return menu
         }
         for row in rows {
+            let instanceMenu = NSMenu(title: row.id)
             let action = PetMenuAction(instanceID: row.id)
             let running = row.phase == .running || row.phase == .starting
-            let title = "\(row.id) · \(managedPhaseTitle(row.phase))"
-            item(running ? "隐藏 \(title)" : "显示 \(title)", #selector(toggleManagedPet), action: action,
-                 enabled: row.phase != .stopping)
-
-            let sizeMenu = NSMenu(title: "\(row.id) 尺寸")
+            let lifecycle = NSMenuItem(title: running ? "停止实例" : "启动实例",
+                                       action: #selector(toggleManagedPet), keyEquivalent: "")
+            lifecycle.target = self; lifecycle.representedObject = action
+            lifecycle.isEnabled = !paused && row.phase != .stopping
+            instanceMenu.addItem(lifecycle)
+            instanceMenu.addItem(.separator())
+            let sizeMenu = NSMenu(title: "尺寸")
             for size in [128, 192, 256, 320, 384] {
                 let sizeItem = NSMenuItem(title: "\(size) × \(size)", action: #selector(setManagedPetSize), keyEquivalent: "")
                 sizeItem.target = self
@@ -356,7 +411,10 @@ final class Coordinator: NSObject {
             }
             let sizeItem = NSMenuItem(title: "调整尺寸…", action: nil, keyEquivalent: "")
             sizeItem.submenu = sizeMenu
-            menu.addItem(sizeItem)
+            instanceMenu.addItem(sizeItem)
+            let instanceItem = NSMenuItem(title: "\(row.id) · \(managedPhaseTitle(row.phase))", action: nil, keyEquivalent: "")
+            instanceItem.submenu = instanceMenu
+            menu.addItem(instanceItem)
         }
         return menu
     }
@@ -373,9 +431,17 @@ final class Coordinator: NSObject {
 
     @objc private func showPet() { _ = handle(.init(.show)) }
     @objc private func hidePet() { _ = handle(.init(.hide)) }
-    @objc private func dismissPet() { _ = handle(.init(.dismiss)) }
-    @objc private func showManagedPets() { multiPet?.show(); rebuildMenu() }
-    @objc private func hideManagedPets() { multiPet?.hide(); rebuildMenu() }
+    @objc private func togglePetAvailability() {
+        if let multiPet {
+            let active = multiPet.instances.contains { [.starting, .running, .stopping].contains($0.phase) }
+            _ = handle(.init(active ? .hide : .show))
+        } else if pet.isVisible {
+            hidePet()
+        } else {
+            showPet()
+        }
+        rebuildMenu()
+    }
     @objc private func cloneManagedPet(_ sender: NSMenuItem) {
         guard let action = sender.representedObject as? PetMenuAction,
               let sourceID = action.cloneSourceID else { return }
@@ -401,6 +467,10 @@ final class Coordinator: NSObject {
     }
     @objc private func togglePause() { _ = handle(.init(paused ? .resume : .pause)) }
     @objc private func quit() { _ = handle(.init(.quit)) }
+    @objc private func openWindowPermissionSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else { return }
+        NSWorkspace.shared.open(url)
+    }
     @objc private func openSettings() { NSWorkspace.shared.open(runtime.state) }
     @objc private func openPetLibrary() {
         let appURL = runtime.petLibraryAppURL
@@ -430,5 +500,4 @@ final class Coordinator: NSObject {
         alert.alertStyle = .warning
         alert.runModal()
     }
-    @objc private func openCodex() { launchCodex() }
 }

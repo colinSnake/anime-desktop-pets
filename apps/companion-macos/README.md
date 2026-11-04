@@ -1,4 +1,4 @@
-# macOS 桌边小伙伴宿主
+# macOS 桌边小崽宿主
 
 SwiftPM 应用位于本目录；`Package.swift` 定义 `DragonCore`、`DragonCompanion` 和 `DragonCoreTests`。
 

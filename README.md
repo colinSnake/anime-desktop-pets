@@ -7,9 +7,9 @@ Claude, DeepSeek and Grok characters are planned, not yet integrated. The app ru
 without modifying its application bundle or `app.asar`. It is an independent project, not an
 official OpenAI product or plugin.
 
-The app's Chinese UI name is **桌边小伙伴** (“Desk-side Buddy”), with the line **让喜欢的角色，陪在桌边。**
-The project name is Anime Desktop Pets. Existing bundle, configuration and data identifiers remain
-unchanged.
+The app's Chinese UI name is **桌边小崽** (“Desk-side Cub”), with the line **让喜欢的角色，陪在桌边。**
+The project name is Anime Desktop Pets. The built application is **`桌边小崽.app`**, including its macOS
+display name. The bundle identifier, internal executable, configuration and data paths remain unchanged.
 
 ## Current Status
 
@@ -55,8 +55,8 @@ instance. For Codex launch/watch modes and local configuration, see the
 
 ## Features and Boundaries
 
-- The 4K startup video begins with the Codex launch request. A floating panel keeps Codex active underneath so its loading overlaps the video; existing processes do not replay it. This does not detect completion of Codex network/UI loading.
-- Full animated white-dragon pet, multi-instance management and a local pet asset library.
+- The 4K startup video and Codex launch run together. New client windows are sized to the 16:9 video when Accessibility is granted; otherwise the video fills the actual client frame (edge cropping, no letterboxing). A nearly opaque nonactivating cover and a Chromium occlusion switch prevent the cover from intentionally backgrounding rendering; this is not a client content-readiness API or a guarantee of loading within 14 seconds. Existing processes are neither resized nor replayed.
+- Full animated white-dragon pet, multi-instance management and a local pet asset library. The status menu manages lifecycle; per-pet menus handle interaction and animation previews. See the [menu contract](docs/菜单功能与交互边界.md).
 - Startup presentation and coordination run in the macOS host; animation and interaction run in a
   separate Python/PySide6 helper.
 - Release flick physics continues while the context menu is open; starting another left drag deliberately interrupts and resets the prior motion.

@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Remove only archived Dragon Codex Companion and BailongPet build bundles."""
+"""Remove only owned archived host and BailongPet build bundles."""
 import argparse
 from pathlib import Path
 import re
+import plistlib
 import shutil
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 HOST_HISTORY = ROOT / 'build'
 HELPER_HISTORY = ROOT / '.local/pet-build/previous'
-HOST_PATTERN = re.compile(r'^Dragon Codex Companion\.previous\.\d{8}-\d{6}-\d+\.app$')
+HOST_PATTERN = re.compile(r'^(?:桌边小崽|Dragon Codex Companion)\.previous\.\d{8}-\d{6}-\d+\.app$')
 HELPER_PATTERN = re.compile(r'^\d{8}-\d{6}$')
 
 
@@ -18,11 +19,19 @@ def allocated_kib(path):
     return int(result.stdout.split()[0])
 
 
+def owned_host(path):
+    try:
+        with (path / 'Contents/Info.plist').open('rb') as stream:
+            return plistlib.load(stream).get('CFBundleIdentifier') == 'local.dragon.codex-companion'
+    except (OSError, ValueError, plistlib.InvalidFileException, AttributeError):
+        return False
+
+
 def candidates(host=True, helper=True):
     found = []
     if host and HOST_HISTORY.is_dir():
         found.extend(path for path in HOST_HISTORY.iterdir()
-                     if HOST_PATTERN.fullmatch(path.name) and path.is_dir() and not path.is_symlink())
+                     if HOST_PATTERN.fullmatch(path.name) and path.is_dir() and not path.is_symlink() and owned_host(path))
     if helper and HELPER_HISTORY.is_dir():
         for path in HELPER_HISTORY.iterdir():
             if not HELPER_PATTERN.fullmatch(path.name) or not path.is_dir() or path.is_symlink():
@@ -34,6 +43,8 @@ def candidates(host=True, helper=True):
 
 
 def busy_paths(paths):
+    if not paths:
+        return set()
     result = subprocess.run(['/usr/sbin/lsof', '-nP', '-Fpn'], capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError('无法检查历史 App 是否正在使用；未删除任何文件')

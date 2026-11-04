@@ -19,7 +19,6 @@ final class BootPlayer: NSObject {
     private let diagnostics: Diagnostics
     private let targetReady: () -> Bool
     private let preservesTargetActivation: Bool
-    private var followsTargetWindow = false
     private let onFinish: (Outcome) -> Void
     private var window: MovieWindow?
     private var player: AVPlayer?
@@ -42,14 +41,11 @@ final class BootPlayer: NSObject {
         guard FileManager.default.fileExists(atPath: url.path) else { finish(.mediaFailed); return }
         let screen = WindowGeometry.screen(for: frame)
         let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
-        let width = min(config.playerMaxWidth, visible.width * 0.9, visible.height * 0.9 * 16 / 9)
-        let fallback = NSRect(x: visible.midX - width / 2, y: visible.midY - width * 9 / 32, width: width, height: width * 9 / 16)
-        let rect = frame ?? fallback
+        let rect = frame ?? StartupPresentation.videoFrame(near: nil, visible: visible, maximumWidth: config.playerMaxWidth)
         let style: NSWindow.StyleMask = preservesTargetActivation ? [.borderless, .nonactivatingPanel] : [.borderless]
         let movie = MovieWindow(contentRect: rect, styleMask: style, backing: .buffered, defer: false)
         movie.hidesOnDeactivate = false
         movie.becomesKeyOnlyIfNeeded = true
-        followsTargetWindow = frame != nil
         movie.title = "Dragon · 启动动画"
         movie.isReleasedWhenClosed = false; movie.isOpaque = false; movie.backgroundColor = .clear
         movie.level = .floating; movie.hasShadow = true
@@ -60,7 +56,7 @@ final class BootPlayer: NSObject {
         root.layer?.backgroundColor = NSColor.black.cgColor
         let video = AVPlayerView(frame: root.bounds)
         video.autoresizingMask = [.width, .height]; video.controlsStyle = .none
-        video.videoGravity = .resizeAspect
+        video.videoGravity = preservesTargetActivation ? .resizeAspectFill : .resizeAspect
         root.addSubview(video)
         let button = NSButton(title: preservesTargetActivation ? "跳过" : "跳过  Esc", target: self, action: #selector(skip))
         button.bezelStyle = .rounded; button.translatesAutoresizingMaskIntoConstraints = false
@@ -73,6 +69,7 @@ final class BootPlayer: NSObject {
             label.centerXAnchor.constraint(equalTo: root.centerXAnchor), label.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -24)
         ])
         movie.contentView = root; window = movie
+        movie.alphaValue = StartupPresentation.opacity(1, coveringClient: preservesTargetActivation)
         let item = AVPlayerItem(url: url)
         let player = AVPlayer(playerItem: item); player.volume = Float(config.volume)
         self.player = player; video.player = player
@@ -100,9 +97,8 @@ final class BootPlayer: NSObject {
     }
 
     func match(frame: NSRect) {
-        guard !finishing, !followsTargetWindow else { return }
-        followsTargetWindow = true
-        window?.setFrame(frame, display: true)
+        guard !finishing, let window, !StartupPresentation.framesMatch(window.frame, frame, tolerance: 0.5) else { return }
+        window.setFrame(frame, display: true)
     }
 
     @objc private func skip() { finish(.skipped) }
@@ -117,7 +113,7 @@ final class BootPlayer: NSObject {
         if t >= config.holdAt && !ready {
             if !waiting { waiting = true; player.pause(); waitingLabel?.isHidden = false }
         } else if waiting && ready { waiting = false; waitingLabel?.isHidden = true; player.play() }
-        if !waiting { window?.alphaValue = config.opacity(at: t) }
+        if !waiting { window?.alphaValue = StartupPresentation.opacity(config.opacity(at: t), coveringClient: preservesTargetActivation) }
         if t >= config.transitionEnd && ready { finish(.completed); return }
         if watchdog.stalled(position: t, now: now, intentionallyPaused: waiting) { finish(.mediaFailed) }
     }

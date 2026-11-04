@@ -23,8 +23,8 @@ SOURCE = ROOT.parent.parent / 'github/codex-pet/bailong-desktop-pet-macos'
 STAGE = LOCAL / 'generated-source'
 APP = LOCAL / 'dist/BailongPet.app'
 PYTHON = LOCAL / 'venv/bin/python'
-VERSION = 'dragon.41'
-BUNDLE_VERSION = '35'
+VERSION = 'dragon.42'
+BUNDLE_VERSION = '36'
 
 
 def digest(path):
@@ -82,7 +82,7 @@ def stage(source, bundle_assets=False):
     pet_source.write_text(pet_text.replace(
         default_assets,
         "ASSETS=Path(os.environ.get('BAILONG_ASSETS_DIR', ROOT/'outputs/白龙桌宠素材')).expanduser().resolve()", 1))
-    for name in ('dragon_frames.py', 'dragon_ui.py', 'dragon_behavior.py', 'dragon_playback.py', 'dragon_tasks.py', 'dragon_quota.py'):
+    for name in ('dragon_frames.py', 'dragon_ui.py', 'dragon_behavior.py', 'dragon_playback.py', 'dragon_tasks.py', 'dragon_quota.py', 'dragon_visibility.py'):
         shutil.copy2(RUNTIME_BAILONG / name, STAGE / 'app' / name)
     for name in ('dragon_instances.py', 'dragon_instance_ipc.py', 'dragon_pet_helper.py', 'pet_reference_lock.py', 'pet_library.py'):
         shutil.copy2(RUNTIME_PETS / name, STAGE / 'app' / name)
@@ -115,7 +115,7 @@ def stage(source, bundle_assets=False):
                     upstreamCommit='8e5466d9a438deb6cb43f460e7f5a9bdb9d7a578',
                     upstreamArchiveSHA256='c7df79f2b7e3fb90736e3ed8fb21be2fd6f8fe2d3982c494f0ee1c68004ccdb2',
                     scope='private local adaptation; preserve all upstream notices',
-                    assetsBundled=bundle_assets,
+                    assetsBundled=bundle_assets, windowControlProtocol=1,
                     extraAnimations=extra_source,
                     releaseCache=json.loads((STAGE / 'outputs/白龙桌宠素材/dragon-release/catalog.json').read_text()),
                     assetOverlaySHA256=digest(ROOT / 'scripts/extra-animation-overlay.py'),
@@ -140,7 +140,10 @@ def build(source, bundle_assets=False):
                     str(STAGE / 'macos/BailongPet.spec')], env=env, check=True)
     subprocess.run(['/usr/bin/chflags', '-R', 'nohidden', str(APP)], check=True)
     subprocess.run(['/usr/bin/codesign', '--verify', '--deep', '--strict', str(APP)], check=True)
-    subprocess.run([sys.executable, str(ROOT/'scripts/clean-builds.py'), '--helper-archives-only'], check=True)
+    if os.environ.get('DRAGON_SKIP_BUILD_CLEANUP') == '1':
+        print('Skipped helper archive cleanup (DRAGON_SKIP_BUILD_CLEANUP=1).')
+    else:
+        subprocess.run([sys.executable, str(ROOT/'scripts/clean-builds.py'), '--helper-archives-only'], check=True)
     print(json.dumps({'app': str(APP), 'patch': metadata['patchVersion'], 'launched': False}, ensure_ascii=False))
 
 

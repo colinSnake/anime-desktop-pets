@@ -2,7 +2,7 @@ import AppKit
 import DragonCore
 import Foundation
 
-struct Runtime {
+struct Runtime: Sendable {
     let resources: URL
     let state: URL
     let configuration: CompanionConfiguration
@@ -37,6 +37,15 @@ struct Runtime {
         Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/DragonPetLibrary.app")
     }
     var petLibraryURL: URL { state.appendingPathComponent("PetLibrary", isDirectory: true) }
+
+    func startupLaunchArguments(at app: URL) -> [String] {
+        // Apply the occlusion switch only to Chromium-style bundles, not arbitrary native clients.
+        let frameworks = app.appendingPathComponent("Contents/Frameworks")
+        let chromium = ["Codex Framework.framework", "Electron Framework.framework"].contains {
+            FileManager.default.fileExists(atPath: frameworks.appendingPathComponent($0).path)
+        }
+        return chromium ? StartupPresentation.chromiumLaunchArguments : []
+    }
 
     @MainActor
     func codexURL() throws -> URL {

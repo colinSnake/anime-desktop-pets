@@ -1,13 +1,18 @@
 import AppKit
 import DragonCore
 
-struct ExternalPetDescriptor {
+struct ExternalPetDescriptor: Sendable {
     let url: URL
     let bundleIdentifier: String
     let catalog: PetAnimationCatalog?
     let buildVersion: String?
     let patchVersion: String?
     let assetsURL: URL?
+    var supportsWindowControl: Bool {
+        guard let data = try? Data(contentsOf: url.appendingPathComponent("Contents/Resources/DRAGON_PATCH.json")),
+              let marker = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return marker["windowControlProtocol"] as? Int == 1
+    }
 
     static func inspect(_ runtime: Runtime) throws -> Self {
         let url = runtime.configuration.resourceURL(runtime.configuration.externalPetAppPath, relativeTo: runtime.resources)

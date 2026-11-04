@@ -71,7 +71,7 @@ final class PetInstanceRuntime {
         self.executable = executable
     }
 
-    func start() { show() }
+    func start() { startEnabledInstances() }
 
     private func launchIfNeeded() {
         if process?.isRunning == true { return }
@@ -109,7 +109,7 @@ final class PetInstanceRuntime {
         }
     }
 
-    func show() {
+    func startEnabledInstances() {
         pending.append(.restore(excluding: []))
         launchIfNeeded()
         drain()
@@ -121,7 +121,7 @@ final class PetInstanceRuntime {
         drain()
     }
 
-    func hide() {
+    func stopAllInstances() {
         pending.removeAll { operation in
             switch operation {
             case .restore: return true

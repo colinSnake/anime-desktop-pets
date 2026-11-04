@@ -18,7 +18,7 @@
          if '--quota-only' in sys.argv:
              from quota import read_quota,quota_windows
              windows=quota_windows(read_quota())
-@@ -37,58 +26,227 @@
+@@ -37,58 +26,229 @@
          from types import SimpleNamespace
          report.update(version=VERSION,frozen=bool(getattr(sys,'frozen',False)))
          app=QApplication([]);pet=Pet();pet.tick.stop()
@@ -156,7 +156,9 @@
 +        menu=pet.context_menu();labels=[a.text() for a in menu.actions()]
 +        assert '查看 Codex 额度' in labels
 +        assert not any('对话模式' in text or '历史对话' in text for text in labels)
-+        assert [a.text() for a in menu.actions() if a.menu()]==['桌宠大小','自主活动','互动差分动画','工作差分动画','待机差分动画']
++        assert [a.text() for a in menu.actions() if a.menu()]==['桌宠大小','自主活动','动作预览']
++        previews=next(a.menu() for a in menu.actions() if a.text()=='动作预览')
++        assert [a.text() for a in previews.actions() if a.menu()]==['互动差分动画','工作差分动画','待机差分动画']
 +        from PySide6.QtWidgets import QProgressBar
 +        windows=quota_windows({'rateLimits':{'primary':{'usedPercent':20,'windowDurationMins':300},'secondary':{'usedPercent':35,'windowDurationMins':10080}}})
 +        pet.bubble.quota(windows);app.processEvents()

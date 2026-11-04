@@ -39,12 +39,12 @@ done
 SWIFT_APP="$ROOT/apps/companion-macos"
 swift build --package-path "$SWIFT_APP" --scratch-path "$ROOT/.build" -c release --product DragonCompanion
 BIN="$(swift build --package-path "$SWIFT_APP" --scratch-path "$ROOT/.build" -c release --show-bin-path)"
-APP="$ROOT/build/Dragon Codex Companion.app"
+APP="$ROOT/build/桌边小崽.app"
 # Build into a fresh staging bundle; preserve the last usable app until signing succeeds.
 STAGING="$(mktemp -d "$ROOT/.build/app-stage.XXXXXX")"
 trap 'test ! -d "$STAGING" || /bin/rm -rf "$STAGING"' EXIT
-mkdir -p "$STAGING/Dragon Codex Companion.app/Contents/"{MacOS,Resources/Licenses}
-BUNDLE="$STAGING/Dragon Codex Companion.app"
+mkdir -p "$STAGING/桌边小崽.app/Contents/"{MacOS,Resources/Licenses}
+BUNDLE="$STAGING/桌边小崽.app"
 cp "$BIN/DragonCompanion" "$BUNDLE/Contents/MacOS/DragonCompanion"
 cp -R "$ROOT/resources/media" "$ROOT/resources/pet" "$ROOT/resources/poster" "$BUNDLE/Contents/Resources/"
 cp "$ROOT/resources/branding/AppIcon.icns" "$BUNDLE/Contents/Resources/AppIcon.icns"
@@ -82,21 +82,20 @@ cp "$ROOT/licenses/"*.md "$BUNDLE/Contents/Resources/Licenses/"
 python3 - "$BUNDLE/Contents/Info.plist" <<'PY'
 import plistlib,sys
 with open(sys.argv[1],'wb') as out:
-    plistlib.dump(dict(CFBundleName='Dragon Codex Companion', CFBundleDisplayName='Dragon Codex Companion',
+    plistlib.dump(dict(CFBundleName='桌边小崽', CFBundleDisplayName='桌边小崽',
         CFBundleExecutable='DragonCompanion', CFBundleIdentifier='local.dragon.codex-companion',
         CFBundleIconFile='AppIcon.icns',
-        CFBundlePackageType='APPL', CFBundleShortVersionString='0.7.7', CFBundleVersion='27',
+        CFBundlePackageType='APPL', CFBundleShortVersionString='0.7.10', CFBundleVersion='30',
         LSMinimumSystemVersion='13.0', LSUIElement=True, NSHighResolutionCapable=True),out)
 PY
 codesign --force --sign - "$BUNDLE"
 codesign --verify --deep --strict "$BUNDLE"
-mkdir -p "$ROOT/build"
-if [[ -e "$APP" ]]; then
-  ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist" 2>/dev/null || true)
-  [[ "$ID" == 'local.dragon.codex-companion' ]] || { echo 'Refusing to replace unrelated App.' >&2; exit 1; }
-  # Keep the prior app intact until the new bundle has been signed and verified.
-  mv "$APP" "$ROOT/build/Dragon Codex Companion.previous.$(date +%Y%m%d-%H%M%S)-$$.app"
+# Publish the signed bundle atomically, archiving only our old/new named apps.
+# The publisher validates every destination before moving anything and rolls back on failure.
+python3 "$ROOT/scripts/publish-app-bundle.py" --bundle "$BUNDLE" --build-dir "$ROOT/build"
+if [[ "${DRAGON_SKIP_BUILD_CLEANUP:-0}" == 1 ]]; then
+  echo 'Skipped build archive cleanup (DRAGON_SKIP_BUILD_CLEANUP=1).'
+else
+  python3 "$ROOT/scripts/clean-builds.py"
 fi
-mv "$BUNDLE" "$APP"
-python3 "$ROOT/scripts/clean-builds.py"
 printf '\nBuilt: %s\nPet mode: %s\nNot launched. No login item installed.\n' "$APP" "$MODE"

@@ -9,5 +9,6 @@ let package = Package(
         .target(name: "DragonCore"),
         .executableTarget(name: "DragonCompanion", dependencies: ["DragonCore"]),
         .testTarget(name: "DragonCoreTests", dependencies: ["DragonCore"]),
+        .testTarget(name: "DragonCompanionTests", dependencies: ["DragonCompanion", "DragonCore"]),
     ]
 )

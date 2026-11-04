@@ -10,7 +10,7 @@ fi
 swift test --package-path "$ROOT/apps/companion-macos" --scratch-path "$ROOT/.local/multi-pet-validation/swift-build"
 /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network*)' \
   "$PYTHON" "$ROOT/scripts/test-multi-pet.py"
-/usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network*)' \
+/usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network-outbound (remote ip "*:*")) (deny network-inbound (local ip "*:*"))' \
   "$PYTHON" "$ROOT/scripts/test-real-pet-adapter.py"
 # 拒绝IP联网，但允许本机Unix socket；所有fixture使用临时HOME与profile。
 /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network-outbound (remote ip "*:*")) (deny network-inbound (local ip "*:*"))' \

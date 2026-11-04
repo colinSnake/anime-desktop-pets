@@ -60,7 +60,6 @@ private final class ExternalLaunchTicket { var cancelled = false }
 final class PetController: NSObject {
     var taskFollowingAllowed = false
     var onHide: (() -> Void)?
-    var onDismiss: (() -> Void)?
     var onError: ((String) -> Void)?
     private(set) var lastError: String?
     private let runtime: Runtime
@@ -74,12 +73,46 @@ final class PetController: NSObject {
     private var managedExternal: NSRunningApplication?
     private var externalIntent = ExternalPetLaunchIntent()
     private var launchTicket: ExternalLaunchTicket?
+    private var externalWindowControl = false
+    private var descriptorLoadTask: Task<Void, Never>?
+    private let windowCommandQueue = DispatchQueue(label: "local.dragon.pet-window-control", qos: .utility)
+    private var windowCommandWork: DispatchWorkItem?
+    var onChanged: (() -> Void)?
+
+    private func requestWindow(_ command: String, app: NSRunningApplication) {
+        windowCommandWork?.cancel()
+        let pid = app.processIdentifier
+        let intent = externalIntent.generation
+        let work = DispatchWorkItem { [weak self] in
+            let result = Result { try PetWindowControl.send(command, pid: pid) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.externalIntent.generation == intent else { return }
+                switch result {
+                case .success: self.lastError = nil
+                case .failure(let error): self.failExternal("窗口操作未确认：\(error.localizedDescription)")
+                }
+                self.onChanged?()
+            }
+        }
+        windowCommandWork = work
+        windowCommandQueue.async(execute: work)
+    }
+    func finishWindowCommands(completion: @escaping @MainActor () -> Void) {
+        // AppKit termination runs a nested modal loop; the main dispatch queue
+        // may already be inside terminate(). Deliver in the modal run-loop mode.
+        windowCommandQueue.async {
+            RunLoop.main.perform(inModes: [.default, .modalPanel]) {
+                MainActor.assumeIsolated { completion() }
+            }
+        }
+    }
+
     var isVisible: Bool {
-        panel?.isVisible ?? (external.map { !$0.isHidden && !$0.isTerminated && WindowGeometry.hasVisibleWindow(pid: $0.processIdentifier, expectedSize: $0.bundleIdentifier == "local.bailongpet.macos" ? NSSize(width: 256, height: 256) : nil) } ?? false)
+        panel?.isVisible ?? (external.map { !$0.isHidden && !$0.isTerminated && WindowGeometry.hasVisibleWindow(pid: $0.processIdentifier) } ?? false)
     }
     var state: String {
         if lastError != nil { return "failed" }
-        if launchTicket != nil && desiredVisible { return "starting" }
+        if (descriptorLoadTask != nil || launchTicket != nil) && desiredVisible { return "starting" }
         if isVisible { return "visible" }
         if let external, !external.isTerminated { return desiredVisible ? "running-no-visible-window" : "hidden" }
         return desiredVisible ? "not-running" : "idle"
@@ -123,7 +156,7 @@ final class PetController: NSObject {
         panel.hidesOnDeactivate = false; panel.isFloatingPanel = true
         let view = PetView(frame: NSRect(origin: .zero, size: panel.frame.size))
         view.imageView.image = validatedImage(at: runtime.petURL) ?? NSImage(systemSymbolName: "sparkles", accessibilityDescription: "桌宠素材未导入")
-        view.onClick = { [weak self] in self?.say(["我在这里陪你。", "慢慢来，把想法变成作品。", "可以拖动我，右键打开菜单。", "本地陪伴模式；任务状态尚未接入。"].randomElement()!) }
+        view.onClick = { [weak self] in self?.say(["我在这里陪你。", "慢慢来，把想法变成作品。", "可以拖动我，右键打开菜单。", "静态预览模式；完整动画请使用增强桌宠。"].randomElement()!) }
         view.onDragEnd = { [weak self] in self?.savePosition() }
         view.makeMenu = { [weak self] in self?.menu() ?? NSMenu() }
         panel.contentView = view; self.panel = panel
@@ -160,20 +193,45 @@ final class PetController: NSObject {
     func hide() {
         externalIntent.hide(); launchTicket?.cancelled = true; desiredVisible = false
         visibilityTimer?.invalidate(); visibilityTimer = nil
-        panel?.orderOut(nil); bubble?.orderOut(nil); _ = external?.hide()
+        panel?.orderOut(nil); bubble?.orderOut(nil)
+        if let external {
+            if externalWindowControl { requestWindow("hide", app: external) }
+            else if !external.hide() { failExternal("此桌宠版本不支持宿主隐藏，请使用桌宠右键菜单") }
+        }
     }
     func dismiss(preserveIndependentExternal: Bool = false) {
-        if preserveIndependentExternal && !externalOwned { external = nil }
-        hide(); visibilityTimer?.invalidate(); visibilityTimer = nil
+        if preserveIndependentExternal {
+            externalIntent.hide(); launchTicket?.cancelled = true; desiredVisible = false
+            if externalOwned, externalWindowControl, let external { requestWindow("quit", app: external) }
+            else if externalOwned { _ = external?.hide() }
+            // Independent helpers belong to their user, not this coordinator.
+            external = nil
+        } else { hide() }
+        visibilityTimer?.invalidate(); visibilityTimer = nil
         bubbleTimer?.invalidate(); bubbleTimer = nil; bubble?.close(); bubble = nil
         panel?.close(); panel = nil
         // Never terminate a third-party app: it may own a running Codex task.
         external = nil; externalOwned = false
     }
     private func showExternal() {
-        let descriptor: ExternalPetDescriptor
-        do { descriptor = try ExternalPetDescriptor.inspect(runtime) }
-        catch { failExternal(error.localizedDescription); return }
+        guard descriptorLoadTask == nil else { return }
+        let runtime = self.runtime
+        descriptorLoadTask = Task { @MainActor [weak self] in
+            let result = await Task.detached(priority: .utility) {
+                Result { try ExternalPetDescriptor.inspect(runtime) }
+            }.value
+            guard let self else { return }
+            self.descriptorLoadTask = nil
+            guard self.desiredVisible else { return }
+            switch result {
+            case .success(let descriptor): self.launchExternal(descriptor)
+            case .failure(let error): self.failExternal(error.localizedDescription); self.onChanged?()
+            }
+        }
+    }
+
+    private func launchExternal(_ descriptor: ExternalPetDescriptor) {
+        externalWindowControl = descriptor.supportsWindowControl
         if let app = NSRunningApplication.runningApplications(withBundleIdentifier: descriptor.bundleIdentifier).first(where: { !$0.isTerminated }) {
             if descriptor.catalog != nil,
                app.bundleURL.flatMap({ Bundle(url: $0)?.object(forInfoDictionaryKey: "CFBundleVersion") as? String }) != descriptor.buildVersion {
@@ -189,6 +247,7 @@ final class PetController: NSObject {
             }
             external = app
             externalOwned = managedExternal?.processIdentifier == app.processIdentifier && managedExternal?.isTerminated == false
+            if externalWindowControl { requestWindow("show", app: app); return }
             _ = app.unhide()
             if descriptor.catalog != nil {
                 // 上游手动隐藏不会被 NSRunningApplication.unhide 清除；连接其固定的唤回 Socket。
@@ -205,7 +264,8 @@ final class PetController: NSObject {
             options.environment = ProcessInfo.processInfo.environment.merging(["BAILONG_ASSETS_DIR": assetsURL.path]) { _, new in new }
         }
         options.environment = ProcessInfo.processInfo.environment.merging(options.environment) { _, new in new }.merging(
-            ["DRAGON_TASK_LEASE": taskFollowingAllowed ? runtime.state.appendingPathComponent("codex-task-lease.json").path : ""]) { _, new in new }
+            ["DRAGON_TASK_LEASE": taskFollowingAllowed ? runtime.state.appendingPathComponent("codex-task-lease.json").path : "",
+             "DRAGON_WINDOW_CONTROL": descriptor.supportsWindowControl ? "1" : "0"]) { _, new in new }
         // 不传自动启动、查询或聊天参数；仅启动上游完整桌宠。
         NSWorkspace.shared.openApplication(at: descriptor.url, configuration: options) { [weak self, ticket] app, error in
             Task { @MainActor [weak self] in
@@ -221,7 +281,9 @@ final class PetController: NSObject {
                 }
                 self.external = app; self.managedExternal = app; self.externalOwned = true
                 switch self.externalIntent.resolve(token) {
-                case .hide: _ = app.hide()
+                case .hide:
+                    if self.externalWindowControl { self.requestWindow("hide", app: app) }
+                    else { _ = app.hide() }
                 case .reveal, .leaveAlone:
                     // 旧请求不能把更新的显示意图隐藏掉；也不抢键盘焦点。
                     if self.desiredVisible { _ = app.unhide() }
@@ -278,12 +340,10 @@ final class PetController: NSObject {
     }
     private func menu() -> NSMenu {
         let menu = NSMenu()
-        let title = NSMenuItem(title: "Dragon · 本地陪伴模式", action: nil, keyEquivalent: ""); title.isEnabled = false; menu.addItem(title)
+        let title = NSMenuItem(title: AppCopy.name, action: nil, keyEquivalent: ""); title.isEnabled = false; menu.addItem(title)
         menu.addItem(.separator())
         let hide = NSMenuItem(title: "隐藏桌宠", action: #selector(hideAction), keyEquivalent: ""); hide.target = self; menu.addItem(hide)
-        let dismiss = NSMenuItem(title: "结束本次桌宠", action: #selector(dismissAction), keyEquivalent: ""); dismiss.target = self; menu.addItem(dismiss)
         return menu
     }
     @objc private func hideAction() { onHide?() }
-    @objc private func dismissAction() { onDismiss?() }
 }

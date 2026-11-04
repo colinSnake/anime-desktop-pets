@@ -16,16 +16,17 @@ enum WindowGeometry {
         }.max { $0.width * $0.height < $1.width * $1.height }
     }
 
-    static func hasVisibleWindow(pid: pid_t, expectedSize: NSSize? = nil) -> Bool {
+    static func hasVisibleWindow(pid: pid_t) -> Bool {
         guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return false }
-        return windows.contains { info in
+        return containsVisibleWindow(pid: pid, windows: windows)
+    }
+
+    static func containsVisibleWindow(pid: pid_t, windows: [[String: Any]]) -> Bool {
+        windows.contains { info in
             guard (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid,
                   (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1 > 0.05,
                   let bounds = info[kCGWindowBounds as String] as? NSDictionary,
                   let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary) else { return false }
-            if let expectedSize {
-                return abs(rect.width - expectedSize.width) <= 4 && abs(rect.height - expectedSize.height) <= 4
-            }
             return rect.width >= 48 && rect.height >= 48
         }
     }

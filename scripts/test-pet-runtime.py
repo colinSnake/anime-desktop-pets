@@ -339,7 +339,8 @@ class UITests(unittest.TestCase):
             self.assertEqual([a.text() for a in all_menus[0].actions()],
                              ['50%（128 × 128）','75%（192 × 192）','100%（256 × 256）',
                               '125%（320 × 320）','150%（384 × 384）'])
-            menus=[a.menu() for a in menu.actions() if a.menu() and a.text() in
+            previews=next(a.menu() for a in menu.actions() if a.text()=='动作预览')
+            menus=[a.menu() for a in previews.actions() if a.menu() and a.text() in
                    ['互动差分动画','工作差分动画','待机差分动画']]
             self.assertEqual(next(a.menu() for a in menu.actions() if a.text() == '自主活动').title(),'自主活动')
             self.assertEqual([m.title() for m in menus],['互动差分动画','工作差分动画','待机差分动画'])
@@ -1293,7 +1294,8 @@ class ClipMovementTests(unittest.TestCase):
             self.assertIn(self.pet.current['id'], ['idle', 'idle2', 'idle03', 'idle04', 'idle05', 'idle06'])
         self.assertTrue(selected.intersection({'idle03', 'idle04', 'idle05', 'idle06'}))
         menu = self.pet.context_menu()
-        idle = next(a.menu() for a in menu.actions() if a.text() == '待机差分动画')
+        previews = next(a.menu() for a in menu.actions() if a.text() == '动作预览')
+        idle = next(a.menu() for a in previews.actions() if a.text() == '待机差分动画')
         self.assertEqual(len(idle.actions()), 6)
         self.assertEqual(idle.actions()[1].text(), '待机动作02')
         self.assertIn('翻绘本', idle.actions()[2].text())
