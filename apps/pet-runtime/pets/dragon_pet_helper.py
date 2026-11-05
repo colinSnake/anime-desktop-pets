@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 import os
 from pathlib import Path
 import sys
@@ -232,7 +233,11 @@ def _factory(row, state):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--multi-profile', required=True, type=Path)
+    parser.add_argument('--initial-from-assets', type=Path)
+    parser.add_argument('--initial-preferences')
     args = parser.parse_args(argv)
+    if (args.initial_from_assets is None) != (args.initial_preferences is None):
+        parser.error('首次初始化必须同时提供素材目录和白名单偏好')
     profile = args.multi_profile.expanduser().resolve()
     profile.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.environ['BAILONG_DATA_DIR'] = str(profile)
@@ -245,6 +250,16 @@ def main(argv=None):
     app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     store = InstanceStore(profile)
+    if args.initial_from_assets is not None:
+        try:
+            allowed = {'size', 'x', 'y', 'scheduledActivity', 'movement', 'hideInFullscreen'}
+            initial_preferences = json.loads(args.initial_preferences)
+            if not isinstance(initial_preferences, dict) or set(initial_preferences) - allowed:
+                raise ValueError('首次初始化偏好包含不支持的字段')
+            store.create_initial_from_assets(args.initial_from_assets, initial_preferences)
+        except Exception:
+            store.close()
+            raise
     controller = InstanceController(store, _factory, parent=app)
     server = InstanceCommandServer(controller, parent=app)
     # The controller confirms all windows first; the server quits only after

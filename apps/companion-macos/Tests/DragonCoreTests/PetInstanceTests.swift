@@ -20,6 +20,13 @@ final class PetInstanceTests: XCTestCase {
         let value = try PetInstanceRegistry(instances: [definition("first"), definition("second")])
         XCTAssertEqual(try PetInstanceRegistry.decode(JSONEncoder().encode(value)), value)
     }
+    func testLegacyCloneWithoutAutoStartFieldStaysStoppedButOriginalRestores() throws {
+        let json = #"{"schemaVersion":1,"instances":[{"id":"white-dragon","package":{"id":"local.dragon","version":"1.0.0"}},{"id":"white-dragon-copy-2","package":{"id":"local.dragon","version":"1.0.0"}},{"id":"copy-pet","package":{"id":"local.copy-pet","version":"1.0.0"}}]}"#
+        let value = try PetInstanceRegistry.decode(Data(json.utf8))
+        XCTAssertTrue(value.instances[0].autoStartOnLaunch)
+        XCTAssertFalse(value.instances[1].autoStartOnLaunch)
+        XCTAssertTrue(value.instances[2].autoStartOnLaunch)
+    }
     func testInvalidPackageIdentity() {
         for id in ["../outside", "", "UPPER", "/absolute", "local.a\n"] {
             XCTAssertThrowsError(try PetPackageReference(id: id, version: "1.0.0"))

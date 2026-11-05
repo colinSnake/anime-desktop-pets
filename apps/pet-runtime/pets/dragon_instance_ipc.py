@@ -27,7 +27,7 @@ COMMAND_FIELDS = {
     'status': set(), 'start_pet': {'instanceID'}, 'stop_pet': {'instanceID'},
     'start_selected': {'instanceIDs'}, 'stop_all': set(),
     'set_preferences': {'instanceID', 'preferences'}, 'set_package': {'instanceID', 'package'},
-    'clone_pet': {'instanceID', 'cloneID'}, 'shutdown': set(),
+    'clone_pet': {'instanceID', 'cloneID'}, 'delete_pet': {'instanceID'}, 'shutdown': set(),
 }
 
 
@@ -108,7 +108,7 @@ def validate_reply(reply, request_id):
             and 1 <= status['maximumRunning'] <= 8, '控制器状态参数无效')
     rows = status.get('instances')
     require(isinstance(rows, list) and len(rows) <= 32 and all(isinstance(row, dict) for row in rows), '实例状态数量无效')
-    validate_registry(dict(schemaVersion=1, instances=[{k: row[k] for k in ('id', 'package', 'enabled', 'preferences') if k in row} for row in rows]))
+    validate_registry(dict(schemaVersion=1, instances=[{k: row[k] for k in ('id', 'package', 'enabled', 'autoStartOnLaunch', 'preferences') if k in row} for row in rows]))
     for row in rows:
         require(row.get('phase') in ('stopped', 'starting', 'running', 'stopping', 'failed'), '未知实例阶段')
         require(row.get('error') is None or (isinstance(row['error'], str) and len(row['error']) <= 512), '实例错误信息超限')
@@ -136,6 +136,7 @@ def dispatch(controller, request):
             require(identifier not in controller.sessions or controller.sessions[identifier].phase != 'stopping', '实例仍在清理：' + identifier)
         needed = sum(identifier not in controller.sessions for identifier in identifiers)
         require(len(controller.sessions) + needed <= controller.maximum_running, '批量启动超过同时运行上限')
+        controller.set_auto_start(identifiers, True)
         for identifier in identifiers:
             try:
                 changed = controller.start(identifier)
@@ -143,10 +144,19 @@ def dispatch(controller, request):
             except Exception as error:
                 outcomes.append(dict(instanceID=identifier, accepted=False, changed=False, error=str(error)[:512]))
     elif command in ('start_pet', 'stop_pet'):
-        changed = (controller.start if command == 'start_pet' else controller.stop)(request['instanceID'])
+        identifier = request['instanceID']
+        if command == 'start_pet':
+            controller.validate_start(identifier)
+            controller.set_auto_start([identifier], True)
+            changed = controller.start(identifier)
+        else:
+            controller.set_auto_start([identifier], False)
+            changed = controller.stop(identifier)
         outcomes.append(dict(instanceID=request['instanceID'], accepted=True, changed=changed))
     elif command == 'stop_all':
         controller.stop_all()
+    elif command == 'delete_pet':
+        controller.delete(request['instanceID'])
     elif command == 'set_preferences':
         controller.set_preferences(request['instanceID'], request['preferences'])
     elif command == 'set_package':
@@ -158,8 +168,18 @@ def dispatch(controller, request):
         require(source is not None, '实例不存在：' + request['instanceID'])
         require(request['cloneID'] not in controller.definitions, '小分身ID已存在：' + request['cloneID'])
         require(len(controller.registry['instances']) < 32, '实例数量已达上限')
+        clone_preferences = copy.deepcopy(source['preferences'])
+        if 'x' in clone_preferences and 'y' in clone_preferences:
+            clone_preferences['x'] += 64
+            clone_preferences['y'] += 64
+        else:
+            from PySide6.QtWidgets import QApplication
+            screen = QApplication.primaryScreen()
+            area = screen.availableGeometry() if screen else None
+            clone_preferences['x'] = area.x() + 32 if area else 32
+            clone_preferences['y'] = area.y() + 32 if area else 32
         controller.register(dict(id=request['cloneID'], package=copy.deepcopy(source['package']),
-                                 enabled=source['enabled'], preferences=copy.deepcopy(source['preferences'])))
+                                 enabled=source['enabled'], autoStartOnLaunch=False, preferences=clone_preferences))
         outcomes.append(dict(instanceID=request['cloneID'], accepted=True, changed=True))
     elif command == 'shutdown':
         controller.shutdown()

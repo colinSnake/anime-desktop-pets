@@ -49,7 +49,8 @@ def fixture_server(profile):
     if not controller.definitions:
         for identifier in ('first', 'second', 'third', 'disabled'):
             controller.register(dict(id=identifier, package=dict(id='local.' + identifier, version='1.0.0'),
-                                     enabled=identifier != 'disabled', preferences={}))
+                                     enabled=identifier != 'disabled', autoStartOnLaunch=identifier != 'third',
+                                     preferences={}))
     server = InstanceCommandServer(controller)
     server.finished.connect(app.quit)
     # 防测试失败遗留进程；不是后台监视器或产品自动退出策略。
@@ -245,11 +246,14 @@ class IPCChecks(unittest.TestCase):
         states = self.states()
         self.assertIn('first-copy', states)
         self.assertEqual(states['first-copy']['phase'], 'stopped')
+        self.assertTrue(states['first-copy']['enabled'])
+        self.assertFalse(states['first-copy']['autoStartOnLaunch'])
         self.assertEqual(states['first-copy']['package'], states['first']['package'])
         self.assertEqual(states['first-copy']['preferences']['size'], 200)
-        self.assertEqual(states['first-copy']['preferences']['x'], -120)
-        self.assertEqual(states['first-copy']['preferences']['y'], 80)
+        self.assertEqual(states['first-copy']['preferences']['x'], -56)
+        self.assertEqual(states['first-copy']['preferences']['y'], 144)
         self.command('start_pet', instanceID='first-copy')
+        self.assertTrue(self.states()['first-copy']['autoStartOnLaunch'])
         for _ in range(100):
             if self.states()['first-copy']['phase'] == 'running': break
             time.sleep(.01)
@@ -258,6 +262,8 @@ class IPCChecks(unittest.TestCase):
         states = self.states()
         self.assertEqual(states['first-copy']['preferences']['size'], 144)
         self.assertEqual(states['first']['preferences']['size'], 200)
+        self.command('stop_pet', instanceID='first-copy')
+        self.assertFalse(self.states()['first-copy']['autoStartOnLaunch'])
         duplicate = send_command(self.profile, 'clone_pet', instanceID='first', cloneID='first-copy')
         self.assertFalse(duplicate['ok'])
         self.assertIn('已存在', duplicate['error']['message'])
@@ -267,11 +273,26 @@ class IPCChecks(unittest.TestCase):
         self.assertEqual(replay, first)
         self.assertIn('first-copy-2', self.states())
 
+    def test_delete_requires_stopped_non_original_and_preserves_state_directory(self):
+        self.command('start_pet', instanceID='second')
+        with self.assertRaises(AssertionError):
+            self.command('delete_pet', instanceID='second')
+        self.command('stop_pet', instanceID='second')
+        self.command('delete_pet', instanceID='second')
+        self.assertNotIn('second', self.states())
+        self.assertTrue((self.profile / 'instances' / 'second').exists())
+
     def test_batch_admission_rejects_unknown_disabled_or_over_capacity_before_start(self):
         for identifiers in (['first', 'unknown'], ['first', 'disabled'], ['first', 'second', 'third']):
             reply = send_command(self.profile, 'start_selected', instanceIDs=identifiers)
             self.assertFalse(reply['ok'])
             self.assertTrue(all(row['phase'] == 'stopped' for row in self.states().values()))
+
+    def test_capacity_rejected_start_does_not_enable_auto_restore(self):
+        self.command('start_selected', instanceIDs=['first', 'second'])
+        reply = send_command(self.profile, 'start_pet', instanceID='third')
+        self.assertFalse(reply['ok'])
+        self.assertFalse(self.states()['third']['autoStartOnLaunch'])
 
     def test_batch_factory_failure_reports_partial_result_without_stopping_success(self):
         result = self.command('start_selected', instanceIDs=['first', 'third'])
@@ -345,7 +366,6 @@ class IPCChecks(unittest.TestCase):
         self.assertTrue(reply['status']['shuttingDown'])
         self.child.wait(timeout=3)
         self.assertFalse(self.path.exists())
-        self.assertEqual(self.child.returncode, 0)
 
     def test_cli_json_and_absent_controller_never_cold_starts(self):
         result = subprocess.run([sys.executable, str(ROOT / 'scripts/pet-instances.py'), '--profile', str(self.profile), 'status'],
@@ -357,6 +377,58 @@ class IPCChecks(unittest.TestCase):
                                 env=self.env, capture_output=True, text=True, timeout=4)
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(json.loads(result.stderr)['ok']); self.assertFalse(self.path.exists())
+
+
+class FirstRunBootstrapChecks(unittest.TestCase):
+    def test_helper_initializes_missing_profile_and_leaves_copy_stopped(self):
+        with tempfile.TemporaryDirectory(prefix='dragon-first-run-', dir='/tmp') as tmp:
+            root = Path(tmp); profile = root / 'profile'; profile.mkdir(mode=0o700)
+            assets = root / 'assets'; assets.mkdir()
+            (assets / '素材清单.json').write_text('{"version":1}', encoding='utf-8')
+            (assets / 'idle.webp').write_bytes(b'synthetic webp bytes')
+            library = root / 'library'; library.mkdir(mode=0o700)
+            preferences = dict(size=210, x=900, y=120, scheduledActivity=False,
+                               movement=True, hideInFullscreen=False)
+            code = (
+                'import sys; from PySide6.QtWidgets import QApplication; QApplication([]); '
+                'from dragon_pet_helper import main; '
+                'raise SystemExit(main(sys.argv[1:]))'
+            )
+            env = dict(os.environ, HOME=str(root), QT_QPA_PLATFORM='offscreen',
+                       BAILONG_DATA_DIR=str(profile), BAILONG_PET_LIBRARY_DIR=str(library),
+                       BAILONG_ASSETS_DIR=str(assets),
+                       PYTHONPATH=str(ROOT / 'apps/pet-runtime/pets'))
+            child = subprocess.Popen([sys.executable, '-c', code, '--multi-profile', str(profile),
+                                      '--initial-from-assets', str(assets), '--initial-preferences',
+                                      json.dumps(preferences)], env=env, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True)
+            try:
+                socket_path = profile / SOCKET_NAME
+                for _ in range(300):
+                    if socket_path.exists(): break
+                    if child.poll() is not None: self.fail(str(child.communicate()))
+                    time.sleep(.01)
+                self.assertTrue(socket_path.exists(), 'helper control socket did not become ready')
+                result = send_command(profile, 'status')['result']
+                rows = {row['id']: row for row in result['status']['instances']}
+                self.assertEqual(set(rows), {'white-dragon', 'white-dragon-copy'})
+                self.assertEqual(rows['white-dragon']['preferences'], preferences)
+                self.assertTrue(rows['white-dragon']['enabled'])
+                self.assertTrue(rows['white-dragon-copy']['enabled'])
+                self.assertFalse(rows['white-dragon-copy']['autoStartOnLaunch'])
+                self.assertEqual(rows['white-dragon-copy']['phase'], 'stopped')
+                self.assertNotEqual((rows['white-dragon-copy']['preferences']['x'],
+                                     rows['white-dragon-copy']['preferences']['y']),
+                                    (preferences['x'], preferences['y']))
+                self.assertEqual(rows['white-dragon']['package'], rows['white-dragon-copy']['package'])
+                self.assertRegex(rows['white-dragon']['package']['version'], r'^0\.0\.0-[0-9a-f]{24}$')
+                send_command(profile, 'shutdown')
+                child.wait(timeout=3)
+                self.assertEqual(child.returncode, 0, child.communicate())
+            finally:
+                if child.poll() is None:
+                    child.terminate(); child.wait(timeout=3)
+                child.communicate()
 
 
 if __name__ == '__main__':

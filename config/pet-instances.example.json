@@ -8,6 +8,7 @@
         "version": "0.6.2-dragon.8"
       },
       "enabled": false,
+      "autoStartOnLaunch": true,
       "preferences": {
         "size": 256,
         "scheduledActivity": true,

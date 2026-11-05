@@ -6,6 +6,7 @@ apply_preferences(dict) 方法。stopped只能在解码线程、定时器、子�
 """
 from dataclasses import dataclass
 import copy
+import hashlib
 import json
 import math
 import os
@@ -22,6 +23,32 @@ ID = re.compile(r'[a-z0-9]+(?:-[a-z0-9]+)*\Z')
 PACKAGE = re.compile(r'[a-z0-9]+(?:[.-][a-z0-9]+)*\Z')
 VERSION = re.compile(r'[0-9]+\.[0-9]+\.[0-9]+(?:-[a-zA-Z0-9.-]+)?\Z')
 DEFAULT_PREFERENCES = dict(size=256, scheduledActivity=True, movement=True, hideInFullscreen=True)
+
+
+def asset_identity(directory):
+    root = Path(directory).expanduser()
+    require(not root.is_symlink() and root.is_dir(), '当前白龙素材目录不存在或为链接')
+    root = root.resolve(strict=True)
+    manifest = root / '素材清单.json'
+    require(not manifest.is_symlink() and manifest.is_file(), '当前白龙素材清单缺失或为链接')
+    require(manifest.stat().st_size <= 1024 * 1024, '当前白龙素材清单过大')
+    digest = hashlib.sha256()
+    files = [manifest]
+    total = manifest.stat().st_size
+    for path in sorted(root.rglob('*')):
+        require(not path.is_symlink(), '白龙素材包含链接')
+        if path.is_file() and path.suffix.lower() == '.webp':
+            files.append(path)
+            total += path.stat().st_size
+            require(len(files) <= 512 and total <= 2 * 1024**3, '白龙素材数量或总大小超限')
+    require(len(files) > 1, '白龙素材为空')
+    for path in files:
+        relative = path.relative_to(root).as_posix().encode('utf-8')
+        digest.update(len(relative).to_bytes(4, 'big')); digest.update(relative)
+        with path.open('rb') as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+    return dict(id='local.bailong.white-dragon', version='0.0.0-' + digest.hexdigest()[:24])
 
 
 class InstanceError(ValueError):
@@ -53,7 +80,7 @@ def validate_registry(registry):
     identifiers = set()
     result = []
     for row in rows:
-        require(isinstance(row, dict) and not set(row) - {'id', 'package', 'enabled', 'preferences'}, '实例定义无效')
+        require(isinstance(row, dict) and not set(row) - {'id', 'package', 'enabled', 'autoStartOnLaunch', 'preferences'}, '实例定义无效')
         identifier = row.get('id')
         require(isinstance(identifier, str) and len(identifier) <= 64 and ID.fullmatch(identifier) and identifier not in identifiers, '实例ID无效或重复')
         package = row.get('package')
@@ -63,7 +90,11 @@ def validate_registry(registry):
         require(isinstance(version, str) and len(version) <= 64 and VERSION.fullmatch(version), '包版本无效')
         enabled = row.get('enabled', True)
         require(type(enabled) is bool, 'enabled必须为布尔值')
-        result.append(dict(id=identifier, package=copy.deepcopy(package), enabled=enabled, preferences=preferences(row.get('preferences', {}))))
+        legacy_clone = re.search(r'(?:-copy(?:-[0-9]+)?)+$', identifier) is not None
+        auto_start = row.get('autoStartOnLaunch', not legacy_clone)
+        require(type(auto_start) is bool, 'autoStartOnLaunch必须为布尔值')
+        result.append(dict(id=identifier, package=copy.deepcopy(package), enabled=enabled,
+                           autoStartOnLaunch=auto_start, preferences=preferences(row.get('preferences', {}))))
         identifiers.add(identifier)
     return dict(schemaVersion=1, instances=result)
 
@@ -133,6 +164,34 @@ class InstanceStore:
             if os.path.exists(name):
                 os.unlink(name)
 
+    def create_initial_from_assets(self, assets, original_preferences):
+        """Create the first managed pair only when the registry is truly absent."""
+        require(not self.closed and not self.path.exists() and not self.path.is_symlink(),
+                '实例清单已存在；拒绝初始化或覆盖')
+        from pet_library import library_lock
+
+        library = os.environ.get('BAILONG_PET_LIBRARY_DIR')
+        require(library, '白龙素材库目录未配置')
+        with library_lock(library):
+            with reference_lock(self.path):
+                require(not self.path.exists() and not self.path.is_symlink(),
+                        '实例清单在初始化期间出现；拒绝覆盖')
+                package = asset_identity(assets)
+                original = preferences(original_preferences)
+                screen = QApplication.primaryScreen()
+                area = screen.availableGeometry() if screen else None
+                clone_x = int(original['x'] + 64) if original.get('x') is not None else (area.x() + 32 if area else 32)
+                clone_y = int(original['y'] + 64) if original.get('y') is not None else (area.y() + 32 if area else 32)
+                clone = dict(size=256, x=clone_x, y=clone_y, scheduledActivity=True,
+                             movement=True, hideInFullscreen=True)
+                initial = validate_registry(dict(schemaVersion=1, instances=[
+                    dict(id='white-dragon', package=package, enabled=True, autoStartOnLaunch=True, preferences=original),
+                    dict(id='white-dragon-copy', package=package, enabled=True, autoStartOnLaunch=False, preferences=clone),
+                ]))
+                data = (json.dumps(initial, ensure_ascii=False, allow_nan=False, indent=2) + '\n').encode()
+                self.save_locked_data(data)
+        return initial
+
     def state_directory(self, identifier):
         require(isinstance(identifier, str) and len(identifier) <= 64 and ID.fullmatch(identifier), '实例ID无效')
         root = self.directory / 'instances'
@@ -198,6 +257,21 @@ class InstanceController(QObject):
         self.registry = updated
         self.definitions = {row['id']: row for row in updated['instances']}
 
+    def set_auto_start(self, identifiers, enabled):
+        self._on_thread()
+        require(not self.shutting_down and not self.starting_factory, '控制器忙或正在退出')
+        require(type(enabled) is bool and isinstance(identifiers, list) and identifiers, '启动偏好无效')
+        require(len(set(identifiers)) == len(identifiers) and all(identifier in self.definitions for identifier in identifiers),
+                '实例不存在或重复')
+        updated = copy.deepcopy(self.registry)
+        for row in updated['instances']:
+            if row['id'] in identifiers:
+                row['autoStartOnLaunch'] = enabled
+        updated = validate_registry(updated)
+        self.store.save(updated)
+        self.registry = updated
+        self.definitions = {row['id']: row for row in updated['instances']}
+
     def set_package(self, identifier, package, library):
         """Change an instance package only while stopped, serialized against deletion."""
         self._on_thread()
@@ -248,12 +322,13 @@ class InstanceController(QObject):
         self._on_thread()
         return dict(shuttingDown=self.shutting_down, maximumRunning=self.maximum_running,
                     instances=[dict(id=row['id'], package=copy.deepcopy(row['package']), enabled=row['enabled'],
+                                    autoStartOnLaunch=row['autoStartOnLaunch'],
                                     preferences=copy.deepcopy(row['preferences']),
                                     phase=self.sessions[row['id']].phase if row['id'] in self.sessions else ('failed' if row['id'] in self.last_errors else 'stopped'),
                                     error=self.sessions[row['id']].error if row['id'] in self.sessions else self.last_errors.get(row['id']))
                                for row in self.registry['instances']])
 
-    def start(self, identifier):
+    def validate_start(self, identifier):
         self._on_thread()
         require(not self.shutting_down and not self.starting_factory, '控制器忙或正在退出')
         require(identifier in self.definitions, '实例不存在')
@@ -262,8 +337,15 @@ class InstanceController(QObject):
         current = self.sessions.get(identifier)
         if current:
             require(current.phase != 'stopping', '实例仍在清理；暂不能重启')
-            return False
+            return
         require(len(self.sessions) < self.maximum_running, '同时运行数量已达上限')
+
+    def start(self, identifier):
+        self.validate_start(identifier)
+        current = self.sessions.get(identifier)
+        if current:
+            return False
+        definition = self.definitions[identifier]
         # 工厂只创建对象，不得自行begin/show/查询；信号连接完成后才启动。
         self.starting_factory = True
         try:
@@ -311,6 +393,28 @@ class InstanceController(QObject):
                 window.begin()
             except Exception as error:
                 self._failed(identifier, session, str(error))
+        return True
+
+    def delete(self, identifier):
+        self._on_thread()
+        require(not self.shutting_down and not self.starting_factory, '控制器忙或正在退出')
+        require(identifier != 'white-dragon', '原始白龙实例受保护，不能删除')
+        require(identifier in self.definitions, '实例不存在')
+        require(identifier not in self.sessions, '实例必须完全停止后才能删除')
+        updated = copy.deepcopy(self.registry)
+        updated['instances'] = [row for row in updated['instances'] if row['id'] != identifier]
+        require(len(updated['instances']) >= 1, '不能删除最后一个实例')
+        updated = validate_registry(updated)
+        data = (json.dumps(updated, ensure_ascii=False, allow_nan=False, indent=2) + '\n').encode()
+        require(len(data) <= 128 * 1024, '实例清单过大')
+        with reference_lock(self.store.path):
+            current = validate_registry(json.loads(self.store.path.read_text(encoding='utf-8')))
+            require(current == self.registry, '实例清单已被外部修改；拒绝删除')
+            self.store.save_locked_data(data)
+        self.registry = updated
+        self.definitions = {row['id']: row for row in updated['instances']}
+        self.last_errors.pop(identifier, None)
+        self.changed.emit(identifier)
         return True
 
     def _ready(self, identifier, session):

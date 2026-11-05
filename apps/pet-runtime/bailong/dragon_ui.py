@@ -48,6 +48,20 @@ def system_font(points=10, bold=False):
     return font
 
 
+def bubble_font(points=10, bold=False):
+    """Prefer the rounded Chinese families used by the reference bubble."""
+    installed = set(QFontDatabase.families())
+    preferred = ('ShangshouSoftCandy', 'Yuanti SC', 'YouYuan', '幼圆',
+                 'Comic Sans MS', 'PingFang SC', 'Microsoft YaHei')
+    family = next((name for name in preferred if name in installed), None)
+    font = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont)
+    if family:
+        font.setFamily(family)
+    font.setPointSizeF(points)
+    font.setBold(bold)
+    return font
+
+
 class FittedText(QTextBrowser):
     """先按最终宽度测量文字，再决定高度；只在超过阅读预算时滚动。"""
     def __init__(self, text='', parent=None, cap=168):
@@ -55,7 +69,7 @@ class FittedText(QTextBrowser):
         self.cap = self.preferred_cap = cap
         self._fitting = False
         self._measure_width = 240
-        self.setFont(system_font())
+        self.setFont(bubble_font())
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setOpenLinks(False)
         self.setOpenExternalLinks(False)
@@ -118,7 +132,7 @@ class Bubble(QWidget):
         self.fade = QPropertyAnimation(self, b'windowOpacity', self)
         self.fade.setDuration(90)
         self.fade.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self.setFont(system_font())
+        self.setFont(bubble_font())
 
     def available_area(self):
         # PySide6 6.9 的 QWidget.screen() 返回值父级启发式会把共享 QScreen
@@ -201,7 +215,7 @@ class Bubble(QWidget):
     def label(self, text, cap=None, title=False):
         label = FittedText(text, self, cap=cap or self.text_cap)
         if title:
-            label.setFont(system_font(10, bold=True))
+            label.setFont(bubble_font(10, bold=True))
             label.document().setDefaultFont(label.font())
         palette = label.palette()
         palette.setColor(QPalette.ColorRole.Text, QColor(card_colors(self)['text']))
@@ -234,7 +248,7 @@ class Bubble(QWidget):
         self.result_view = self.label(text, cap=168)
         button = QPushButton('详情', self)
         button.setAccessibleName('详情')
-        button.setFont(system_font(9))
+        button.setFont(bubble_font(9))
         colors = card_colors(self)
         button.setStyleSheet('QPushButton {color:'+colors['accent']+';background:transparent;'
                              'border:0;border-radius:5px;padding:3px 6px;}'
@@ -256,8 +270,8 @@ class Bubble(QWidget):
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(6)
-        title = QLabel('中转余额' if is_balance else 'Codex 额度', header)
-        title.setFont(system_font(10, bold=True))
+        title = QLabel('中转余额' if is_balance else '额度', header)
+        title.setFont(bubble_font(10, bold=True))
         title.setStyleSheet('color:'+colors['text']+';')
         header_layout.addWidget(title)
         header_layout.addStretch(1)
@@ -274,7 +288,7 @@ class Bubble(QWidget):
         if is_balance:
             window = next(w for w in windows if w.get('kind') == 'balance')
             amount = FittedText(f"{window['remaining']:,.2f}", self, cap=38)
-            amount.setFont(system_font(23, bold=True))
+            amount.setFont(bubble_font(23, bold=True))
             amount.document().setDefaultFont(amount.font())
             amount.setPalette(self.palette())
             self.layout.addWidget(amount)
@@ -291,12 +305,12 @@ class Bubble(QWidget):
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(4)
             label = QLabel(window['name'], row)
-            label.setFont(system_font(9))
+            label.setFont(bubble_font(9))
             label.setStyleSheet('color:'+colors['text']+';')
             row_layout.addWidget(label)
             row_layout.addStretch(1)
             remaining = QLabel(f"{value:g}% 剩余" if value is not None else '暂未提供', row)
-            remaining.setFont(system_font(9, bold=True))
+            remaining.setFont(bubble_font(9, bold=True))
             remaining.setStyleSheet('color:'+colors['text']+';')
             row_layout.addWidget(remaining)
             self.layout.addWidget(row)

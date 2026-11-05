@@ -154,7 +154,7 @@
 -            chat.shutdown();pet.chat=None
 -        report['checks'].append('对话开关、下方输入框、三类动画菜单、历史保存与长结果详情正常（离线检查）')
 +        menu=pet.context_menu();labels=[a.text() for a in menu.actions()]
-+        assert '查看 Codex 额度' in labels
++        assert '查询额度' in labels
 +        assert not any('对话模式' in text or '历史对话' in text for text in labels)
 +        assert [a.text() for a in menu.actions() if a.menu()]==['桌宠大小','自主活动','动作预览']
 +        previews=next(a.menu() for a in menu.actions() if a.text()=='动作预览')
@@ -164,9 +164,9 @@
 +        pet.bubble.quota(windows);app.processEvents()
 +        assert pet.bubble.width()<=340 and len(pet.bubble.findChildren(QProgressBar))==2
 +        from PySide6.QtWidgets import QLabel
-+        assert any(label.text()=='Codex 额度' for label in pet.bubble.findChildren(QLabel))
++        assert any(label.text()=='额度' for label in pet.bubble.findChildren(QLabel))
 +        pet.bubble.hide()
-+        report['checks'].append('移除对话/历史入口；右键额度展示为参考项目同款窄气泡与进度条')
++        report['checks'].append('移除对话/历史入口；右键查询额度并展示窄版气泡与进度条')
 +        assert pet.mode=='idle'
 +        assert len(pet.interaction_animations())==20
          menu=pet.context_menu();actions={a.text():a for a in menu.actions()}
@@ -275,7 +275,7 @@
 +        pet.bubble.quota(windows);pet.bubble.grab().save(str(output/'Codex额度气泡离屏检查.png'));pet.bubble.hide()
 +        report['checks'].append('跑飞收敛回默认待机以280ms真实中间画面过渡，首尾像素连续（离屏）')
 +        report['checks'].append('拖拽与松手不改用户尺寸或解码尺寸，不按尾巴翅膀外框临时缩放（离屏）')
-+        report['checks'].append('Codex 额度以窄版桌宠气泡显示；仅使用合成额度，无账号读取')
++        report['checks'].append('额度以窄版桌宠气泡显示；仅使用合成数据，无账号读取')
          pet.play(pet.idles[0],'idle');pet.grab().save(str(output/'检查预览.png'));pet.close()
          report['passed']=True
      except Exception:report['error']=traceback.format_exc()

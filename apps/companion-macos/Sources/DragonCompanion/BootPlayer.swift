@@ -17,7 +17,6 @@ final class BootPlayer: NSObject {
     enum Outcome: String { case completed, skipped, mediaFailed, timedOut, targetExited }
     private let config: CompanionConfiguration
     private let diagnostics: Diagnostics
-    private let targetReady: () -> Bool
     private let preservesTargetActivation: Bool
     private let onFinish: (Outcome) -> Void
     private var window: MovieWindow?
@@ -28,11 +27,9 @@ final class BootPlayer: NSObject {
     private var began = ProcessInfo.processInfo.systemUptime
     private var watchdog = PlaybackWatchdog()
     private var finishing = false
-    private var waiting = false
-    private var waitingLabel: NSTextField?
 
-    init(config: CompanionConfiguration, diagnostics: Diagnostics, ready: @escaping () -> Bool, preservesTargetActivation: Bool = false, onFinish: @escaping (Outcome) -> Void) {
-        self.config = config; self.diagnostics = diagnostics; self.targetReady = ready; self.onFinish = onFinish
+    init(config: CompanionConfiguration, diagnostics: Diagnostics, preservesTargetActivation: Bool = false, onFinish: @escaping (Outcome) -> Void) {
+        self.config = config; self.diagnostics = diagnostics; self.onFinish = onFinish
         self.preservesTargetActivation = preservesTargetActivation
     }
 
@@ -61,12 +58,8 @@ final class BootPlayer: NSObject {
         let button = NSButton(title: preservesTargetActivation ? "跳过" : "跳过  Esc", target: self, action: #selector(skip))
         button.bezelStyle = .rounded; button.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(button)
-        let label = NSTextField(labelWithString: "正在等待 Codex 主窗口…")
-        label.textColor = .white; label.font = .systemFont(ofSize: 13); label.isHidden = true
-        label.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(label); waitingLabel = label
         NSLayoutConstraint.activate([
-            button.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16), button.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
-            label.centerXAnchor.constraint(equalTo: root.centerXAnchor), label.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -24)
+            button.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16), button.topAnchor.constraint(equalTo: root.topAnchor, constant: 16)
         ])
         movie.contentView = root; window = movie
         movie.alphaValue = StartupPresentation.opacity(1, coveringClient: preservesTargetActivation)
@@ -76,7 +69,10 @@ final class BootPlayer: NSObject {
         status = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             Task { @MainActor [weak self] in
                 guard let self, !self.finishing else { return }
-                if item.status == .readyToPlay { self.player?.play() }
+                if item.status == .readyToPlay {
+                    self.diagnostics.record("animation.video-ready playing-requested")
+                    self.player?.play()
+                }
                 if item.status == .failed { self.finish(.mediaFailed) }
             }
         }
@@ -109,13 +105,9 @@ final class BootPlayer: NSObject {
         if elapsed > config.launchTimeout { finish(.timedOut); return }
         if elapsed > 8 && player.currentItem?.status != .readyToPlay { finish(.mediaFailed); return }
         let t = player.currentTime().seconds
-        let ready = targetReady()
-        if t >= config.holdAt && !ready {
-            if !waiting { waiting = true; player.pause(); waitingLabel?.isHidden = false }
-        } else if waiting && ready { waiting = false; waitingLabel?.isHidden = true; player.play() }
-        if !waiting { window?.alphaValue = StartupPresentation.opacity(config.opacity(at: t), coveringClient: preservesTargetActivation) }
-        if t >= config.transitionEnd && ready { finish(.completed); return }
-        if watchdog.stalled(position: t, now: now, intentionallyPaused: waiting) { finish(.mediaFailed) }
+        let opacity = preservesTargetActivation ? 1 : config.opacity(at: t)
+        window?.alphaValue = StartupPresentation.opacity(opacity, coveringClient: preservesTargetActivation)
+        if watchdog.stalled(position: t, now: now, intentionallyPaused: false) { finish(.mediaFailed) }
     }
 
     func finish(_ outcome: Outcome, immediate: Bool = false) {

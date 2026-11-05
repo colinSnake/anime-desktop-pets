@@ -11,7 +11,7 @@ final class PetInstanceControlTests: XCTestCase {
         let requests: [PetInstanceControlRequest] = [.init(.status), .init(.startPet, instanceID: "first"),
             .init(.stopPet, instanceID: "first"), .init(.startSelected, instanceIDs: ["first", "second"]),
             .init(.stopAll), .init(.shutdown), .init(.setPreferences, instanceID: "first", preferences: .init(size: 128))]
-            + [.init(.clonePet, instanceID: "first", cloneID: "first-copy")]
+            + [.init(.clonePet, instanceID: "first", cloneID: "first-copy"), .init(.deletePet, instanceID: "first-copy")]
         for request in requests {
             let bytes = try request.encoded()
             XCTAssertEqual(bytes.last, 10)
@@ -37,6 +37,13 @@ final class PetInstanceControlTests: XCTestCase {
     func testUnknownCommandFailsDecode() {
         XCTAssertThrowsError(try JSONDecoder().decode(PetInstanceControlRequest.self,
             from: Data(#"{"protocolVersion":1,"requestId":"test","command":"run_shell"}"#.utf8)))
+    }
+    func testLegacyStatusCloneDefaultsToNotAutoRestored() throws {
+        let json = #"{"id":"white-dragon-copy-2","package":{"id":"local.dragon","version":"1.0.0"},"enabled":true,"preferences":{"size":256,"scheduledActivity":true,"movement":true,"hideInFullscreen":true},"phase":"stopped"}"#
+        let row = try JSONDecoder().decode(PetInstanceControlRow.self, from: Data(json.utf8))
+        XCTAssertFalse(row.autoStartOnLaunch)
+        let regular = json.replacingOccurrences(of: "white-dragon-copy-2", with: "copy-pet")
+        XCTAssertTrue(try JSONDecoder().decode(PetInstanceControlRow.self, from: Data(regular.utf8)).autoStartOnLaunch)
     }
     func testReplyCorrelationAndErrorEnvelope() throws {
         let request = PetInstanceControlRequest(.status, requestId: "match")

@@ -371,7 +371,7 @@
 +            action=size.addAction(f'{percent}%（{round(256*percent/100)} × {round(256*percent/100)}）')
 +            action.setCheckable(True);action.setChecked(self.logical_size==round(256*percent/100))
 +            action.triggered.connect(lambda checked=False,v=percent:self.set_size_percent(v))
-+        menu.addAction('查看 Codex 额度',lambda:QTimer.singleShot(0,self.quota))
++        menu.addAction('查询额度',lambda:QTimer.singleShot(0,self.quota))
          menu.addSeparator()
 +        activity=menu.addMenu('自主活动')
 +        automatic=activity.addAction('定时播放动作');automatic.setCheckable(True)

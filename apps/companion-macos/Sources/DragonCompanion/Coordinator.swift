@@ -36,14 +36,18 @@ final class Coordinator: NSObject, NSMenuDelegate {
     private var windowSizeRequested = false
     private var reportedWindowReady = false
     private var requestedStartupFrame: NSRect?
+    private var firstCloneInProgress = false
+    private var stopping = false
     private var statusItem: NSStatusItem?
     private var menu: NSMenu?
+    private var lastMultiPetSnapshot: Data?
     private(set) var paused = false
 
     init(runtime: Runtime, mode: Mode) {
         self.runtime = runtime; self.mode = mode
         diagnostics = Diagnostics(root: runtime.state); pet = PetController(runtime: runtime)
-        multiPet = PetInstanceRuntime(runtime: runtime)
+        multiPet = PetInstanceRuntime.hasValidRegistry(runtime: runtime)
+            ? PetInstanceRuntime(runtime: runtime) : nil
         super.init()
         pet.taskFollowingAllowed = mode == .watch || mode == .launch
         multiPet?.taskFollowingAllowed = mode == .watch || mode == .launch
@@ -51,20 +55,25 @@ final class Coordinator: NSObject, NSMenuDelegate {
         pet.onChanged = { [weak self] in self?.rebuildMenu() }
         pet.onHide = { [weak self] in _ = self?.handle(.init(.hide)) }
         multiPet?.onChanged = { [weak self] in
-            let state = self?.multiPet?.state ?? "unknown"
-            self?.diagnostics.record("multi-pet.changed state=\(state)")
-            self?.rebuildMenu()
+            guard let self, let multiPet = self.multiPet else { return }
+            var snapshot = (try? JSONEncoder().encode(multiPet.instances)) ?? Data()
+            snapshot.append(contentsOf: "|\(multiPet.state)|\(multiPet.isLoadingStatus)|\(multiPet.lastError ?? "")".utf8)
+            guard snapshot != self.lastMultiPetSnapshot else { return }
+            self.lastMultiPetSnapshot = snapshot
+            self.diagnostics.record("multi-pet.changed state=\(multiPet.state)")
+            self.rebuildMenu()
         }
+        multiPet?.onDiagnostic = { [weak self] event in self?.diagnostics.record(event) }
     }
 
     func start() {
         diagnostics.record("controller.start mode=\(mode)")
         guard mode != .controlTest else { return }
         createMenu()
-        if multiPet != nil, mode != .previewAnimation { multiPet?.start() }
+        if multiPet?.isConfigured == true, mode != .previewAnimation { multiPet?.start() }
         if mode == .previewPet { showPetRuntime(near: nil); return }
         if mode == .previewAnimation {
-            play(frame: nil, ready: { true }); return
+            play(frame: nil); return
         }
         refreshTaskLease()
         taskLeaseTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
@@ -129,14 +138,9 @@ final class Coordinator: NSObject, NSMenuDelegate {
         }
         if movie == nil {
             session.startAnimation(pid: app.processIdentifier)
-            play(frame: nil, ready: { [weak self] in self?.startupWindowReady ?? false })
+            play(frame: nil)
         }
         pollWindow()
-    }
-    private var startupWindowReady: Bool {
-        guard let target, !target.isTerminated, target.isFinishedLaunching, stableFrames >= 2 else { return false }
-        // A stable visible window is only a handoff signal, not proof that network/UI loading finished.
-        return WindowGeometry.codexWindow(pid: target.processIdentifier) != nil
     }
     private func pollWindow() {
         guard !paused, let target, !target.isTerminated else { poll?.invalidate(); poll = nil; return }
@@ -175,9 +179,9 @@ final class Coordinator: NSObject, NSMenuDelegate {
             movie?.finish(.timedOut)
         }
     }
-    private func play(frame: NSRect?, ready: @escaping () -> Bool) {
+    private func play(frame: NSRect?) {
         let id = UUID(); movieID = id
-        movie = BootPlayer(config: runtime.configuration, diagnostics: diagnostics, ready: ready,
+        movie = BootPlayer(config: runtime.configuration, diagnostics: diagnostics,
                            preservesTargetActivation: mode != .previewAnimation) { [weak self] outcome in
             guard let self, self.movieID == id else { return }
             self.movieID = nil; self.movie = nil
@@ -214,7 +218,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
             if !paused && session.prepareLaunch() {
                 stableFrames = 0; lastFrame = nil
                 // Start covering immediately, while NSWorkspace launches Codex in parallel.
-                play(frame: nil, ready: { [weak self] in self?.startupWindowReady ?? false })
+                play(frame: nil)
             }
             let options = NSWorkspace.OpenConfiguration(); options.activates = true; options.createsNewApplicationInstance = false
             options.arguments = runtime.startupLaunchArguments(at: url)
@@ -232,6 +236,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
                     }
                 }
             }
+            diagnostics.record("codex.openApplication-submitted")
         } catch { showError(error.localizedDescription) }
     }
     private func showError(_ text: String) {
@@ -239,9 +244,10 @@ final class Coordinator: NSObject, NSMenuDelegate {
         alert.addButton(withTitle: "好"); alert.runModal()
     }
 
-    private func showPetRuntime(near frame: NSRect?) {
+    private func showPetRuntime(near frame: NSRect?, startAllManaged: Bool = false) {
         if let multiPet {
-            multiPet.startEnabledInstances()
+            if startAllManaged { multiPet.startEnabledInstances() }
+            else { multiPet.restoreAutoStartedInstances() }
         } else {
             pet.show(near: frame)
         }
@@ -262,7 +268,9 @@ final class Coordinator: NSObject, NSMenuDelegate {
         case .dismiss: session.dismissPet(); dismissPetRuntime()
         case .show:
             session.showPet()
-            if !paused && (mode == .previewPet || (session.pid != nil && session.phase == .accompanying)) { showPetRuntime(near: lastFrame) }
+            if !paused && (mode == .previewPet || (session.pid != nil && session.phase == .accompanying)) {
+                showPetRuntime(near: lastFrame, startAllManaged: true)
+            }
         case .pause:
             paused = true; refreshTaskLease(disabled: true); poll?.invalidate(); poll = nil
             if let pid = session.pid { _ = session.finishAnimation(pid: pid) }
@@ -292,6 +300,8 @@ final class Coordinator: NSObject, NSMenuDelegate {
                         petState: multiPet?.state ?? pet.state, petError: multiPet?.lastError ?? pet.lastError)
     }
     func stop() {
+        stopping = true
+        firstCloneInProgress = false
         taskLeaseTimer?.invalidate(); taskLeaseTimer = nil
         refreshTaskLease(disabled: true)
         paused = true
@@ -301,7 +311,10 @@ final class Coordinator: NSObject, NSMenuDelegate {
         for observer in workspaceObservers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
         workspaceObservers.removeAll(); diagnostics.record("controller.stop")
     }
-    func finishStopping(completion: @escaping @MainActor () -> Void) { pet.finishWindowCommands(completion: completion) }
+    func finishStopping(completion: @escaping @MainActor () -> Void) {
+        if let multiPet { multiPet.finishStopping(completion: completion) }
+        else { pet.finishWindowCommands(completion: completion) }
+    }
 
     private func createMenu() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -333,7 +346,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
             if paused {
                 item("恢复陪伴", #selector(togglePause))
             } else if mode == .watch && session.pid == nil {
-                let waiting = NSMenuItem(title: "等待 Codex 启动", action: nil, keyEquivalent: "")
+                let waiting = NSMenuItem(title: "等待应用启动", action: nil, keyEquivalent: "")
                 waiting.isEnabled = false; menu.addItem(waiting)
             } else {
                 item(primaryAction, #selector(togglePetAvailability))
@@ -344,12 +357,35 @@ final class Coordinator: NSObject, NSMenuDelegate {
             managementItem.submenu = management
             menu.addItem(managementItem)
         }
+        if mode != .previewAnimation, multiPet == nil, runtime.configuration.petBackend == "external" {
+            if let candidate = PetInstanceRuntime(runtime: runtime), candidate.registryIsMissing {
+                menu.addItem(.separator())
+                if ExternalPetDescriptor.supportsManagedHandoff(runtime) {
+                    let create = NSMenuItem(title: firstCloneInProgress ? "正在切换桌宠" : "创建白龙分身",
+                                            action: firstCloneInProgress ? nil : #selector(createFirstClone), keyEquivalent: "")
+                    create.target = self
+                    create.isEnabled = !firstCloneInProgress && !paused && pet.canHandoffToMultiPet
+                    if !pet.canHandoffToMultiPet { create.title = "先显示由桌边小崽启动的增强白龙" }
+                    menu.addItem(create)
+                } else {
+                    let unavailable = NSMenuItem(title: "当前白龙构建不支持安全分身切换", action: nil, keyEquivalent: "")
+                    unavailable.isEnabled = false; menu.addItem(unavailable)
+                }
+            } else if let candidate = PetInstanceRuntime(runtime: runtime), !candidate.hasValidRegistry {
+                menu.addItem(.separator())
+                let unavailable = NSMenuItem(title: "实例清单无效；为保护现有数据，已停用首次创建入口", action: nil, keyEquivalent: "")
+                unavailable.isEnabled = false; menu.addItem(unavailable)
+            } else if PetInstanceRuntime(runtime: runtime) == nil {
+                let unavailable = NSMenuItem(title: "当前桌宠构建不支持实例管理", action: nil, keyEquivalent: "")
+                unavailable.isEnabled = false; menu.addItem(unavailable)
+            }
+        }
         if FileManager.default.isExecutableFile(atPath: runtime.petLibraryAppURL.appendingPathComponent("Contents/MacOS/DragonPetLibrary").path) {
             menu.addItem(.separator())
-            item("打开宠物素材库…", #selector(openPetLibrary))
+            item("打开宠物素材库", #selector(openPetLibrary))
         }
         if mode == .watch || mode == .launch {
-            menu.addItem(.separator()); item(paused ? "恢复 Codex 联动" : "暂停 Codex 联动", #selector(togglePause))
+            menu.addItem(.separator()); item(paused ? "恢复联动" : "暂停联动", #selector(togglePause))
         }
         let advanced = NSMenu()
         advanced.title = "高级"
@@ -369,11 +405,11 @@ final class Coordinator: NSObject, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) { rebuildMenu() }
 
     private func petManagementMenu() -> NSMenu? {
-        guard let multiPet, multiPet.isConfigured else { return nil }
+        guard let multiPet, multiPet.hasValidRegistry else { return nil }
         let menu = NSMenu(title: "实例管理")
         let cloneMenu = NSMenu(title: "创建小分身")
         let allRows = multiPet.instances.sorted { $0.id < $1.id }
-        for row in allRows {
+        for row in allRows where row.enabled {
             let cloneItem = NSMenuItem(title: "从 \(row.id) 创建", action: #selector(cloneManagedPet), keyEquivalent: "")
             cloneItem.target = self
             cloneItem.representedObject = PetMenuAction(instanceID: row.id, cloneSourceID: row.id)
@@ -385,9 +421,15 @@ final class Coordinator: NSObject, NSMenuDelegate {
         menu.addItem(cloneEntry)
         menu.addItem(.separator())
 
-        let rows = multiPet.instances.filter(\.enabled).sorted { $0.id < $1.id }
+        let rows = allRows
+        if multiPet.isLoadingStatus {
+            let loading = NSMenuItem(title: "正在读取桌宠实例状态…", action: nil, keyEquivalent: "")
+            loading.isEnabled = false; menu.addItem(loading)
+            return menu
+        }
         if rows.isEmpty {
-            let empty = NSMenuItem(title: "没有启用的宠物", action: nil, keyEquivalent: "")
+            let title = "实例清单为空；为保护数据不会自动初始化"
+            let empty = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             empty.isEnabled = false; menu.addItem(empty)
             return menu
         }
@@ -398,7 +440,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
             let lifecycle = NSMenuItem(title: running ? "停止实例" : "启动实例",
                                        action: #selector(toggleManagedPet), keyEquivalent: "")
             lifecycle.target = self; lifecycle.representedObject = action
-            lifecycle.isEnabled = !paused && row.phase != .stopping
+            lifecycle.isEnabled = !paused && row.enabled && row.phase != .stopping
             instanceMenu.addItem(lifecycle)
             instanceMenu.addItem(.separator())
             let sizeMenu = NSMenu(title: "尺寸")
@@ -409,10 +451,21 @@ final class Coordinator: NSObject, NSMenuDelegate {
                 sizeItem.state = row.preferences.size == size ? .on : .off
                 sizeMenu.addItem(sizeItem)
             }
-            let sizeItem = NSMenuItem(title: "调整尺寸…", action: nil, keyEquivalent: "")
+            let sizeItem = NSMenuItem(title: "调整尺寸", action: nil, keyEquivalent: "")
             sizeItem.submenu = sizeMenu
             instanceMenu.addItem(sizeItem)
-            let instanceItem = NSMenuItem(title: "\(row.id) · \(managedPhaseTitle(row.phase))", action: nil, keyEquivalent: "")
+            if row.id != "white-dragon" {
+                instanceMenu.addItem(.separator())
+                let canDelete = allRows.count > 1
+                let delete = NSMenuItem(title: canDelete ? "删除实例…" : "至少保留一个实例",
+                                        action: #selector(deleteManagedPet), keyEquivalent: "")
+                delete.target = self; delete.representedObject = action
+                delete.isEnabled = canDelete && (row.phase == .stopped || row.phase == .failed)
+                instanceMenu.addItem(delete)
+            }
+            let automatic = row.autoStartOnLaunch ? "下次启动恢复" : "下次启动保持停止"
+            let error = row.error.map { " · \($0.prefix(48))" } ?? ""
+            let instanceItem = NSMenuItem(title: "\(row.id) · \(managedPhaseTitle(row.phase)) · \(automatic)\(error)", action: nil, keyEquivalent: "")
             instanceItem.submenu = instanceMenu
             menu.addItem(instanceItem)
         }
@@ -437,6 +490,8 @@ final class Coordinator: NSObject, NSMenuDelegate {
             _ = handle(.init(active ? .hide : .show))
         } else if pet.isVisible {
             hidePet()
+        } else if multiPet != nil {
+            _ = handle(.init(.show))
         } else {
             showPet()
         }
@@ -447,6 +502,94 @@ final class Coordinator: NSObject, NSMenuDelegate {
               let sourceID = action.cloneSourceID else { return }
         multiPet?.clone(sourceID: sourceID)
         rebuildMenu()
+    }
+
+    @objc private func createFirstClone() {
+        guard !firstCloneInProgress, multiPet == nil,
+              let candidate = PetInstanceRuntime(runtime: runtime), candidate.registryIsMissing,
+              ExternalPetDescriptor.supportsManagedHandoff(runtime) else { return }
+        firstCloneInProgress = true
+        rebuildMenu()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let runtime = self.runtime
+            let inspected = await Task.detached(priority: .utility) {
+                Result { try ExternalPetDescriptor.inspect(runtime) }
+            }.value
+            guard !self.stopping else { return }
+            let descriptor: ExternalPetDescriptor
+            switch inspected {
+            case .success(let value): descriptor = value
+            case .failure(let error):
+                self.firstCloneInProgress = false
+                self.showError("无法验证当前白龙素材，未进行切换：\(error.localizedDescription)")
+                self.rebuildMenu()
+                return
+            }
+            guard let assets = descriptor.assetsURL else {
+                self.firstCloneInProgress = false
+                self.showError("当前白龙素材身份无法用于分身，未进行切换。")
+                self.rebuildMenu()
+                return
+            }
+            let confirmation = NSAlert()
+            confirmation.messageText = "切换到白龙实例管理？"
+            confirmation.informativeText = "桌边小崽将先请求当前由本宿主启动的白龙安全退出，再由单个多实例控制器恢复原宠并登记一个已停止的分身。取消不会更改状态；若退出未确认，将不会启动第二个控制器。"
+            confirmation.alertStyle = .warning
+            confirmation.addButton(withTitle: "切换并创建")
+            confirmation.addButton(withTitle: "取消")
+            guard confirmation.runModal() == .alertFirstButtonReturn else {
+                self.firstCloneInProgress = false
+                self.rebuildMenu()
+                return
+            }
+            self.pet.handoffToMultiPet { [weak self] result in
+                guard let self else { return }
+                guard !self.stopping else { return }
+                switch result {
+                case .failure(let error):
+                    self.firstCloneInProgress = false
+                    self.showError("\(error.localizedDescription)\n请退出并重新打开桌边小崽；启动时会根据磁盘清单恢复单宠或多宠模式。结果不确定时不要连续重试创建。")
+                    self.rebuildMenu()
+                case .success(let preferences):
+                    guard let manager = PetInstanceRuntime(runtime: self.runtime) else {
+                        self.firstCloneInProgress = false
+                        self.showError("多实例 helper 不可用；白龙已停止，没有启动竞争控制器。请重新打开桌边小崽后检查构建。")
+                        self.rebuildMenu()
+                        return
+                    }
+                    self.configure(manager)
+                    self.multiPet = manager
+                    manager.createInitialPair(assets: assets, preferences: preferences) { [weak self] result in
+                        guard let self else { return }
+                        self.firstCloneInProgress = false
+                        switch result {
+                        case .success:
+                            self.showNotice("白龙分身已创建并保持停止。原宠已交由多实例控制器恢复；可在“实例管理”中单独启动分身。")
+                        case .failure(let error):
+                            self.showError(error.localizedDescription)
+                        }
+                        self.rebuildMenu()
+                    }
+                    self.rebuildMenu()
+                }
+            }
+        }
+    }
+
+    private func configure(_ manager: PetInstanceRuntime) {
+        manager.taskFollowingAllowed = mode == .watch || mode == .launch
+        manager.onDiagnostic = { [weak self] event in self?.diagnostics.record(event) }
+        manager.onChanged = { [weak self, weak manager] in
+            guard let self else { return }
+            self.diagnostics.record("multi-pet.changed state=\(manager?.state ?? "unknown")")
+            self.rebuildMenu()
+        }
+    }
+
+    private func showNotice(_ text: String) {
+        let alert = NSAlert(); alert.messageText = AppCopy.name; alert.informativeText = text
+        alert.addButton(withTitle: "好"); alert.runModal()
     }
     @objc private func toggleManagedPet(_ sender: NSMenuItem) {
         guard let action = sender.representedObject as? PetMenuAction,
@@ -463,6 +606,21 @@ final class Coordinator: NSObject, NSMenuDelegate {
         guard let action = sender.representedObject as? PetMenuAction,
               let size = action.size else { return }
         multiPet?.setSize(size, for: action.instanceID)
+        rebuildMenu()
+    }
+    @objc private func deleteManagedPet(_ sender: NSMenuItem) {
+        guard let action = sender.representedObject as? PetMenuAction,
+              action.instanceID != "white-dragon",
+              let multiPet,
+              let row = multiPet.instances.first(where: { $0.id == action.instanceID }),
+              row.phase == .stopped || row.phase == .failed else { return }
+        let alert = NSAlert()
+        alert.messageText = "删除这个桌宠实例？"
+        alert.informativeText = "将从实例清单中移除“\(row.id)”。必须先停止并完成清理；素材包和独立状态目录会保留。原始白龙不可删除。"
+        alert.addButton(withTitle: "删除实例")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        multiPet.delete(instanceID: row.id)
         rebuildMenu()
     }
     @objc private func togglePause() { _ = handle(.init(paused ? .resume : .pause)) }

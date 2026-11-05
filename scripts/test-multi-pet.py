@@ -67,6 +67,85 @@ class Window(QWidget):
 
 
 class StoreChecks(unittest.TestCase):
+    def test_first_pair_is_atomic_stopped_clone_and_keeps_original_preferences(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); profile = root / 'profile'; library = root / 'library'
+            assets = root / 'assets'; assets.mkdir()
+            (assets / '素材清单.json').write_text('{"version":1}', encoding='utf-8')
+            (assets / 'idle.webp').write_bytes(b'idle-frame')
+            library.mkdir()
+            store = InstanceStore(profile)
+            old_library = os.environ.get('BAILONG_PET_LIBRARY_DIR')
+            os.environ['BAILONG_PET_LIBRARY_DIR'] = str(library)
+            try:
+                original_preferences = dict(size=210, scheduledActivity=False,
+                                            movement=True, hideInFullscreen=False)
+                registry = store.create_initial_from_assets(assets, original_preferences)
+                self.assertEqual([row['id'] for row in registry['instances']],
+                                 ['white-dragon', 'white-dragon-copy'])
+                self.assertTrue(registry['instances'][0]['enabled'])
+                self.assertEqual(registry['instances'][0]['preferences'], original_preferences)
+                self.assertTrue(registry['instances'][1]['enabled'])
+                self.assertFalse(registry['instances'][1]['autoStartOnLaunch'])
+                self.assertTrue(registry['instances'][0]['autoStartOnLaunch'])
+                self.assertIsNotNone(registry['instances'][1]['preferences']['x'])
+                self.assertIsNotNone(registry['instances'][1]['preferences']['y'])
+                self.assertNotEqual(registry['instances'][1]['preferences'], registry['instances'][0]['preferences'])
+                self.assertEqual(registry['instances'][1]['preferences']['size'], 256)
+                self.assertEqual(registry['instances'][0]['package'], registry['instances'][1]['package'])
+                self.assertRegex(registry['instances'][0]['package']['version'], r'^0\.0\.0-[0-9a-f]{24}$')
+                self.assertEqual(store.load(), registry)
+                self.assertEqual(list((profile / 'instances').glob('*')), [])
+                self.assertFalse((profile / 'instances' / 'white-dragon-copy').exists())
+            finally:
+                store.close()
+                if old_library is None: os.environ.pop('BAILONG_PET_LIBRARY_DIR', None)
+                else: os.environ['BAILONG_PET_LIBRARY_DIR'] = old_library
+
+    def test_first_pair_refuses_existing_empty_or_corrupt_registry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); assets = root / 'assets'; assets.mkdir()
+            (assets / '素材清单.json').write_text('{"version":1}', encoding='utf-8')
+            library = root / 'library'; library.mkdir()
+            old_library = os.environ.get('BAILONG_PET_LIBRARY_DIR')
+            os.environ['BAILONG_PET_LIBRARY_DIR'] = str(library)
+            try:
+                for contents in ('{"schemaVersion":1,"instances":[]}', '{bad json'):
+                    profile = root / ('profile-' + str(len(list(root.glob('profile-*')))))
+                    profile.mkdir()
+                    (profile / 'pet-instances.json').write_text(contents)
+                    store = InstanceStore(profile)
+                    try:
+                        with self.assertRaises(InstanceError):
+                            store.create_initial_from_assets(assets, {})
+                        self.assertEqual((profile / 'pet-instances.json').read_text(), contents)
+                    finally: store.close()
+            finally:
+                if old_library is None: os.environ.pop('BAILONG_PET_LIBRARY_DIR', None)
+                else: os.environ['BAILONG_PET_LIBRARY_DIR'] = old_library
+
+    def test_first_pair_obeys_reference_lock_and_rejects_asset_symlinks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); profile = root / 'profile'; library = root / 'library'
+            assets = root / 'assets'; assets.mkdir(); library.mkdir()
+            manifest = assets / '素材清单.json'; manifest.write_text('{"version":1}', encoding='utf-8')
+            outside = root / 'outside.webp'; outside.write_bytes(b'frame')
+            (assets / 'linked.webp').symlink_to(outside)
+            old_library = os.environ.get('BAILONG_PET_LIBRARY_DIR')
+            os.environ['BAILONG_PET_LIBRARY_DIR'] = str(library)
+            store = InstanceStore(profile)
+            try:
+                with reference_lock(store.path):
+                    with self.assertRaises(ReferenceLockError):
+                        store.create_initial_from_assets(assets, {})
+                with self.assertRaises(InstanceError):
+                    store.create_initial_from_assets(assets, {})
+                self.assertFalse(store.path.exists())
+            finally:
+                store.close()
+                if old_library is None: os.environ.pop('BAILONG_PET_LIBRARY_DIR', None)
+                else: os.environ['BAILONG_PET_LIBRARY_DIR'] = old_library
+
     def test_registry_validation(self):
         a = definition('first')
         self.assertEqual(len(validate_registry(dict(schemaVersion=1, instances=[a]))['instances']), 1)
@@ -83,16 +162,28 @@ class StoreChecks(unittest.TestCase):
     def test_shared_example_matches_swift_contract(self):
         data = json.loads((ROOT / 'config/pet-instances.example.json').read_text())
         value = validate_registry(data)
-        self.assertEqual(value, data)
+        self.assertEqual(value, validate_registry(data))
         self.assertFalse(value['instances'][0]['enabled'])
         self.assertEqual(value['instances'][0]['package']['id'], 'local.bailong.white-dragon')
+
+    def test_legacy_copy_without_auto_start_field_defaults_to_stopped(self):
+        original = definition('white-dragon')
+        clone = definition('white-dragon-copy-2')
+        ordinary = definition('copy-pet')
+        original.pop('autoStartOnLaunch', None)
+        clone.pop('autoStartOnLaunch', None)
+        ordinary.pop('autoStartOnLaunch', None)
+        value = validate_registry(dict(schemaVersion=1, instances=[original, clone, ordinary]))
+        self.assertTrue(value['instances'][0]['autoStartOnLaunch'])
+        self.assertFalse(value['instances'][1]['autoStartOnLaunch'])
+        self.assertTrue(value['instances'][2]['autoStartOnLaunch'])
 
     def test_store_roundtrip_and_lock(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = InstanceStore(tmp)
             try:
                 data = dict(schemaVersion=1, instances=[definition('first')]); store.save(data)
-                self.assertEqual(store.load(), data)
+                self.assertEqual(store.load(), validate_registry(data))
                 with self.assertRaises(InstanceError): InstanceStore(tmp)
             finally:
                 store.close()
@@ -264,6 +355,19 @@ class ControllerChecks(unittest.TestCase):
         with self.assertRaises(InstanceError):
             self.controller.set_package('first', dict(id='local.fixture', version='1.0.0'), library)
         self.assertEqual(self.store.load()['instances'][0]['package'], dict(id='local.first', version='1.0.0'))
+
+    def test_delete_only_removes_stopped_non_original_definition_and_keeps_state(self):
+        state = self.store.state_directory('second')
+        marker = state / 'keep.txt'; marker.write_text('preserve')
+        with self.assertRaisesRegex(InstanceError, '原始白龙'):
+            self.controller.delete('white-dragon')
+        window = self.running('second')
+        with self.assertRaisesRegex(InstanceError, '完全停止'):
+            self.controller.delete('second')
+        self.controller.stop('second'); spin(lambda: 'second' not in self.controller.sessions)
+        self.assertTrue(self.controller.delete('second'))
+        self.assertNotIn('second', self.controller.definitions)
+        self.assertEqual(marker.read_text(), 'preserve')
 
     def tearDown(self):
         for session in list(self.controller.sessions.values()):

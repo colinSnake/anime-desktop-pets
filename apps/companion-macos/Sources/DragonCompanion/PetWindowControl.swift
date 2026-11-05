@@ -10,6 +10,7 @@ enum PetWindowControl {
         let pid: Int32
         let visible: Bool
         let hidden: Bool
+        let preferences: PetInstancePreferences?
     }
 
     static func send(_ command: String, pid: Int32, directory: URL = FileManager.default.temporaryDirectory) throws -> Reply {
@@ -49,15 +50,16 @@ enum PetWindowControl {
         guard sent == payload.count else { throw ConfigurationError("桌宠窗口请求未确认；未自动重试") }
         let deadline = ProcessInfo.processInfo.systemUptime + 1
         var data = Data()
-        var bytes = [UInt8](repeating: 0, count: 256)
-        while data.count <= 256 && ProcessInfo.processInfo.systemUptime < deadline {
+        var bytes = [UInt8](repeating: 0, count: 512)
+        while data.count <= 512 && ProcessInfo.processInfo.systemUptime < deadline {
             let count = Darwin.recv(fd, &bytes, bytes.count, 0)
             guard count > 0 else { break }
             data.append(contentsOf: bytes.prefix(count))
-            guard data.count <= 256 else { throw ConfigurationError("桌宠窗口确认超过大小限制") }
+            guard data.count <= 512 else { throw ConfigurationError("桌宠窗口确认超过大小限制") }
             if data.last == 10 {
                 let reply = try JSONDecoder().decode(Reply.self, from: data)
                 guard reply.ok, reply.pid == pid else { throw ConfigurationError("桌宠窗口确认身份不匹配") }
+                try reply.preferences?.validate()
                 return reply
             }
         }

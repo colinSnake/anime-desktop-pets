@@ -58,6 +58,10 @@ private final class ExternalLaunchTicket { var cancelled = false }
 
 @MainActor
 final class PetController: NSObject {
+    private struct HandoffError: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
     var taskFollowingAllowed = false
     var onHide: (() -> Void)?
     var onError: ((String) -> Void)?
@@ -75,6 +79,7 @@ final class PetController: NSObject {
     private var launchTicket: ExternalLaunchTicket?
     private var externalWindowControl = false
     private var descriptorLoadTask: Task<Void, Never>?
+    private var handoffInProgress = false
     private let windowCommandQueue = DispatchQueue(label: "local.dragon.pet-window-control", qos: .utility)
     private var windowCommandWork: DispatchWorkItem?
     var onChanged: (() -> Void)?
@@ -110,7 +115,12 @@ final class PetController: NSObject {
     var isVisible: Bool {
         panel?.isVisible ?? (external.map { !$0.isHidden && !$0.isTerminated && WindowGeometry.hasVisibleWindow(pid: $0.processIdentifier) } ?? false)
     }
+    var canHandoffToMultiPet: Bool {
+        !handoffInProgress && externalOwned && externalWindowControl &&
+            launchTicket == nil && descriptorLoadTask == nil && external?.isTerminated == false
+    }
     var state: String {
+        if handoffInProgress { return "switching" }
         if lastError != nil { return "failed" }
         if (descriptorLoadTask != nil || launchTicket != nil) && desiredVisible { return "starting" }
         if isVisible { return "visible" }
@@ -121,6 +131,7 @@ final class PetController: NSObject {
     init(runtime: Runtime) { self.runtime = runtime }
 
     func show(near frame: NSRect?) {
+        guard !handoffInProgress else { return }
         guard runtime.configuration.petEnabled else { return }
         desiredVisible = true; lastError = nil; _ = externalIntent.show(); launchTicket?.cancelled = false
         if runtime.configuration.petBackend == "external" { showExternal(); return }
@@ -191,6 +202,7 @@ final class PetController: NSObject {
         } else { panel.orderOut(nil); bubble?.orderOut(nil) }
     }
     func hide() {
+        guard !handoffInProgress else { return }
         externalIntent.hide(); launchTicket?.cancelled = true; desiredVisible = false
         visibilityTimer?.invalidate(); visibilityTimer = nil
         panel?.orderOut(nil); bubble?.orderOut(nil)
@@ -200,6 +212,11 @@ final class PetController: NSObject {
         }
     }
     func dismiss(preserveIndependentExternal: Bool = false) {
+        if handoffInProgress {
+            desiredVisible = false
+            visibilityTimer?.invalidate(); visibilityTimer = nil
+            return
+        }
         if preserveIndependentExternal {
             externalIntent.hide(); launchTicket?.cancelled = true; desiredVisible = false
             if externalOwned, externalWindowControl, let external { requestWindow("quit", app: external) }
@@ -212,6 +229,63 @@ final class PetController: NSObject {
         panel?.close(); panel = nil
         // Never terminate a third-party app: it may own a running Codex task.
         external = nil; externalOwned = false
+    }
+
+    func handoffToMultiPet(completion: @escaping @MainActor (Result<PetInstancePreferences, Error>) -> Void) {
+        guard !handoffInProgress, let app = external, !app.isTerminated,
+              externalOwned, externalWindowControl, launchTicket == nil, descriptorLoadTask == nil else {
+            completion(.failure(HandoffError(message: "当前白龙不是由本宿主启动的受控增强版。请从白龙自身菜单退出后重试；不会自动关闭其他进程。")))
+            return
+        }
+        handoffInProgress = true
+        let pid = app.processIdentifier
+        windowCommandQueue.async { [weak self, weak app] in
+            let result = Result { () throws -> PetInstancePreferences in
+                let status = try PetWindowControl.send("status", pid: pid)
+                guard status.preferences != nil else {
+                    throw HandoffError(message: "当前增强桌宠没有报告可迁移的偏好；为避免丢失设置，未请求退出。")
+                }
+                let quit = try PetWindowControl.send("quit", pid: pid)
+                guard let preferences = quit.preferences else {
+                    throw HandoffError(message: "白龙退出确认未包含偏好；退出结果不确定，没有启动多宠控制器。")
+                }
+                return preferences
+            }
+            Task { @MainActor [weak self, weak app] in
+                guard let self else { return }
+                guard case .success(let reply) = result else {
+                    self.handoffInProgress = false
+                    if case .failure(let error) = result { completion(.failure(error)) }
+                    self.onChanged?()
+                    return
+                }
+                do {
+                    try reply.validate()
+                    for _ in 0..<60 {
+                        if app?.isTerminated != false { break }
+                        try await Task.sleep(nanoseconds: 100_000_000)
+                    }
+                    guard app?.isTerminated != false else {
+                        throw HandoffError(message: "白龙已确认退出请求，但进程仍未退出；为避免双重渲染，没有启动多宠控制器。请确认白龙已关闭后重新尝试。")
+                    }
+                    self.external = nil
+                    self.managedExternal = nil
+                    self.externalOwned = false
+                    self.desiredVisible = false
+                    self.visibilityTimer?.invalidate(); self.visibilityTimer = nil
+                    self.bubbleTimer?.invalidate(); self.bubbleTimer = nil
+                    self.bubble?.close(); self.bubble = nil
+                    self.panel?.close(); self.panel = nil
+                    self.handoffInProgress = false
+                    self.onChanged?()
+                    completion(.success(reply))
+                } catch {
+                    self.handoffInProgress = false
+                    self.onChanged?()
+                    completion(.failure(error))
+                }
+            }
+        }
     }
     private func showExternal() {
         guard descriptorLoadTask == nil else { return }
@@ -288,6 +362,7 @@ final class PetController: NSObject {
                     // 旧请求不能把更新的显示意图隐藏掉；也不抢键盘焦点。
                     if self.desiredVisible { _ = app.unhide() }
                 }
+                self.onChanged?()
             }
         }
     }

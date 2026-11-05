@@ -51,17 +51,50 @@ public struct PetInstanceDefinition: Codable, Equatable, Sendable {
     public let id: String
     public let package: PetPackageReference
     public var enabled: Bool
+    public var autoStartOnLaunch: Bool
     public var preferences: PetInstancePreferences
-    public init(id: String, package: PetPackageReference, enabled: Bool = true,
+    public init(id: String, package: PetPackageReference, enabled: Bool = true, autoStartOnLaunch: Bool = true,
                 preferences: PetInstancePreferences = .init()) throws {
-        self.id = id; self.package = package; self.enabled = enabled; self.preferences = preferences
+        self.id = id; self.package = package; self.enabled = enabled
+        self.autoStartOnLaunch = autoStartOnLaunch; self.preferences = preferences
         try validate()
     }
+    private enum CodingKeys: String, CodingKey { case id, package, enabled, autoStartOnLaunch, preferences }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        package = try values.decode(PetPackageReference.self, forKey: .package)
+        enabled = try values.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        autoStartOnLaunch = try values.decodeIfPresent(Bool.self, forKey: .autoStartOnLaunch)
+            ?? !Self.isLegacyCloneID(id)
+        preferences = try values.decodeIfPresent(PetInstancePreferences.self, forKey: .preferences) ?? .init()
+        try validate(allowLegacySize: true)
+    }
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id); try values.encode(package, forKey: .package)
+        try values.encode(enabled, forKey: .enabled); try values.encode(autoStartOnLaunch, forKey: .autoStartOnLaunch)
+        try values.encode(preferences, forKey: .preferences)
+    }
+    private static func isLegacyCloneID(_ id: String) -> Bool {
+        id.range(of: #"(?:-copy(?:-[0-9]+)?)+$"#, options: .regularExpression) != nil
+    }
     public func validate() throws {
+        try validate(allowLegacySize: false)
+    }
+    private func validate(allowLegacySize: Bool) throws {
         guard id.count <= 64, id.range(of: #"^[a-z0-9]+(?:-[a-z0-9]+)*$"#, options: .regularExpression) != nil else {
             throw ConfigurationError("实例ID无效")
         }
-        try package.validate(); try preferences.validate()
+        try package.validate()
+        if allowLegacySize {
+            guard (96...512).contains(preferences.size) else { throw ConfigurationError("实例尺寸无效") }
+            var coordinates = preferences
+            coordinates.size = 256
+            try coordinates.validate()
+        } else {
+            try preferences.validate()
+        }
     }
 }
 

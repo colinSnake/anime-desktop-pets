@@ -29,6 +29,14 @@ final class PetInstancePlanningTests: XCTestCase {
         XCTAssertEqual(PetInstancePlanning.restorationIDs(registry: try registry(), rows: [], maximumRunning: 3,
                                                         excluding: ["first"]), ["second", "third", "fourth"])
     }
+    func testNewCloneStaysStoppedOnAutomaticRestoreUntilExplicitStartAll() throws {
+        let original = try PetInstanceDefinition(id: "white-dragon", package: .init(id: "local.dragon", version: "1.0.0"))
+        let clone = try PetInstanceDefinition(id: "white-dragon-copy", package: original.package, autoStartOnLaunch: false)
+        let registry = try PetInstanceRegistry(instances: [original, clone])
+        XCTAssertEqual(PetInstancePlanning.restorationIDs(registry: registry, rows: [], maximumRunning: 3), ["white-dragon"])
+        XCTAssertEqual(PetInstancePlanning.restorationIDs(registry: registry, rows: [], maximumRunning: 3,
+                                                         automaticOnly: false), ["white-dragon", "white-dragon-copy"])
+    }
     func testCloneIDsRemainValidAtHyphenTruncationAndCollision() throws {
         let source = String(repeating: "a", count: 58) + "-bcde"
         let first = try XCTUnwrap(PetInstancePlanning.nextCloneID(sourceID: source, used: [source]))

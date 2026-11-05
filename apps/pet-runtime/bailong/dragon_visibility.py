@@ -64,8 +64,14 @@ class VisibilityControl(QObject):
                 # depend on NSRunningApplication.hide or on a tray being present.
                 self.pet.manual_hidden = command == 'hide'
                 self.pet.apply_visibility()
+            body = self.pet.body_geometry()
             response = dict(ok=True, pid=os.getpid(), visible=self.pet.isVisible(),
-                            hidden=self.pet.manual_hidden)
+                            hidden=self.pet.manual_hidden,
+                            preferences=dict(size=int(self.pet.logical_size),
+                                            scheduledActivity=bool(self.pet.settings.value('autonomousEnabled', True, type=bool)),
+                                            movement=bool(self.pet.settings.value('autonomousMotion', True, type=bool)),
+                                            hideInFullscreen=bool(self.pet.settings.value('autoHideFullscreen', True, type=bool)),
+                                            x=int(body.x()), y=int(body.y())))
             connection.write(json.dumps(response).encode() + b'\n')
             connection.disconnectFromServer()
             if command == 'quit': QTimer.singleShot(50, self.pet.close)

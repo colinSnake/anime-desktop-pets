@@ -22,7 +22,7 @@ from PySide6.QtCore import QEvent
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 from dragon_frames import (AnimationFrameStore, AnimationResourceBudget,
                            LazyAnimationFrames, webp_frame_count, decode_image)
-from dragon_ui import Bubble, NativeMenu, FittedText
+from dragon_ui import Bubble, NativeMenu, FittedText, bubble_font
 APP = QApplication.instance() or QApplication([])
 APP.setQuitOnLastWindowClosed(False)
 
@@ -295,6 +295,15 @@ class UITests(unittest.TestCase):
         self.bubble=Bubble()
     def tearDown(self):
         self.bubble.close();self.bubble.deleteLater();APP.processEvents()
+    def test_bubble_font_prefers_reference_rounded_families(self):
+        from PySide6.QtGui import QFontDatabase
+        preferred=('ShangshouSoftCandy','Yuanti SC','YouYuan','幼圆',
+                   'Comic Sans MS','PingFang SC','Microsoft YaHei')
+        installed=set(QFontDatabase.families())
+        expected=next((family for family in preferred if family in installed),
+                      QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont).family())
+        self.assertEqual(bubble_font().family(),expected)
+        self.assertEqual(self.bubble.font().family(),expected)
     def test_multiline_message_shows_all_lines_without_scroll_when_short(self):
         text='第一行：你好\n第二行：透明边缘\n第三行：动画已就绪\n第四行：文字完整'
         self.bubble.message(text);APP.processEvents()
@@ -2261,7 +2270,7 @@ class QuotaBubbleTests(unittest.TestCase):
         ])
         APP.processEvents()
         self.assertLessEqual(self.pet.bubble.width(),320)
-        self.assertIn('Codex 额度',[v.text() for v in self.pet.bubble.findChildren(QLabel)])
+        self.assertIn('额度',[v.text() for v in self.pet.bubble.findChildren(QLabel)])
         self.assertEqual(len(self.pet.bubble.findChildren(QProgressBar)),2)
         self.assertTrue(any(v.toPlainText().startswith('重置于 ')
                             for v in self.pet.bubble.findChildren(FittedText)))
@@ -2314,12 +2323,20 @@ class QuotaBubbleTests(unittest.TestCase):
 
     def test_menu_exposes_quota_only_and_defers_fetch_until_menu_closes(self):
         menu=self.pet.context_menu()
-        labels=[a.text() for a in menu.actions()]
-        self.assertIn('查看 Codex 额度',labels)
+        def labels_for(current):
+            labels=[]
+            for item in current.actions():
+                labels.append(item.text())
+                if item.menu():
+                    labels.extend(labels_for(item.menu()))
+            return labels
+        labels=labels_for(menu)
+        self.assertIn('查询额度',labels)
         self.assertNotIn('打开对话模式',labels)
         self.assertNotIn('查看历史对话',labels)
-        self.assertNotIn('用量与专注…',labels)
-        action=next(a for a in menu.actions() if a.text()=='查看 Codex 额度')
+        self.assertFalse(any('…' in label or '...' in label for label in labels))
+        self.assertFalse(any('Codex' in label for label in labels))
+        action=next(a for a in menu.actions() if a.text()=='查询额度')
         with patch.object(self.pet,'quota') as quota:
             action.trigger();quota.assert_not_called()
             APP.processEvents();quota.assert_called_once()

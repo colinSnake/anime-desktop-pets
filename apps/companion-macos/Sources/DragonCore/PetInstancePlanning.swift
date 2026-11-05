@@ -3,12 +3,13 @@ import Foundation
 /// Pure host-side admission helpers; the controller remains the final authority.
 public enum PetInstancePlanning {
     public static func restorationIDs(registry: PetInstanceRegistry, rows: [PetInstanceControlRow],
-                                      maximumRunning: Int, excluding: Set<String> = []) -> [String] {
+                                      maximumRunning: Int, excluding: Set<String> = [],
+                                      automaticOnly: Bool = true) -> [String] {
         let occupied = rows.filter { [.starting, .running, .stopping].contains($0.phase) }
         let busy = Set(occupied.map(\.id))
         let slots = max(0, maximumRunning - occupied.count)
         return Array(registry.instances.lazy.filter {
-            $0.enabled && !busy.contains($0.id) && !excluding.contains($0.id)
+            $0.enabled && (!automaticOnly || $0.autoStartOnLaunch) && !busy.contains($0.id) && !excluding.contains($0.id)
         }.prefix(slots).map(\.id))
     }
 

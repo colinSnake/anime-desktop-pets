@@ -1,11 +1,21 @@
 import AppKit
+import Darwin
 import DragonCore
 import Foundation
 
 /// Swift host for the single Qt process that owns all real pet windows.
 @MainActor
 final class PetInstanceRuntime {
+    private struct InitialCreationError: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+    private struct InitialBootstrap {
+        let assets: URL
+        let preferences: PetInstancePreferences
+    }
     var taskFollowingAllowed = false
+    var onDiagnostic: ((String) -> Void)?
     private let runtime: Runtime
     private let profile: URL
     private let executable: URL
@@ -15,12 +25,16 @@ final class PetInstanceRuntime {
     private var controlReady = false
     private var generation = UUID()
     private enum Operation {
-        case restore(excluding: Set<String>)
+        case restore(excluding: Set<String>, automaticOnly: Bool)
         case request(PetInstanceControlRequest)
     }
     private var pending: [Operation] = []
     private var sending = false
     private var reservedCloneIDs = Set<String>()
+    private var terminationWaiters: [@MainActor () -> Void] = []
+    private var initialBootstrap: InitialBootstrap?
+    private var initialCreationCompletion: ((Result<Void, Error>) -> Void)?
+    private var initialCreationFinished = false
     private(set) var status: PetInstanceControlStatus?
     private(set) var lastError: String?
     var onChanged: (() -> Void)?
@@ -29,6 +43,29 @@ final class PetInstanceRuntime {
         guard let data = try? Data(contentsOf: profile.appendingPathComponent("pet-instances.json")),
               let registry = try? PetInstanceRegistry.decode(data) else { return false }
         return registry.instances.contains(where: { $0.enabled })
+    }
+
+    var hasValidRegistry: Bool {
+        Self.registryState(at: profile) == .valid
+    }
+
+    var registryIsMissing: Bool {
+        Self.registryState(at: profile) == .missing
+    }
+
+    private enum RegistryState { case missing, valid, invalid }
+
+    private static func registryState(at profile: URL) -> RegistryState {
+        let url = profile.appendingPathComponent("pet-instances.json")
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { return errno == ENOENT ? .missing : .invalid }
+        guard (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+              let data = try? Data(contentsOf: url), (try? PetInstanceRegistry.decode(data)) != nil else { return .invalid }
+        return .valid
+    }
+
+    static func hasValidRegistry(runtime: Runtime) -> Bool {
+        registryState(at: runtime.state) == .valid
     }
 
     var isVisible: Bool {
@@ -43,10 +80,13 @@ final class PetInstanceRuntime {
               let registry = try? PetInstanceRegistry.decode(data) else { return [] }
         return registry.instances.map { definition in
             PetInstanceControlRow(id: definition.id, package: definition.package,
-                                  enabled: definition.enabled, preferences: definition.preferences,
+                                  enabled: definition.enabled, autoStartOnLaunch: definition.autoStartOnLaunch,
+                                  preferences: definition.preferences,
                                   phase: .stopped, error: nil)
         }
     }
+
+    var isLoadingStatus: Bool { process?.isRunning == true && status == nil }
 
     var state: String {
         if let lastError { return "failed: \(lastError)" }
@@ -61,9 +101,6 @@ final class PetInstanceRuntime {
     init?(runtime: Runtime) {
         guard runtime.configuration.petBackend == "external" else { return nil }
         let profile = runtime.state
-        guard let data = try? Data(contentsOf: profile.appendingPathComponent("pet-instances.json")),
-              let registry = try? PetInstanceRegistry.decode(data),
-              registry.instances.contains(where: { $0.enabled }) else { return nil }
         let appURL = runtime.configuration.resourceURL(runtime.configuration.externalPetAppPath, relativeTo: runtime.resources)
         guard let executable = Bundle(url: appURL)?.executableURL else { return nil }
         self.runtime = runtime
@@ -71,7 +108,7 @@ final class PetInstanceRuntime {
         self.executable = executable
     }
 
-    func start() { startEnabledInstances() }
+    func start() { restoreAutoStartedInstances() }
 
     private func launchIfNeeded() {
         if process?.isRunning == true { return }
@@ -85,6 +122,16 @@ final class PetInstanceRuntime {
         let child = Process()
         child.executableURL = executable
         child.arguments = ["--multi-profile", profile.path]
+        if let initialBootstrap {
+            guard let data = try? JSONEncoder().encode(initialBootstrap.preferences),
+                  let json = String(data: data, encoding: .utf8) else {
+                let error = InitialCreationError(message: "无法编码白龙白名单偏好；没有启动多实例控制器。")
+                finishInitialCreation(.failure(error)); fail(error.localizedDescription)
+                return
+            }
+            child.arguments = (child.arguments ?? []) + ["--initial-from-assets", initialBootstrap.assets.path,
+                                                         "--initial-preferences", json]
+        }
         child.currentDirectoryURL = executable.deletingLastPathComponent()
         var environment = ["BAILONG_DATA_DIR": profile.path]
         environment["BAILONG_PET_LIBRARY_DIR"] = runtime.petLibraryURL.path
@@ -106,11 +153,35 @@ final class PetInstanceRuntime {
         } catch {
             pending.removeAll(); reservedCloneIDs.removeAll()
             fail(error.localizedDescription)
+            finishInitialCreation(.failure(error))
         }
     }
 
     func startEnabledInstances() {
-        pending.append(.restore(excluding: []))
+        pending.append(.restore(excluding: [], automaticOnly: false))
+        launchIfNeeded()
+        drain()
+    }
+
+    func restoreAutoStartedInstances() {
+        pending.append(.restore(excluding: [], automaticOnly: true))
+        launchIfNeeded()
+        drain()
+    }
+
+    func createInitialPair(assets: URL, preferences: PetInstancePreferences,
+                           completion: @escaping (Result<Void, Error>) -> Void) {
+        guard registryIsMissing, !initialCreationFinished, initialCreationCompletion == nil,
+              process?.isRunning != true else {
+            completion(.failure(InitialCreationError(message: "实例清单已存在、状态无效或首次创建已提交；不会覆盖或重复执行。")))
+            return
+        }
+        do { try preferences.validate() }
+        catch { completion(.failure(error)); return }
+        initialBootstrap = InitialBootstrap(assets: assets, preferences: preferences)
+        initialCreationCompletion = completion
+        // Restore the original only; the newly created copy remains stopped for this handoff.
+        pending.append(.restore(excluding: ["white-dragon-copy"], automaticOnly: true))
         launchIfNeeded()
         drain()
     }
@@ -135,15 +206,27 @@ final class PetInstanceRuntime {
     func stop(instanceID: String) {
         pending = pending.compactMap { operation in
             switch operation {
-            case .restore(var excluded):
+            case .restore(var excluded, let automaticOnly):
                 excluded.insert(instanceID)
-                return .restore(excluding: excluded)
+                return .restore(excluding: excluded, automaticOnly: automaticOnly)
             case .request(let request):
                 return request.command == .startPet && request.instanceID == instanceID ? nil : operation
             }
         }
         guard process?.isRunning == true else { return }
         send(.init(.stopPet, instanceID: instanceID))
+    }
+
+    func delete(instanceID: String) {
+        guard instanceID != "white-dragon", let row = instances.first(where: { $0.id == instanceID }),
+              row.phase == .stopped || row.phase == .failed else {
+            lastError = "只能删除已停止且清理完成的分身；原始白龙不可删除。"
+            onChanged?()
+            return
+        }
+        pending.append(.request(.init(.deletePet, instanceID: instanceID)))
+        launchIfNeeded()
+        drain()
     }
 
     func clone(sourceID: String) {
@@ -174,7 +257,33 @@ final class PetInstanceRuntime {
         pending.removeAll()
         guard process?.isRunning == true else { return }
         expectedTermination = true
-        send(.init(.shutdown))
+    }
+
+    func finishStopping(completion: @escaping @MainActor () -> Void) {
+        guard let process, process.isRunning else { completion(); return }
+        terminationWaiters.append(completion)
+        let profile = self.profile
+        DispatchQueue.global(qos: .utility).async { [weak self, weak process] in
+            do {
+                _ = try PetInstanceControlClient.send(.init(.shutdown), directory: profile, timeout: 2)
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    self?.onDiagnostic?("multi-pet.shutdown-request-failed \(error.localizedDescription)")
+                }
+            }
+            for _ in 0..<100 {
+                guard let process, process.isRunning else { break }
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            let timedOut = process?.isRunning == true
+            RunLoop.main.perform(inModes: [.default, .modalPanel]) { [weak self] in
+                guard let self else { return }
+                MainActor.assumeIsolated {
+                    if timedOut { self.onDiagnostic?("multi-pet.shutdown-timeout") }
+                    self.finishTerminationWaiters()
+                }
+            }
+        }
     }
 
     func setPreferences(_ patch: PetPreferencePatch, for instanceID: String) {
@@ -203,7 +312,9 @@ final class PetInstanceRuntime {
                 try? await Task.sleep(nanoseconds: 50_000_000)
             }
             guard let self, self.generation == token else { return }
-            self.fail("白龙多实例控制通道启动超时")
+            let message = "白龙多实例控制通道启动超时；首次创建结果可能不确定。请退出并重新打开桌边小崽核对实例清单和恢复状态，不要重复创建。"
+            self.fail(message)
+            self.finishInitialCreation(.failure(InitialCreationError(message: message)))
         }
     }
 
@@ -235,12 +346,13 @@ final class PetInstanceRuntime {
                 let request: PetInstanceControlRequest
                 switch operation {
                 case .request(let value): request = value
-                case .restore(let excluded):
+                case .restore(let excluded, let automaticOnly):
                     guard let data = try? Data(contentsOf: self.profile.appendingPathComponent("pet-instances.json")),
                           let registry = try? PetInstanceRegistry.decode(data) else { continue }
                     let ids = PetInstancePlanning.restorationIDs(
                         registry: registry, rows: self.status?.instances ?? [],
-                        maximumRunning: self.status?.maximumRunning ?? 3, excluding: excluded)
+                        maximumRunning: self.status?.maximumRunning ?? 3, excluding: excluded,
+                        automaticOnly: automaticOnly)
                     guard !ids.isEmpty else { continue }
                     request = .init(.startSelected, instanceIDs: ids)
                 }
@@ -270,7 +382,24 @@ final class PetInstanceRuntime {
         guard let reply else { return }
         status = reply.result?.status
         lastError = reply.ok ? nil : reply.error?.message
+        if let rows = status?.instances,
+           rows.contains(where: { $0.id == "white-dragon" && $0.enabled }),
+           rows.contains(where: { $0.id == "white-dragon-copy" && $0.enabled && $0.phase == .stopped }) {
+            finishInitialCreation(.success(()))
+        }
+        if !reply.ok, initialCreationCompletion != nil {
+            finishInitialCreation(.failure(InitialCreationError(message: reply.error?.message ?? "首次创建未确认；请核对实例清单。")))
+        }
         onChanged?()
+    }
+
+    private func finishInitialCreation(_ result: Result<Void, Error>) {
+        guard !initialCreationFinished else { return }
+        initialCreationFinished = true
+        initialBootstrap = nil
+        let completion = initialCreationCompletion
+        initialCreationCompletion = nil
+        completion?(result)
     }
 
     private func fail(_ message: String) {
@@ -285,7 +414,18 @@ final class PetInstanceRuntime {
         pending.removeAll(); reservedCloneIDs.removeAll()
         status = nil
         if !expectedTermination && lastError == nil { lastError = "白龙多实例 helper 已退出" }
+        if initialCreationCompletion != nil {
+            finishInitialCreation(.failure(InitialCreationError(
+                message: "多宠控制器已退出，首次创建结果不确定；重新打开菜单核对清单后再操作，系统不会自动重放。")))
+        }
         expectedTermination = false
         onChanged?()
+        finishTerminationWaiters()
+    }
+
+    private func finishTerminationWaiters() {
+        let waiters = terminationWaiters
+        terminationWaiters.removeAll()
+        waiters.forEach { $0() }
     }
 }

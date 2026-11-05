@@ -4,7 +4,7 @@ import Foundation
 public enum PetInstanceCommand: String, Codable, Sendable {
     case status, startPet = "start_pet", startSelected = "start_selected", stopPet = "stop_pet"
     case stopAll = "stop_all", setPreferences = "set_preferences", clonePet = "clone_pet", shutdown
-    case setPackage = "set_package"
+    case setPackage = "set_package", deletePet = "delete_pet"
 }
 
 public struct PetPreferencePatch: Codable, Sendable {
@@ -53,7 +53,7 @@ public struct PetInstanceControlRequest: Codable, Sendable {
         switch command {
         case .status, .stopAll, .shutdown:
             guard instanceID == nil, cloneID == nil, instanceIDs == nil, preferences == nil, package == nil else { throw ConfigurationError("命令包含多余参数") }
-        case .startPet, .stopPet, .setPreferences:
+        case .startPet, .stopPet, .setPreferences, .deletePet:
             guard let id = instanceID, identifier(id), cloneID == nil, instanceIDs == nil,
                   (command == .setPreferences) == (preferences != nil), package == nil else { throw ConfigurationError("单实例命令参数无效") }
         case .setPackage:
@@ -87,14 +87,27 @@ public struct PetInstanceControlRow: Codable, Sendable {
     public let id: String
     public let package: PetPackageReference
     public let enabled: Bool
+    public let autoStartOnLaunch: Bool
     public let preferences: PetInstancePreferences
     public let phase: PetInstancePhase
     public let error: String?
-    public init(id: String, package: PetPackageReference, enabled: Bool,
+    public init(id: String, package: PetPackageReference, enabled: Bool, autoStartOnLaunch: Bool = true,
                 preferences: PetInstancePreferences, phase: PetInstancePhase,
                 error: String? = nil) {
-        self.id = id; self.package = package; self.enabled = enabled
+        self.id = id; self.package = package; self.enabled = enabled; self.autoStartOnLaunch = autoStartOnLaunch
         self.preferences = preferences; self.phase = phase; self.error = error
+    }
+    private enum CodingKeys: String, CodingKey { case id, package, enabled, autoStartOnLaunch, preferences, phase, error }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        package = try values.decode(PetPackageReference.self, forKey: .package)
+        enabled = try values.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        autoStartOnLaunch = try values.decodeIfPresent(Bool.self, forKey: .autoStartOnLaunch)
+            ?? (id.range(of: #"(?:-copy(?:-[0-9]+)?)+$"#, options: .regularExpression) == nil)
+        preferences = try values.decode(PetInstancePreferences.self, forKey: .preferences)
+        phase = try values.decode(PetInstancePhase.self, forKey: .phase)
+        error = try values.decodeIfPresent(String.self, forKey: .error)
     }
 }
 public struct PetInstanceControlOutcome: Codable, Sendable {

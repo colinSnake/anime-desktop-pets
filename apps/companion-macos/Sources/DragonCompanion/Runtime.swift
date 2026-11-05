@@ -62,9 +62,14 @@ struct Runtime: Sendable {
 /// Bounded metadata-only diagnostics: never account data, conversations, credentials or screen contents.
 final class Diagnostics {
     private let url: URL
+    private let formatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
     init(root: URL) { url = root.appendingPathComponent("companion.log") }
     func record(_ event: String) {
-        let line = "\(ISO8601DateFormatter().string(from: Date())) \(event)\n"
+        let line = "\(formatter.string(from: Date())) \(event)\n"
         var data = (try? Data(contentsOf: url)) ?? Data()
         if data.count > 256 * 1024 { data = Data(data.suffix(128 * 1024)) }
         data.append(Data(line.utf8))

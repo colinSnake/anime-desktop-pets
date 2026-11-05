@@ -14,6 +14,24 @@ struct ExternalPetDescriptor: Sendable {
         return marker["windowControlProtocol"] as? Int == 1
     }
 
+    static func supportsManagedHandoff(_ runtime: Runtime) -> Bool {
+        guard runtime.configuration.petBackend == "external" else { return false }
+        let url = runtime.configuration.resourceURL(runtime.configuration.externalPetAppPath, relativeTo: runtime.resources)
+        guard let bundle = Bundle(url: url), bundle.bundleIdentifier == "local.bailongpet.macos",
+              let executable = bundle.executableURL,
+              FileManager.default.isExecutableFile(atPath: executable.path),
+              let data = try? Data(contentsOf: url.appendingPathComponent("Contents/Resources/DRAGON_PATCH.json")),
+              let marker = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              marker["windowControlProtocol"] as? Int == 1,
+              PetBuildIdentity.supports(buildVersion: bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+                                         patchVersion: bundle.object(forInfoDictionaryKey: "DragonPatchVersion") as? String,
+                                         metadata: marker),
+              let resources = bundle.resourceURL else { return false }
+        let assets = runtime.configuration.externalPetAssetsURL(relativeTo: runtime.resources)
+            ?? resources.appendingPathComponent("outputs/白龙桌宠素材")
+        return FileManager.default.fileExists(atPath: assets.appendingPathComponent("素材清单.json").path)
+    }
+
     static func inspect(_ runtime: Runtime) throws -> Self {
         let url = runtime.configuration.resourceURL(runtime.configuration.externalPetAppPath, relativeTo: runtime.resources)
         guard url.pathExtension == "app", let bundle = Bundle(url: url),
@@ -37,7 +55,7 @@ struct ExternalPetDescriptor: Sendable {
             }
             if buildVersion == "3" {
                 catalog = try PetAnimationCatalog.inspect(root: assetsURL)
-                return Self(url: url, bundleIdentifier: identifier, catalog: catalog, buildVersion: buildVersion, patchVersion: patchVersion, assetsURL: runtime.configuration.externalPetAssetsURL(relativeTo: runtime.resources))
+                return Self(url: url, bundleIdentifier: identifier, catalog: catalog, buildVersion: buildVersion, patchVersion: patchVersion, assetsURL: assetsURL)
             }
             guard let data = try? Data(contentsOf: resources.appendingPathComponent("DRAGON_PATCH.json")),
                   let marker = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -45,7 +63,7 @@ struct ExternalPetDescriptor: Sendable {
                 throw ConfigurationError("当前仅验证白龙 mac.3 原版或 Dragon 增强版，请检查版本")
             }
             catalog = try PetAnimationCatalog.inspect(root: assetsURL)
-            return Self(url: url, bundleIdentifier: identifier, catalog: catalog, buildVersion: buildVersion, patchVersion: patchVersion, assetsURL: runtime.configuration.externalPetAssetsURL(relativeTo: runtime.resources))
+            return Self(url: url, bundleIdentifier: identifier, catalog: catalog, buildVersion: buildVersion, patchVersion: patchVersion, assetsURL: assetsURL)
         } else { catalog = nil }
         return Self(url: url, bundleIdentifier: identifier, catalog: catalog, buildVersion: buildVersion, patchVersion: patchVersion, assetsURL: nil)
     }
