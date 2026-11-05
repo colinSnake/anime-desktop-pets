@@ -16,6 +16,8 @@ if [[ -x "$ROOT/.local/pet-build/venv/bin/python" ]]; then
     "$ROOT/.local/pet-build/venv/bin/python" "$ROOT/scripts/test-pet-library.py"
   /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network*)' \
     "$ROOT/.local/pet-build/venv/bin/python" "$ROOT/scripts/test-pet-library-ui.py"
+  /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network*)' \
+    "$ROOT/.local/pet-build/venv/bin/python" "$ROOT/scripts/test-derived-animation-audit.py"
 else
   python3 "$ROOT/scripts/test-pet-library.py"
   echo 'Pet library UI tests skipped: prepared PySide6 runtime is unavailable.'
