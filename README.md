@@ -57,7 +57,7 @@ instance. For Codex launch/watch modes and local configuration, see the
 
 - The 4K startup video and Codex launch run together. New client windows are sized to the 16:9 video when Accessibility is granted; otherwise the video fills the actual client frame (edge cropping, no letterboxing). A nearly opaque nonactivating cover and a Chromium occlusion switch keep rendering progressing. When the startup video ends, the cover is released and Codex's own loading UI is allowed to continue; Codex exposes no content-readiness API. Existing processes are neither resized nor replayed.
 - Full animated white-dragon pet, multi-instance management and a local pet asset library. The status menu manages lifecycle; per-pet menus handle interaction and animation previews. See the [menu contract](docs/菜单功能与交互边界.md).
-- The performance baseline now includes real-window sampling with one, two and three instances. A 256px pre-scaled default-idle WebP reduced an isolated decode-plus-resize microbenchmark but did not show stable whole-process CPU/RSS gains and introduced pixel differences, so it was not adopted as a build input. See the [performance build notes](docs/桌宠增强与性能构建.md) and [verification record](docs/实际验证记录.md).
+- Full 35-action evaluation leaves production assets unchanged: actual Qt premultiplied-pixel checks reject pre-scaled WebP replacement. Raw premultiplied-frame compression is exact at 256/512px, but both full payloads would total about 1.87 GiB; only bounded, on-demand caching remains under evaluation, with no desktop CPU/RSS improvement claim. Read-only tooling and scope are in the [performance notes](docs/桌宠增强与性能构建.md) and [verification record](docs/实际验证记录.md).
 - The enhanced white dragon can create its first same-package clone from the host status menu without a pre-existing registry. The confirmed handoff moves the host-owned pet from its single-pet controller to one multi-pet helper; a new clone starts stopped and is not auto-restored until explicitly started. The instance menu reports confirmed helper status and can delete stopped clones without removing their assets or state directories. Unchanged helper status polls do not trigger redundant menu refreshes or diagnostic writes. Clones share read-only animation assets and keep independent position, size and activity preferences. At most three pets, including the original, may run at once.
 - Startup presentation and coordination run in the macOS host; animation and interaction run in a
   separate Python/PySide6 helper.
@@ -75,6 +75,11 @@ not duplicated here.
 
 Preview old build cleanup with `python3 scripts/clean-builds.py --dry-run` or
 `bash scripts/clean-builds.sh --dry-run`. Use Python for the `.py` entry point.
+For explicit storage recovery, preview with `python3 scripts/clean-builds.py --caches --dry-run`,
+then remove `--dry-run`. This only adds allowlisted compiler/PyInstaller intermediates and a redundant
+helper packaging directory; it preserves build products, source assets, environments, downloads and
+verification evidence. Busy paths are skipped; an active compiler or failed open-file check aborts cleanup.
+Normal builds do not opt into cache removal; the next build recreates removed caches.
 
 ## Validation
 
