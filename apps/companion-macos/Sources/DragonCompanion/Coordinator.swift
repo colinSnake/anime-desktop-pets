@@ -1020,7 +1020,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
                             diagnostics.record("character.local-answer")
                             return
                         }
-                        let characterContext = await self.voiceCharacterContext()
+                        let characterContext = await self.voiceCharacterContext(for: text)
                         let (provider, apiKey) = try self.modelProviderCredentials()
                         let reply = try await ModelProviderClient().complete(
                             settings: provider, apiKey: apiKey, userText: text,
@@ -1092,7 +1092,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
         }
     }
 
-    private func voiceCharacterContext() async -> String? {
+    private func voiceCharacterContext(for query: String) async -> String? {
         do {
             let store = try CharacterMemoryStore(stateDirectory: runtime.state, petID: "white-dragon")
             let identity = try await store.loadIdentity(defaultName: "龙妹")
@@ -1100,7 +1100,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
             let capabilities = CharacterCapabilitySnapshot.make(runtime: runtime,
                                                                   speechRuntimeAvailable: speechRuntime != nil)
             return CharacterContextBuilder.make(identity: identity, memories: memories,
-                                                capabilities: capabilities)
+                                                capabilities: capabilities, query: query)
         } catch {
             diagnostics.record("character.context.unavailable")
             return nil

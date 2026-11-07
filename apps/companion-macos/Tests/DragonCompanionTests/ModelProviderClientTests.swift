@@ -1,4 +1,5 @@
 import Foundation
+import CharacterCore
 import XCTest
 @testable import DragonCompanion
 
@@ -95,6 +96,41 @@ final class ModelProviderClientTests: XCTestCase {
         )
 
         XCTAssertEqual(result, "收到。")
+    }
+
+    func testCompletionPayloadContainsOnlyRelevantAuthorizedMemory() async throws {
+        let settings = ModelProviderSettings()
+        let memories = [
+            CharacterMemory(kind: .preference, text: "喜欢安静咖啡馆", source: "test", status: .confirmed,
+                            shareWithOnlineModel: true),
+            CharacterMemory(kind: .fact, text: "宠物名字是雪球", source: "test", status: .confirmed,
+                            shareWithOnlineModel: true),
+            CharacterMemory(kind: .fact, text: "喜欢安静酒吧", source: "test", status: .candidate,
+                            shareWithOnlineModel: true),
+            CharacterMemory(kind: .fact, text: "只留在本机的安静偏好", source: "test", status: .confirmed,
+                            shareWithOnlineModel: false),
+        ]
+        let context = CharacterContextBuilder.make(identity: nil, memories: memories,
+                                                   query: "推荐安静咖啡馆")
+        ModelProviderURLProtocolStub.handler = { request in
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: requestBody(request)) as? [String: Any])
+            let messages = try XCTUnwrap(object["messages"] as? [[String: Any]])
+            let system = try XCTUnwrap(messages.first?["content"] as? String)
+            XCTAssertTrue(system.contains("喜欢安静咖啡馆"))
+            XCTAssertFalse(system.contains("雪球"))
+            XCTAssertFalse(system.contains("安静酒吧"))
+            XCTAssertFalse(system.contains("只留在本机"))
+            let data = try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": ["content": "可以试试安静的咖啡馆。"]]]
+            ])
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
+        }
+
+        let result = try await ModelProviderClient(session: makeSession()).complete(
+            settings: settings, apiKey: "test-key", userText: "推荐安静咖啡馆", characterContext: context
+        )
+
+        XCTAssertEqual(result, "可以试试安静的咖啡馆。")
     }
 
     func testWeatherToolUsesOpenMeteoThenReturnsResultToModel() async throws {

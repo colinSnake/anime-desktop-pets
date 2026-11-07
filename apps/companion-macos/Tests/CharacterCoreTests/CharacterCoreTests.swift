@@ -10,7 +10,7 @@ final class CharacterCoreTests: XCTestCase {
                             shareWithOnlineModel: true),
         ]
 
-        let context = CharacterContextBuilder.make(identity: nil, memories: memories)
+        let context = CharacterContextBuilder.make(identity: nil, memories: memories, query: "brief replies")
 
         XCTAssertTrue(context?.contains("brief replies") == true)
         XCTAssertFalse(context?.contains("local secret") == true)
@@ -19,11 +19,40 @@ final class CharacterCoreTests: XCTestCase {
 
     func testIdentityIsLocalUntilExplicitlyShared() {
         let identity = CharacterIdentity(name: "龙妹", background: "来自东方", shareWithOnlineModel: false)
-        XCTAssertNil(CharacterContextBuilder.make(identity: identity, memories: []))
+        XCTAssertNil(CharacterContextBuilder.make(identity: identity, memories: [], query: "随便聊聊"))
 
         var sharedIdentity = identity
         sharedIdentity.shareWithOnlineModel = true
-        XCTAssertTrue(CharacterContextBuilder.make(identity: sharedIdentity, memories: [])?.contains("来自东方") == true)
+        XCTAssertTrue(CharacterContextBuilder.make(identity: sharedIdentity, memories: [], query: "随便聊聊")?.contains("来自东方") == true)
+    }
+
+    func testOnlyRelevantConfirmedAndAuthorizedMemoriesEnterContext() {
+        let memories = [
+            CharacterMemory(kind: .preference, text: "我喜欢安静的咖啡馆", source: "test", status: .confirmed,
+                            shareWithOnlineModel: true),
+            CharacterMemory(kind: .fact, text: "我的狗叫雪球", source: "test", status: .confirmed,
+                            shareWithOnlineModel: true),
+            CharacterMemory(kind: .fact, text: "我喜欢热闹的酒吧", source: "test", status: .candidate,
+                            shareWithOnlineModel: true),
+            CharacterMemory(kind: .fact, text: "我偏好安静", source: "test", status: .confirmed,
+                            shareWithOnlineModel: false),
+        ]
+
+        let context = CharacterContextBuilder.make(identity: nil, memories: memories, query: "推荐安静的地方")
+
+        XCTAssertTrue(context?.contains("安静的咖啡馆") == true)
+        XCTAssertFalse(context?.contains("雪球") == true)
+        XCTAssertFalse(context?.contains("热闹的酒吧") == true)
+        XCTAssertFalse(context?.contains("我偏好安静") == true)
+    }
+
+    func testUnrelatedQueryDoesNotAttachAnyMemory() {
+        let memory = CharacterMemory(kind: .preference, text: "我喜欢安静的咖啡馆", source: "test",
+                                     status: .confirmed, shareWithOnlineModel: true)
+
+        let context = CharacterContextBuilder.make(identity: nil, memories: [memory], query: "火星探测器怎么工作")
+
+        XCTAssertNil(context)
     }
 
     func testRememberCommandRequiresExplicitPrefixAndEnforcesLength() {
