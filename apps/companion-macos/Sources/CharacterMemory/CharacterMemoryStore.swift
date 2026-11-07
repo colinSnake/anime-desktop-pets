@@ -41,7 +41,9 @@ public actor CharacterMemoryStore {
     public func saveIdentity(_ identity: CharacterIdentity) throws {
         try prepareDirectories()
         let name = identity.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let fields = [identity.background, identity.personality, identity.speakingStyle, identity.boundaries]
+        let fields = [identity.role, identity.background, identity.personality, identity.values,
+                      identity.motivations, identity.relationship, identity.speakingStyle,
+                      identity.knowledgeScope, identity.boundaries]
         guard !name.isEmpty, name.count <= 80, !name.contains("\n"), !name.contains("\r"),
               fields.allSatisfy({ $0.count <= 2_000 }), fields.reduce(name.count, { $0 + $1.count }) <= 8_000 else {
             throw CharacterMemoryStoreError.invalidRecord
@@ -95,6 +97,32 @@ public actor CharacterMemoryStore {
     }
 
     private var memoriesDirectory: URL { characterDirectory.appendingPathComponent("memories", isDirectory: true) }
+    private var plansDirectory: URL { characterDirectory.appendingPathComponent("plans", isDirectory: true) }
+
+    public func listGoals() throws -> [CharacterGoal] {
+        try prepareDirectories()
+        let urls = try fileManager.contentsOfDirectory(at: plansDirectory, includingPropertiesForKeys: nil,
+                                                       options: [.skipsHiddenFiles])
+        return try urls.filter { $0.pathExtension == "md" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .map { url in
+                guard isRegularFile(url) else { throw CharacterMemoryStoreError.unsafePath }
+                return try CharacterMarkdownCodec.decodeGoal(Data(contentsOf: url), expectedID: url.deletingPathExtension().lastPathComponent)
+            }
+    }
+
+    public func saveGoal(_ goal: CharacterGoal) throws {
+        try prepareDirectories()
+        guard CharacterGoalValidation.validate(goal) else { throw CharacterMemoryStoreError.invalidRecord }
+        try write(CharacterMarkdownCodec.encode(goal: goal), to: planURL(goal.id))
+    }
+
+    public func deleteGoal(id: String) throws {
+        guard CharacterGoalValidation.isSafeIdentifier(id) else { throw CharacterMemoryStoreError.invalidRecord }
+        try prepareDirectories()
+        let url = planURL(id)
+        guard isRegularFile(url) else { throw CharacterMemoryStoreError.unsafePath }
+        try fileManager.removeItem(at: url)
+    }
 
     private func prepareDirectories() throws {
         var rootInfo = stat()
@@ -108,7 +136,7 @@ public actor CharacterMemoryStore {
         }
         let petsDirectory = stateDirectory.appendingPathComponent("pets", isDirectory: true)
         let directories = [petsDirectory, petsDirectory.appendingPathComponent(petID, isDirectory: true),
-                           characterDirectory, memoriesDirectory]
+                           characterDirectory, memoriesDirectory, plansDirectory]
         for directory in directories {
             var info = stat()
             if lstat(directory.path, &info) == 0 {
@@ -147,6 +175,7 @@ public actor CharacterMemoryStore {
     }
 
     private func memoryURL(_ id: String) -> URL { memoriesDirectory.appendingPathComponent("\(id).md") }
+    private func planURL(_ id: String) -> URL { plansDirectory.appendingPathComponent("\(id).md") }
 
     private func fileExists(_ url: URL) -> Bool {
         var info = stat()

@@ -13,7 +13,7 @@ struct CharacterMemoryView: View {
         VStack(alignment: .leading, spacing: 14) {
             CharacterSectionHeader(
                 title: "本地记忆",
-                subtitle: "新内容先待审核；只有确认并单独允许分享的记忆才会发给在线模型。"
+                subtitle: "手动添加的记忆先审核；语音明确要求记住普通内容时可自动保存到本机。在线分享仍需逐条允许。"
             )
             HStack {
                 Picker("类型", selection: $draftKind) {
@@ -21,12 +21,24 @@ struct CharacterMemoryView: View {
                 }
                 .frame(width: 150)
                 TextField("添加一条记忆", text: $draftText)
-                Button("提交审核") {
+                Button("保存记忆") {
                     model.addMemory(text: draftText, kind: draftKind)
                     draftText = ""
                 }
                 .buttonStyle(CharacterActionButtonStyle())
                 .disabled(draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            let draftFindings = model.draftMemoryFindings(text: draftText, kind: draftKind)
+            if !draftFindings.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("提交前提醒").font(.caption.weight(.semibold))
+                    ForEach(Array(draftFindings.enumerated()), id: \.offset) { _, finding in
+                        Text("• \(finding.title)：\(finding.message)")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                    Text("仍会进入待审核区，不会自动覆盖旧记忆。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
@@ -48,7 +60,8 @@ struct CharacterMemoryView: View {
                     memory: memory,
                     onConfirm: { model.confirm($0) },
                     onUpdate: { model.update($0) },
-                    onDelete: { model.delete($0) }
+                    onDelete: { model.delete($0) },
+                    onFindings: model.memoryFindings
                 )
             }
         }
@@ -60,16 +73,19 @@ private struct CharacterMemoryRow: View {
     let onConfirm: (CharacterMemory) -> Void
     let onUpdate: (CharacterMemory) -> Void
     let onDelete: (CharacterMemory) -> Void
+    let onFindings: (CharacterMemory) -> [CharacterMemoryReview.Finding]
     @State private var draftText: String
     @State private var shareEnabled: Bool
     @State private var confirmsDeletion = false
 
     init(memory: CharacterMemory, onConfirm: @escaping (CharacterMemory) -> Void,
-         onUpdate: @escaping (CharacterMemory) -> Void, onDelete: @escaping (CharacterMemory) -> Void) {
+         onUpdate: @escaping (CharacterMemory) -> Void, onDelete: @escaping (CharacterMemory) -> Void,
+         onFindings: @escaping (CharacterMemory) -> [CharacterMemoryReview.Finding]) {
         self.memory = memory
         self.onConfirm = onConfirm
         self.onUpdate = onUpdate
         self.onDelete = onDelete
+        self.onFindings = onFindings
         _draftText = State(initialValue: memory.text)
         _shareEnabled = State(initialValue: memory.shareWithOnlineModel)
     }
@@ -84,6 +100,17 @@ private struct CharacterMemoryRow: View {
                     .onChange(of: shareEnabled) { value in update(text: draftText, share: value) }
             }
             TextField("记忆内容", text: $draftText, axis: .vertical).lineLimit(2...5)
+            let findings = onFindings(memory)
+            if !findings.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(findings.enumerated()), id: \.offset) { _, finding in
+                        Text("• \(finding.title)：\(finding.message)")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                    Text("请由你决定保留、修改或删除，不会自动合并。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
             HStack {
                 if draftText != memory.text {
                     Button("保存修改") { update(text: draftText, share: shareEnabled) }

@@ -82,6 +82,7 @@ final class ModelProviderClientTests: XCTestCase {
             let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
             let messages = try XCTUnwrap(object["messages"] as? [[String: Any]])
             let system = try XCTUnwrap(messages.first?["content"] as? String)
+            XCTAssertTrue(system.contains("用户确认的稳定设定"))
             XCTAssertTrue(system.contains("confirmed preference"))
             XCTAssertFalse(system.contains("local-only secret"))
             let response = try JSONSerialization.data(withJSONObject: [

@@ -992,13 +992,36 @@ final class Coordinator: NSObject, NSMenuDelegate {
                     Task {
                         do {
                             let store = try CharacterMemoryStore(stateDirectory: self.runtime.state, petID: "white-dragon")
-                            try await store.saveMemory(CharacterMemory(
+                            let candidate = CharacterMemory(
                                 kind: .fact, text: rememberedText, source: "用户语音明确指令"
-                            ))
-                            try speechRuntime?.sendResponse(
-                                text: "我先把这条内容放进待审核记忆，请在角色与记忆中确认。",
-                                speak: settings.speakReplies
                             )
+                            let existing = try await store.listMemories()
+                            switch CharacterMemoryReview.automationDecision(for: candidate, against: existing) {
+                            case .autoConfirm:
+                                var confirmed = candidate
+                                confirmed.status = .confirmed
+                                try await store.saveMemory(confirmed)
+                                try speechRuntime?.sendResponse(
+                                    text: "我记下了，这条内容已保存在本机。",
+                                    speak: settings.speakReplies
+                                )
+                            case .alreadyExists:
+                                try speechRuntime?.sendResponse(
+                                    text: "这条内容我已经记下了，没有重复保存。",
+                                    speak: settings.speakReplies
+                                )
+                            case .requiresReview(let reason):
+                                try await store.saveMemory(candidate)
+                                try speechRuntime?.sendResponse(
+                                    text: "这条内容需要你在角色与记忆里确认：\(reason)",
+                                    speak: settings.speakReplies
+                                )
+                            case .doNotStore:
+                                try speechRuntime?.sendResponse(
+                                    text: "为保护账号安全，我不会保存密码、密钥或验证码。",
+                                    speak: settings.speakReplies
+                                )
+                            }
                         } catch {
                             diagnostics.record("character.memory.candidate-failed")
                             speechRuntime?.shutdownGracefully { finish(.failure(error)) }

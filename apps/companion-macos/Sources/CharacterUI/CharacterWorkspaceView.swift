@@ -7,6 +7,7 @@ public struct CharacterWorkspaceView: View {
         case identity = "身份"
         case memories = "记忆"
         case capabilities = "能力"
+        case goals = "目标"
         var id: String { rawValue }
     }
 
@@ -34,12 +35,17 @@ public struct CharacterWorkspaceView: View {
                 case .identity: CharacterIdentityView(model: model)
                 case .memories: CharacterMemoryView(model: model)
                 case .capabilities: CharacterCapabilitiesView(capabilities: capabilities)
+                case .goals: CharacterGoalsView(model: model)
                 }
             }
         }
         .frame(minWidth: 700, minHeight: 520)
         .onChange(of: page) { selected in
-            if selected == .memories { model.refresh() }
+            switch selected {
+            case .memories: model.refresh()
+            case .goals: model.refreshGoals()
+            default: break
+            }
         }
     }
 }

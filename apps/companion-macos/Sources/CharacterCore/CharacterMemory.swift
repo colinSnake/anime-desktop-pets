@@ -56,7 +56,9 @@ public enum CharacterLocalAnswer {
         if text.contains("你是谁") || text.contains("介绍一下自己") || text.contains("自我介绍") {
             let background = identity.background.trimmingCharacters(in: .whitespacesAndNewlines)
             let personality = identity.personality.trimmingCharacters(in: .whitespacesAndNewlines)
+            let role = identity.role.trimmingCharacters(in: .whitespacesAndNewlines)
             var answer = "我是\(identity.name)。"
+            if !role.isEmpty { answer += "我是\(role.prefix(24))。" }
             if !background.isEmpty { answer += "\(background.prefix(36))。" }
             if !personality.isEmpty { answer += "我的性格是\(personality.prefix(24))。" }
             return String(answer.prefix(100))
@@ -68,13 +70,30 @@ public enum CharacterLocalAnswer {
             let unavailableText = unavailable.isEmpty ? "" : "；\(unavailable.joined(separator: "、"))尚未可用"
             return String((enabledText + unavailableText + "。具体状态以角色与记忆里的能力页为准。").prefix(100))
         }
-        if text.contains("你记得什么") || text.contains("你记住了什么") ||
-            text.contains("你还记得我什么") || text.contains("我的偏好") || text.contains("我记得什么") {
-            let confirmed = memories.filter { $0.status == .confirmed }.sorted { $0.createdAt > $1.createdAt }
-            guard !confirmed.isEmpty else { return "我这里还没有已确认的本地记忆。" }
-            let items = confirmed.prefix(3).map { "\($0.kind.rawValue)：\($0.text)" }
+        if isMemoryRecallQuestion(text) {
+            let matches: [CharacterMemory]
+            if text.contains("我的偏好") {
+                matches = CharacterMemoryRetriever.recent(in: memories.filter { $0.kind == .preference })
+            } else if isBroadRecall(text) {
+                matches = CharacterMemoryRetriever.recent(in: memories)
+            } else {
+                matches = CharacterMemoryRetriever.relevant(to: text, in: memories, limit: 3)
+            }
+            guard !matches.isEmpty else { return "我没有找到与这个问题相关的已确认记忆。" }
+            let items = matches.map { "\($0.kind.rawValue)：\($0.text)" }
             return String(("我记得：" + items.joined(separator: "；")).prefix(100))
         }
         return nil
+    }
+
+    private static func isMemoryRecallQuestion(_ text: String) -> Bool {
+        ["你记得什么", "你记住了什么", "你还记得我什么", "我记得什么", "你记得我", "你记住我",
+         "我的偏好", "我之前说过", "我告诉过你", "我跟你说过"]
+            .contains(where: text.contains)
+    }
+
+    private static func isBroadRecall(_ text: String) -> Bool {
+        ["你记得什么", "你记住了什么", "你还记得我什么", "我记得什么"]
+            .contains(where: text.contains)
     }
 }

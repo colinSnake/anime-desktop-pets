@@ -22,6 +22,13 @@ enum CharacterMarkdownCodec {
         let shareWithOnlineModel: Bool
     }
 
+    private struct GoalMetadata: Codable, Sendable {
+        let schema: Int
+        let id: String
+        let createdAt: Date
+        let status: CharacterGoal.Status
+    }
+
     static func encode(identity: CharacterIdentity) throws -> Data {
         let metadata = IdentityMetadata(schema: 1, shareWithOnlineModel: identity.shareWithOnlineModel)
         let frontMatter = try encodeFrontMatter(metadata)
@@ -32,14 +39,29 @@ enum CharacterMarkdownCodec {
 
         # \(identity.name)
 
+        ## 身份定位
+        \(identity.role)
+
         ## 背景
         \(identity.background)
 
         ## 性格
         \(identity.personality)
 
+        ## 核心价值观
+        \(identity.values)
+
+        ## 当前愿望与长期方向
+        \(identity.motivations)
+
+        ## 与用户的关系
+        \(identity.relationship)
+
         ## 表达方式
         \(identity.speakingStyle)
+
+        ## 知识与擅长边界
+        \(identity.knowledgeScope)
 
         ## 边界
         \(identity.boundaries)
@@ -56,9 +78,14 @@ enum CharacterMarkdownCodec {
               heading.hasPrefix("# ") else { throw CharacterMemoryStoreError.invalidRecord }
         let name = String(heading.dropFirst(2)).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, name.count <= 80 else { throw CharacterMemoryStoreError.invalidRecord }
-        return CharacterIdentity(name: name, background: section("背景", in: body),
+        return CharacterIdentity(name: name, role: section("身份定位", in: body),
+                                 background: section("背景", in: body),
                                  personality: section("性格", in: body),
+                                 values: section("核心价值观", in: body),
+                                 motivations: section("当前愿望与长期方向", in: body),
+                                 relationship: section("与用户的关系", in: body),
                                  speakingStyle: section("表达方式", in: body),
+                                 knowledgeScope: section("知识与擅长边界", in: body),
                                  boundaries: section("边界", in: body),
                                  shareWithOnlineModel: metadata.shareWithOnlineModel)
     }
@@ -86,6 +113,50 @@ enum CharacterMarkdownCodec {
         return CharacterMemory(id: metadata.id, kind: metadata.kind, text: text,
                                createdAt: metadata.createdAt, source: metadata.source,
                                status: metadata.status, shareWithOnlineModel: metadata.shareWithOnlineModel)
+    }
+
+    static func encode(goal: CharacterGoal) throws -> Data {
+        let metadata = GoalMetadata(schema: 1, id: goal.id, createdAt: goal.createdAt, status: goal.status)
+        let frontMatter = try encodeFrontMatter(metadata)
+        let steps = goal.steps.enumerated().map { index, step in
+            "- [\(step.isComplete ? "x" : " ")] \(index + 1). \(step.text) <!-- \(step.id) -->"
+        }.joined(separator: "\n")
+        let markdown = "---\n\(frontMatter)\n---\n\n# \(goal.title)\n\n## 说明\n\(goal.details)\n\n## 步骤\n\(steps)\n"
+        return Data(markdown.utf8)
+    }
+
+    static func decodeGoal(_ data: Data, expectedID: String) throws -> CharacterGoal {
+        let markdown = try decodeUTF8(data)
+        let (metadataData, body) = try split(markdown)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let metadata = try decoder.decode(GoalMetadata.self, from: metadataData)
+        let lines = body.components(separatedBy: .newlines)
+        guard metadata.schema == 1, metadata.id == expectedID,
+              CharacterGoalValidation.isSafeIdentifier(metadata.id),
+              let heading = lines.first(where: { $0.hasPrefix("# ") }) else {
+            throw CharacterMemoryStoreError.invalidRecord
+        }
+        let title = String(heading.dropFirst(2)).trimmingCharacters(in: .whitespacesAndNewlines)
+        let details = section("说明", in: body)
+        let stepLines = section("步骤", in: body).components(separatedBy: .newlines)
+        let steps = try stepLines.filter { $0.hasPrefix("- [") }.map { line -> CharacterGoal.Step in
+            guard let close = line.firstIndex(of: "]"),
+                  let marker = line.range(of: "<!-- "),
+                  let markerEnd = line.range(of: " -->", range: marker.upperBound..<line.endIndex) else {
+                throw CharacterMemoryStoreError.invalidRecord
+            }
+            let checked = line[line.index(line.startIndex, offsetBy: 3)] == "x"
+            let textStart = line.index(close, offsetBy: 2)
+            let rawText = line[textStart..<marker.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = rawText.replacingOccurrences(of: "^\\d+\\. ", with: "", options: .regularExpression)
+            let id = String(line[marker.upperBound..<markerEnd.lowerBound])
+            return CharacterGoal.Step(id: id, text: text, isComplete: checked)
+        }
+        let goal = CharacterGoal(id: metadata.id, title: title, details: details, createdAt: metadata.createdAt,
+                                 status: metadata.status, steps: steps)
+        guard CharacterGoalValidation.validate(goal) else { throw CharacterMemoryStoreError.invalidRecord }
+        return goal
     }
 
     private static func encodeFrontMatter<Value: Codable & Sendable>(_ value: Value) throws -> String {

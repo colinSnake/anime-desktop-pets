@@ -7,6 +7,7 @@ import SwiftUI
 public final class CharacterWorkspaceModel: ObservableObject {
     @Published public var identity: CharacterIdentity
     @Published public private(set) var memories: [CharacterMemory] = []
+    @Published public private(set) var goals: [CharacterGoal] = []
     @Published public private(set) var status = ""
     @Published public private(set) var canSaveIdentity = false
 
@@ -34,6 +35,59 @@ public final class CharacterWorkspaceModel: ObservableObject {
         }
     }
 
+    public func refreshGoals() {
+        Task {
+            do {
+                goals = try await store.listGoals()
+                status = ""
+            } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    public func addGoal(title: String, details: String, stepLines: String) {
+        let steps = stepLines.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .map { CharacterGoal.Step(text: $0) }
+        let goal = CharacterGoal(title: title.trimmingCharacters(in: .whitespacesAndNewlines),
+                                 details: details.trimmingCharacters(in: .whitespacesAndNewlines), steps: steps)
+        Task {
+            do {
+                try await store.saveGoal(goal)
+                goals = try await store.listGoals()
+                status = "目标已保存在本机。"
+            } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    public func updateGoal(_ goal: CharacterGoal) {
+        Task {
+            do {
+                try await store.saveGoal(goal)
+                goals = try await store.listGoals()
+                status = "计划进度已保存。"
+            } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    public func deleteGoal(_ goal: CharacterGoal) {
+        Task {
+            do {
+                try await store.deleteGoal(id: goal.id)
+                goals = try await store.listGoals()
+                status = "目标已删除。"
+            } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
     public func saveIdentity() {
         guard canSaveIdentity else { return }
         Task {
@@ -52,11 +106,23 @@ public final class CharacterWorkspaceModel: ObservableObject {
             do {
                 try await store.saveMemory(item)
                 memories = try await store.listMemories()
-                status = "记忆已加入审核列表，确认后才会正式保存。"
+                let findings = CharacterMemoryReview.findings(for: item, against: memories)
+                status = findings.isEmpty
+                    ? "记忆已加入审核列表，确认后才会正式保存。"
+                    : "记忆已加入审核列表，但发现：" + findings.map(\.title).joined(separator: "、") + "。请先核对。"
             } catch {
                 status = error.localizedDescription
             }
         }
+    }
+
+    public func memoryFindings(for memory: CharacterMemory) -> [CharacterMemoryReview.Finding] {
+        CharacterMemoryReview.findings(for: memory, against: memories)
+    }
+
+    public func draftMemoryFindings(text: String, kind: CharacterMemoryKind) -> [CharacterMemoryReview.Finding] {
+        let candidate = CharacterMemory(kind: kind, text: text, source: "用户在角色与记忆窗口添加")
+        return CharacterMemoryReview.findings(for: candidate, against: memories)
     }
 
     public func confirm(_ memory: CharacterMemory) {
