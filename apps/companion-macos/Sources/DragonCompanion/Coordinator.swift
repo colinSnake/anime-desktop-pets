@@ -1,4 +1,6 @@
 import AppKit
+import CharacterCore
+import CharacterMemory
 import ApplicationServices
 import DragonCore
 
@@ -28,6 +30,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
     private var speechChatInProgress = false
     private var speechSettingsWindow: SpeechSettingsWindow?
     private var modelManagerWindow: ModelManagerWindow?
+    private var characterWindow: CharacterWindow?
     private var petManagerWindow: PetManagerWindow?
     private var movie: BootPlayer?
     private var movieID: UUID?
@@ -477,6 +480,9 @@ final class Coordinator: NSObject, NSMenuDelegate {
             let speechSettings = NSMenuItem(title: "直播语音设置", action: #selector(openSpeechSettings), keyEquivalent: "")
             speechSettings.target = self
             menu.addItem(speechSettings)
+            let character = NSMenuItem(title: "角色与记忆", action: #selector(openCharacterWindow), keyEquivalent: "")
+            character.target = self
+            menu.addItem(character)
         }
         if mode != .previewAnimation, multiPet == nil, runtime.configuration.petBackend == "external" {
             if let candidate = PetInstanceRuntime(runtime: runtime), candidate.registryIsMissing {
@@ -672,6 +678,21 @@ final class Coordinator: NSObject, NSMenuDelegate {
         } catch { showError(error.localizedDescription) }
     }
 
+    @objc private func openCharacterWindow() {
+        guard !stopping else { return }
+        do {
+            if characterWindow == nil {
+                let store = try CharacterMemoryStore(stateDirectory: runtime.state, petID: "white-dragon")
+                let capabilities = CharacterCapabilitySnapshot.make(runtime: runtime,
+                                                                      speechRuntimeAvailable: speechRuntime != nil)
+                characterWindow = CharacterWindow(store: store, capabilities: capabilities)
+            }
+            characterWindow?.showWindow(nil)
+            characterWindow?.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } catch { showError(error.localizedDescription) }
+    }
+
     private func runSpeechDemo(_ settings: SpeechSettings,
                                completion: @escaping (Result<String, Error>) -> Void) {
         guard !stopping, let multiPet, multiPet.status?.instances.contains(where: {
@@ -810,14 +831,6 @@ final class Coordinator: NSObject, NSMenuDelegate {
             try? FileManager.default.removeItem(at: inputURL)
             completion(.failure(SpeechRuntimeSupervisor.SupervisorError.stillStopping)); return
         }
-        let provider: ModelProviderSettings
-        let apiKey: String
-        do { (provider, apiKey) = try modelProviderCredentials() }
-        catch {
-            try? FileManager.default.removeItem(at: inputURL)
-            completion(.failure(error)); return
-        }
-
         var inputInfo = stat()
         guard lstat(inputURL.path, &inputInfo) == 0,
               inputInfo.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
@@ -975,10 +988,43 @@ final class Coordinator: NSObject, NSMenuDelegate {
                 diagnostics.record("speech.asr.received characters=\(text.count)")
                 recordTiming("asr-finished")
                 onTranscript(text)
+                if let rememberedText = CharacterCommand.rememberText(in: text) {
+                    Task {
+                        do {
+                            let store = try CharacterMemoryStore(stateDirectory: self.runtime.state, petID: "white-dragon")
+                            try await store.saveMemory(CharacterMemory(
+                                kind: .fact, text: rememberedText, source: "用户语音明确指令"
+                            ))
+                            try speechRuntime?.sendResponse(
+                                text: "我先把这条内容放进待审核记忆，请在角色与记忆中确认。",
+                                speak: settings.speakReplies
+                            )
+                        } catch {
+                            diagnostics.record("character.memory.candidate-failed")
+                            speechRuntime?.shutdownGracefully { finish(.failure(error)) }
+                        }
+                    }
+                    return
+                }
                 Task {
                     do {
+                        let store = try CharacterMemoryStore(stateDirectory: self.runtime.state, petID: "white-dragon")
+                        let identity = try await store.loadIdentity(defaultName: "龙妹")
+                        let memories = try await store.listMemories()
+                        let localCapabilities = CharacterCapabilitySnapshot.make(runtime: self.runtime,
+                                                                                  speechRuntimeAvailable: self.speechRuntime != nil)
+                        if let localReply = CharacterLocalAnswer.answer(for: text, identity: identity,
+                                                                         memories: memories,
+                                                                         capabilities: localCapabilities) {
+                            try speechRuntime?.sendResponse(text: localReply, speak: settings.speakReplies)
+                            diagnostics.record("character.local-answer")
+                            return
+                        }
+                        let characterContext = await self.voiceCharacterContext()
+                        let (provider, apiKey) = try self.modelProviderCredentials()
                         let reply = try await ModelProviderClient().complete(
-                            settings: provider, apiKey: apiKey, userText: text
+                            settings: provider, apiKey: apiKey, userText: text,
+                            characterContext: characterContext
                         )
                         try speechRuntime?.sendResponse(text: reply, speak: settings.speakReplies)
                         diagnostics.record("speech.reply.requested provider=online")
@@ -1043,6 +1089,21 @@ final class Coordinator: NSObject, NSMenuDelegate {
             if hasScopedAccess { referenceURL?.stopAccessingSecurityScopedResource() }
             diagnostics.record("speech.runtime.start-failed")
             completion(.failure(error))
+        }
+    }
+
+    private func voiceCharacterContext() async -> String? {
+        do {
+            let store = try CharacterMemoryStore(stateDirectory: runtime.state, petID: "white-dragon")
+            let identity = try await store.loadIdentity(defaultName: "龙妹")
+            let memories = try await store.listMemories()
+            let capabilities = CharacterCapabilitySnapshot.make(runtime: runtime,
+                                                                  speechRuntimeAvailable: speechRuntime != nil)
+            return CharacterContextBuilder.make(identity: identity, memories: memories,
+                                                capabilities: capabilities)
+        } catch {
+            diagnostics.record("character.context.unavailable")
+            return nil
         }
     }
 

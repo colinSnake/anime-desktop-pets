@@ -74,6 +74,29 @@ final class ModelProviderClientTests: XCTestCase {
         XCTAssertEqual(requests, 1)
     }
 
+    func testCompletionSendsOnlyContextProvidedByCharacterPolicy() async throws {
+        let settings = ModelProviderSettings()
+        ModelProviderURLProtocolStub.handler = { request in
+            let body = try requestBody(request)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            let messages = try XCTUnwrap(object["messages"] as? [[String: Any]])
+            let system = try XCTUnwrap(messages.first?["content"] as? String)
+            XCTAssertTrue(system.contains("confirmed preference"))
+            XCTAssertFalse(system.contains("local-only secret"))
+            let response = try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": ["content": "收到。"]]]
+            ])
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, response)
+        }
+
+        let result = try await ModelProviderClient(session: makeSession()).complete(
+            settings: settings, apiKey: "test-key", userText: "我喜欢什么？",
+            characterContext: "confirmed preference"
+        )
+
+        XCTAssertEqual(result, "收到。")
+    }
+
     func testWeatherToolUsesOpenMeteoThenReturnsResultToModel() async throws {
         let settings = ModelProviderSettings()
         var requestCount = 0
