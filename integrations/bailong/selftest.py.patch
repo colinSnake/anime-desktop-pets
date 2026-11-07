@@ -18,7 +18,7 @@
          if '--quota-only' in sys.argv:
              from quota import read_quota,quota_windows
              windows=quota_windows(read_quota())
-@@ -37,58 +26,229 @@
+@@ -37,58 +26,237 @@
          from types import SimpleNamespace
          report.update(version=VERSION,frozen=bool(getattr(sys,'frozen',False)))
          app=QApplication([]);pet=Pet();pet.tick.stop()
@@ -101,6 +101,7 @@
 +        assert interaction_ids<=autonomous_ids and idle_ids<=autonomous_ids
 +        assert not (work_ids&autonomous_ids)
 +        report['checks'].append('日常动作池覆盖全部互动与待机差分，排除工作差分')
++        pet.behavior.last_user_activity_at=None
 +        scheduled=[]
 +        for _ in range(3*len(expected_ids)):
 +            item=pet.behavior.next_action()
@@ -244,7 +245,14 @@
 +                present_at(pet.presentation.elapsed+.25)
 +            assert pet.behavior.motion is None and pet.behavior.release_spring is None
 +            assert spring.settled and pet.y()==area.bottom()+1-pet.height()+pet.render_margin
++            assert pet.current is item and pet.mode=='autonomous-motion' and pet.behavior.held_release_animation
++            scheduler_deadline=pet.behavior.next_at
++            moment[0]=pet.behavior.release_pose_until-.01;pet.behavior.tick()
++            assert pet.mode=='autonomous-motion' and pet.behavior.held_release_animation
++            assert pet.behavior.next_at==scheduler_deadline
++            moment[0]=pet.behavior.release_pose_until+.01;pet.behavior.tick()
 +            assert pet.current is pet.idles[0] and pet.mode=='idle' and pet.presentation.loop_range is None
++            assert not pet.behavior.held_release_animation and pet.behavior.next_at==scheduler_deadline
 +            assert spring.bottom_bounces>=1
 +            returned=pet.presentation;visible=pet.displayed_canvas.toImage().copy()
 +            assert returned.blend_duration==.28 and pet.pose_bridge_ready and pet.pose_bridge is None
@@ -270,7 +278,7 @@
 +            assert pet.displayed_canvas.toImage()==target
 +            assert pet.size()==display_size and pet.frame_size==decode_size
 +        report['checks'].append('姿态混合期间弹簧独立计时继续位移，不等待WebP或姿态时钟（离屏）')
-+        report['checks'].append('松手随机奔跑或飞行，两种有效运动段均持续循环到弹跳结束才回默认待机（离屏）')
++        report['checks'].append('松手随机奔跑或飞行，两种有效运动段循环到弹跳结束并独立保留2秒后回待机（离屏）')
 +        report['checks'].append('松手保留实际水平/垂直初速，接触边界后按恢复和摩擦衰减至停止（离屏）')
 +        pet.bubble.quota(windows);pet.bubble.grab().save(str(output/'Codex额度气泡离屏检查.png'));pet.bubble.hide()
 +        report['checks'].append('跑飞收敛回默认待机以280ms真实中间画面过渡，首尾像素连续（离屏）')

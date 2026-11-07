@@ -94,7 +94,7 @@ struct DragonCompanionMain {
 
     @MainActor private static func runApplication(_ runtime: Runtime, mode: Coordinator.Mode) {
         let app = NSApplication.shared
-        app.setActivationPolicy(mode == .controlTest ? .prohibited : .accessory)
+        app.setActivationPolicy(mode == .controlTest ? .prohibited : .regular)
         let delegate = ApplicationDelegate(runtime: runtime, mode: mode)
         app.delegate = delegate
         withExtendedLifetime(delegate) { app.run() }

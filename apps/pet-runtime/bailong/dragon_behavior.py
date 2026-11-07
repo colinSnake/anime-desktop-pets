@@ -254,17 +254,31 @@ class ReleaseSpring:
 
 
 class AutonomousBehavior:
-    # Short enough to make the expanded idle/movement library visible while
-    # retaining a long quiet window during real work.
-    INTERVAL = (12., 24.)
+    INTERVAL = (20., 34.)
+    RECENT_ACTIVITY_INTERVAL = (36., 56.)
+    RECENT_ACTIVITY_WINDOW = 120.
+    GREETING_AFTER_ACTIVITY = 90.
     KINDS = ('hop', 'double-hop', 'dash', 'float')
     RELEASE_MIN_SPEED = 280.
     RELEASE_MIN_DISTANCE = 24.
+    RELEASE_POSE_HOLD = 2.
     DRAG_PROFILE_INTERVAL = .05
     DRAG_REST_SPEED = 80.
     DRAG_STOP_INTERVAL = .08
     MOTION_MAX_STEP = .05  # GUI 卡顿后不追赶积压位移。
     ACTION_CADENCE = ('interaction', 'interaction', 'idle')
+    IDLE_GREETINGS = (
+        '我是龙妹，今天也要元气满满哟！',
+        '忙里偷个闲，记得喝口水呀～',
+        '我在这里陪着你，慢慢来就好。',
+        '今天也给自己一点小小的夸奖吧！',
+        '累了就歇一会儿，龙妹帮你看着桌面～',
+        '愿你的灵感像小星星一样闪闪发亮！',
+        '嘿，看到你啦！一起把今天过得可爱一点～',
+        '深呼吸一下，接下来也会顺顺利利的！',
+    )
+    GREETING_FIRST_DELAY = (18., 36.)
+    GREETING_REPEAT_DELAY = (150., 240.)
 
     def __init__(self, pet, clock=time.monotonic, rng=None, reduce_motion=None):
         self.pet = pet
@@ -279,6 +293,8 @@ class AutonomousBehavior:
         self.release_spring = None
         self.release_tick_at = None
         self.release_facing = None
+        self.held_release_animation = False
+        self.release_pose_until = None
         self.own_play = False
         self.last_action = None
         self.last_kind = None
@@ -286,6 +302,9 @@ class AutonomousBehavior:
         self.action_groups_signature = None
         self.action_cadence_index = 0
         self.next_at = self.clock() + self.rng.uniform(*self.INTERVAL)
+        self.next_greeting_at = self.clock() + self.rng.uniform(*self.GREETING_FIRST_DELAY)
+        self.last_greeting = None
+        self.last_user_activity_at = None
         self._motion_setting = True  # Fail closed until the first read.
         self._check_motion_at = 0.
         self.closed = False
@@ -297,7 +316,18 @@ class AutonomousBehavior:
         self.drag_profile_at = 0.
 
     def defer(self):
-        self.next_at = self.clock() + self.rng.uniform(*self.INTERVAL)
+        now = self.clock()
+        recently_active = (self.last_user_activity_at is not None and
+                           now - self.last_user_activity_at < self.RECENT_ACTIVITY_WINDOW)
+        interval = self.RECENT_ACTIVITY_INTERVAL if recently_active else self.INTERVAL
+        self.next_at = now + self.rng.uniform(*interval)
+
+    def has_longmei_greeting_copy(self):
+        definition = getattr(self.pet, 'definition', None)
+        if definition is None:
+            return True
+        package = definition.get('package', {})
+        return package.get('id') == 'local.bailong.white-dragon'
 
     def interrupt(self):
         # 保留当前位置，按下鼠标或隐藏时不突然弹回起点。
@@ -307,10 +337,23 @@ class AutonomousBehavior:
         self.release_spring = None
         self.release_tick_at = None
         self.release_facing = None
+        self.held_release_animation = False
+        self.release_pose_until = None
         self.defer()
 
     def on_play(self, mode):
-        if not self.own_play and mode != 'idle':
+        if self.own_play:
+            return
+        if mode == 'idle' and self.held_release_animation:
+            self.held_release_animation = False
+            self.release_facing = None
+            self.release_pose_until = None
+            return
+        if mode != 'idle':
+            now = self.clock()
+            self.last_user_activity_at = now
+            self.next_greeting_at = max(self.next_greeting_at,
+                                        now + self.GREETING_AFTER_ACTIVITY)
             self.interrupt()
 
     def set_enabled(self, enabled):
@@ -325,11 +368,15 @@ class AutonomousBehavior:
 
     def pause(self):
         moving = self.motion is not None
+        holding = self.held_release_animation
         self.interrupt()
-        if moving and self.pet.mode == 'autonomous-motion':
+        if (moving or holding) and self.pet.mode == 'autonomous-motion':
             self._play(self.pet.idles[0], 'idle')
 
     def _play(self, item, mode, start_ms=0):
+        self.held_release_animation = False
+        self.release_facing = None
+        self.release_pose_until = None
         self.own_play = True
         try:
             self.pet.play(item, mode, start_ms=start_ms)
@@ -370,7 +417,10 @@ class AutonomousBehavior:
         available_categories = [category for category in ('interaction', 'idle') if groups[category]]
         if not available_categories:
             return None
-        cadence = tuple(category for category in self.ACTION_CADENCE
+        recently_active = (self.last_user_activity_at is not None and
+                           self.clock() - self.last_user_activity_at < self.RECENT_ACTIVITY_WINDOW)
+        preferred_cadence = ('idle', 'idle', 'interaction') if recently_active else self.ACTION_CADENCE
+        cadence = tuple(category for category in preferred_cadence
                         if category in available_categories)
         category = cadence[self.action_cadence_index % len(cadence)]
         self.action_cadence_index += 1
@@ -457,9 +507,9 @@ class AutonomousBehavior:
                     self.motion = None
                     self.release_spring = None
                     self.release_tick_at = None
-                    self.release_facing = None
+                    self.held_release_animation = True
+                    self.release_pose_until = now + self.RELEASE_POSE_HOLD
                     self.defer()
-                    self._play(self.pet.idles[0], 'idle')
                     return
                 # 奔跑/飞行姿态循环到弹簧收敛；不按素材原时长提前回待机。
                 return
@@ -482,26 +532,50 @@ class AutonomousBehavior:
             if progress >= 1.:
                 clip = self.motion.kind == 'clip'
                 released = getattr(self.motion, 'released', False)
+                facing = self.release_facing
                 self.interrupt()
                 if clip:
                     if released:
-                        self._play(self.pet.idles[0], 'idle')
+                        self.held_release_animation = True
+                        self.release_facing = facing
+                        self.release_pose_until = now + self.RELEASE_POSE_HOLD
+                        self.defer()
                         return
                     self._play(self.pet.idles[0], 'idle')
                     return
                 landing = self.pet.manifest.get('landingAnimation')
                 self._play(landing or self.pet.idles[0], 'landing' if landing else 'idle')
             return
+        if self.held_release_animation and self.motion_reduced():
+            self.pause()
+            return
+        if (self.held_release_animation and self.release_pose_until is not None
+                and now >= self.release_pose_until):
+            self._play(self.pet.idles[0], 'idle')
+            return
+        if now >= self.next_greeting_at and self.has_longmei_greeting_copy():
+            if (not self.blocked() and not self.pet.waiting_first_frame
+                    and not self.motion_reduced()):
+                choices = [text for text in self.IDLE_GREETINGS if text != self.last_greeting]
+                text = self.rng.choice(choices or self.IDLE_GREETINGS)
+                self.last_greeting = text
+                self.pet.say(text, ms=4500)
+                self.next_greeting_at = now + self.rng.uniform(*self.GREETING_REPEAT_DELAY)
+            else:
+                self.next_greeting_at = now + self.rng.uniform(15., 25.)
+            return
         if now < self.next_at:
             return
-        if self.blocked() or self.pet.waiting_first_frame or self.motion_reduced():
+        if (self.blocked(allow_action=self.held_release_animation)
+                or self.pet.waiting_first_frame or self.motion_reduced()):
             self.defer()
             return
         self.perform()
 
     def perform(self, preview=False):
         """仅复用动画，不调用 choose/quota/聊天/声音；预览也遵守任务与交互保护。"""
-        if (self.blocked(allow_pointer=preview, allow_disabled=preview, allow_action=preview)
+        if (self.blocked(allow_pointer=preview, allow_disabled=preview,
+                         allow_action=preview or self.held_release_animation)
                 or (self.pet.waiting_first_frame and not preview) or self.motion_reduced()):
             self.defer()
             return False
@@ -537,7 +611,8 @@ class AutonomousBehavior:
 
     def perform_action(self, preview=False):
         """手动“表演一套动作”只选动作池，不误触发移动轨迹。"""
-        if (self.blocked(allow_pointer=preview, allow_disabled=preview, allow_action=preview)
+        if (self.blocked(allow_pointer=preview, allow_disabled=preview,
+                         allow_action=preview or self.held_release_animation)
                 or (self.pet.waiting_first_frame and not preview) or self.motion_reduced()):
             self.defer()
             return False
@@ -547,7 +622,7 @@ class AutonomousBehavior:
     def perform_movement(self, item=None, preview=False, *, released=False, velocity=(0., 0.)):
         """菜单只增加动作入口，定时调用静默；任务和减少动态效果始终优先。"""
         if (self.blocked(moving=preview, allow_pointer=preview, allow_disabled=preview,
-                         allow_action=preview, allow_task=released) or
+                         allow_action=preview or self.held_release_animation, allow_task=released) or
                 (self.pet.waiting_first_frame and not (preview or released)) or
                 (not self.motion_enabled and not preview) or self.motion_reduced()):
             self.defer()

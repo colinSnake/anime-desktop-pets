@@ -103,7 +103,7 @@
          self.tray_menu.clear()
 @@ -174,10 +187,6 @@
 -        if self.speech_hidden() and not getattr(self.bubble,'is_task_progress',False) and self.bubble.isVisible():self.bubble.hide()
-+        if self.speech_hidden() and not getattr(self.bubble,'is_task_progress',False) and not getattr(self.bubble,'is_followed_work',False) and self.bubble.isVisible():self.bubble.hide()
++        if self.speech_hidden() and not getattr(self.bubble,'is_task_progress',False) and not getattr(self.bubble,'is_followed_work',False) and not getattr(self.bubble,'is_speech_reply',False) and self.bubble.isVisible():self.bubble.hide()
          if self.dialogue_hidden():
              if self.bubble.isVisible():self.bubble.hide()
 -            if self.chat and self.chat.composer.isVisible():self.chat.composer.hide()
@@ -250,7 +250,7 @@
 +            self.behavior.tick()
 +            return
 +        facing=self.behavior.release_facing
-+        mirror=bool(self.behavior.release_spring is not None and facing and self.current.get('sourceFacing') in ('left','right') and facing!=self.current['sourceFacing'])
++        mirror=bool((self.behavior.release_spring is not None or self.behavior.held_release_animation) and facing and self.current.get('sourceFacing') in ('left','right') and facing!=self.current['sourceFacing'])
 +        turned=mirror!=getattr(self,'pose_mirrored',False)
 +        if clock.looped or (turned and self.displayed_item is self.current and clock.loop_range):
 +            self.bridge_source=self.displayed_canvas;self.pose_bridge=None;self.pose_bridge_ready=True

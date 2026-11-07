@@ -47,7 +47,7 @@ class ProjectChecks(unittest.TestCase):
         for path in (host/'Package.swift', host/'Sources/DragonCore',
                      host/'Sources/DragonCompanion', host/'Tests/DragonCoreTests',
                      runtime/'bailong/dragon_frames.py', runtime/'pets/dragon_pet_helper.py',
-                     runtime/'pets/pet_library_ui.py', ROOT/'integrations/bailong/upstream-files.json'):
+                     runtime/'pets/pet_library.py', ROOT/'integrations/bailong/upstream-files.json'):
             self.assertTrue(path.exists(), str(path))
         for old in ('Package.swift', 'Sources', 'Tests', 'integrations/pets'):
             self.assertFalse((ROOT/old).exists(), '旧源码入口不得复活：' + old)
@@ -60,6 +60,7 @@ class ProjectChecks(unittest.TestCase):
         script = (ROOT/'scripts/build.sh').read_text()
         self.assertIn('CFBundleIconFile', script)
         self.assertIn('resources/branding/AppIcon.icns', script)
+        self.assertNotIn('LSUIElement', script, 'the host must appear as a regular Dock application')
 
     def test_friendly_copy_keeps_persistent_identity(self):
         source = ROOT/'apps/companion-macos/Sources/DragonCompanion'
@@ -72,12 +73,13 @@ class ProjectChecks(unittest.TestCase):
             self.assertIn(key, coordinator)
         for path in source.glob('*.swift'):
             self.assertNotIn('伴侣', path.read_text())
+        self.assertIn('AnimeDesktopPets', (source/'Runtime.swift').read_text())
         self.assertIn('DragonCodexCompanion', (source/'Runtime.swift').read_text())
         build = (ROOT/'scripts/build.sh').read_text()
         self.assertIn("CFBundleIdentifier='local.dragon.codex-companion'", build)
         self.assertIn('build/桌边小崽.app', build)
         self.assertIn("CFBundleName='桌边小崽', CFBundleDisplayName='桌边小崽'", build)
-        self.assertIn("CFBundleShortVersionString='0.7.10', CFBundleVersion='30'", build)
+        self.assertIn("CFBundleShortVersionString='0.7.11', CFBundleVersion='31'", build)
         self.assertIn('scripts/publish-app-bundle.py', build)
 
     def test_external_catalog_validation_never_blocks_appkit_main_actor(self):
@@ -108,6 +110,32 @@ class ProjectChecks(unittest.TestCase):
         self.assertNotIn('"结束本次桌宠"', pet_controller)
         self.assertIn('"允许关联窗口大小"', coordinator)
         self.assertNotIn('允许同步 Codex 窗口尺寸', coordinator)
+
+    def test_data_folder_menu_matches_opened_directory(self):
+        coordinator = (ROOT/'apps/companion-macos/Sources/DragonCompanion/Coordinator.swift').read_text()
+        self.assertIn('NSMenuItem(title: "打开数据文件夹", action: #selector(openSettings)', coordinator)
+        self.assertIn('private func openSettings() { NSWorkspace.shared.open(runtime.state) }', coordinator)
+        self.assertNotIn('打开配置文件夹', coordinator)
+
+    def test_pet_manager_is_nested_and_uses_existing_helper(self):
+        host = ROOT/'apps/companion-macos/Sources/DragonCompanion'
+        coordinator = (host/'Coordinator.swift').read_text()
+        rebuild = coordinator.split('private func rebuildMenu()', 1)[1].split('func menuNeedsUpdate', 1)[0]
+        management = coordinator.split('private func petManagementMenu()', 1)[1].split('@objc private func showPet', 1)[0]
+        self.assertNotIn('NSMenuItem(title: "桌宠管理…"', rebuild)
+        self.assertIn('NSMenuItem(title: "桌宠管理…"', management)
+        self.assertIn('self.addLocalPets(packages, completion: completion)', coordinator)
+        window = (host/'PetManagerWindow.swift').read_text()
+        self.assertIn('table.allowsMultipleSelection = true', window)
+        self.assertIn('一次最多添加16只', window)
+        builder = (ROOT/'scripts/build-pet-runtime.py').read_text()
+        self.assertIn("'pet_sources.py'", builder)
+        self.assertIn("from pet_sources import main as sources_main", builder)
+        self.assertIn("'pet_sources'", builder)
+        fingerprints = (ROOT/'scripts/pet-build-inputs.py').read_text()
+        self.assertIn("'pet_sources.py'", fingerprints)
+        tests = (ROOT/'scripts/test.sh').read_text()
+        self.assertIn('scripts/test-pet-sources.py', tests)
 
     def test_old_app_name_is_removed_from_text_references(self):
         old_name = '桌边' + '小伙伴'

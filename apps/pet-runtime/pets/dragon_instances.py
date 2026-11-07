@@ -27,21 +27,21 @@ DEFAULT_PREFERENCES = dict(size=256, scheduledActivity=True, movement=True, hide
 
 def asset_identity(directory):
     root = Path(directory).expanduser()
-    require(not root.is_symlink() and root.is_dir(), '当前白龙素材目录不存在或为链接')
+    require(not root.is_symlink() and root.is_dir(), '当前龙妹素材目录不存在或为链接')
     root = root.resolve(strict=True)
     manifest = root / '素材清单.json'
-    require(not manifest.is_symlink() and manifest.is_file(), '当前白龙素材清单缺失或为链接')
-    require(manifest.stat().st_size <= 1024 * 1024, '当前白龙素材清单过大')
+    require(not manifest.is_symlink() and manifest.is_file(), '当前龙妹素材清单缺失或为链接')
+    require(manifest.stat().st_size <= 1024 * 1024, '当前龙妹素材清单过大')
     digest = hashlib.sha256()
     files = [manifest]
     total = manifest.stat().st_size
     for path in sorted(root.rglob('*')):
-        require(not path.is_symlink(), '白龙素材包含链接')
+        require(not path.is_symlink(), '龙妹素材包含链接')
         if path.is_file() and path.suffix.lower() == '.webp':
             files.append(path)
             total += path.stat().st_size
-            require(len(files) <= 512 and total <= 2 * 1024**3, '白龙素材数量或总大小超限')
-    require(len(files) > 1, '白龙素材为空')
+            require(len(files) <= 512 and total <= 2 * 1024**3, '龙妹素材数量或总大小超限')
+    require(len(files) > 1, '龙妹素材为空')
     for path in files:
         relative = path.relative_to(root).as_posix().encode('utf-8')
         digest.update(len(relative).to_bytes(4, 'big')); digest.update(relative)
@@ -58,6 +58,21 @@ class InstanceError(ValueError):
 def require(condition, message):
     if not condition:
         raise InstanceError(message)
+
+
+def speech_reply_available(pet, *, mouse_buttons=False, popup_active=False, modal_active=False):
+    bubble = getattr(pet, 'bubble', None)
+    behavior = getattr(pet, 'behavior', None)
+    bubble_visible = bubble is not None and bubble.isVisible()
+    replaceable_bubble = bubble_visible and (
+        getattr(bubble, 'is_followed_work', False) or getattr(bubble, 'is_speech_reply', False))
+    return not (
+        getattr(pet, '_stopping', False) or getattr(pet, 'dragging', False) or
+        getattr(pet, 'desktop_hidden', lambda: True)() or getattr(pet, 'quota_inflight', False) or
+        getattr(pet, 'click_timer', None) is None or pet.click_timer.isActive() or
+        getattr(behavior, 'release_spring', None) is not None or
+        (bubble_visible and not replaceable_bubble) or mouse_buttons or popup_active or modal_active
+    )
 
 
 def preferences(value):
@@ -80,7 +95,7 @@ def validate_registry(registry):
     identifiers = set()
     result = []
     for row in rows:
-        require(isinstance(row, dict) and not set(row) - {'id', 'package', 'enabled', 'autoStartOnLaunch', 'preferences'}, '实例定义无效')
+        require(isinstance(row, dict) and not set(row) - {'id', 'package', 'enabled', 'autoStartOnLaunch', 'preferences', 'displayName'}, '实例定义无效')
         identifier = row.get('id')
         require(isinstance(identifier, str) and len(identifier) <= 64 and ID.fullmatch(identifier) and identifier not in identifiers, '实例ID无效或重复')
         package = row.get('package')
@@ -95,6 +110,11 @@ def validate_registry(registry):
         require(type(auto_start) is bool, 'autoStartOnLaunch必须为布尔值')
         result.append(dict(id=identifier, package=copy.deepcopy(package), enabled=enabled,
                            autoStartOnLaunch=auto_start, preferences=preferences(row.get('preferences', {}))))
+        if 'displayName' in row:
+            name = row['displayName']
+            require(isinstance(name, str) and bool(name.strip()) and len(name) <= 80 and
+                    not any(ord(c) < 32 or ord(c) == 127 for c in name), '桌宠名称无效')
+            result[-1]['displayName'] = name
         identifiers.add(identifier)
     return dict(schemaVersion=1, instances=result)
 
@@ -164,14 +184,14 @@ class InstanceStore:
             if os.path.exists(name):
                 os.unlink(name)
 
-    def create_initial_from_assets(self, assets, original_preferences):
+    def create_initial_from_assets(self, assets, original_preferences, include_clone=True):
         """Create the first managed pair only when the registry is truly absent."""
         require(not self.closed and not self.path.exists() and not self.path.is_symlink(),
                 '实例清单已存在；拒绝初始化或覆盖')
         from pet_library import library_lock
 
         library = os.environ.get('BAILONG_PET_LIBRARY_DIR')
-        require(library, '白龙素材库目录未配置')
+        require(library, '龙妹素材库目录未配置')
         with library_lock(library):
             with reference_lock(self.path):
                 require(not self.path.exists() and not self.path.is_symlink(),
@@ -184,10 +204,12 @@ class InstanceStore:
                 clone_y = int(original['y'] + 64) if original.get('y') is not None else (area.y() + 32 if area else 32)
                 clone = dict(size=256, x=clone_x, y=clone_y, scheduledActivity=True,
                              movement=True, hideInFullscreen=True)
-                initial = validate_registry(dict(schemaVersion=1, instances=[
-                    dict(id='white-dragon', package=package, enabled=True, autoStartOnLaunch=True, preferences=original),
-                    dict(id='white-dragon-copy', package=package, enabled=True, autoStartOnLaunch=False, preferences=clone),
-                ]))
+                rows = [dict(id='white-dragon', package=package, enabled=True,
+                             autoStartOnLaunch=True, preferences=original)]
+                if include_clone:
+                    rows.append(dict(id='white-dragon-copy', package=package, enabled=True,
+                                     autoStartOnLaunch=False, preferences=clone))
+                initial = validate_registry(dict(schemaVersion=1, instances=rows))
                 data = (json.dumps(initial, ensure_ascii=False, allow_nan=False, indent=2) + '\n').encode()
                 self.save_locked_data(data)
         return initial
@@ -247,6 +269,32 @@ class InstanceController(QObject):
     def _on_thread(self):
         require(QThread.currentThread() == self.thread(), '只能在控制器GUI线程调用')
 
+    def display_speech_reply(self, text):
+        """Show a direct user reply without interrupting pet interaction or visibility rules."""
+        self._on_thread()
+        session = self.sessions.get('white-dragon')
+        if self.shutting_down or session is None or session.phase != 'running':
+            return False
+        pet = session.window
+        app = QApplication.instance()
+        bubble = getattr(pet, 'bubble', None)
+        timer = getattr(pet, 'bubble_timer', None)
+        position_bubble = getattr(pet, 'position_bubble', None)
+        if (bubble is None or timer is None or not callable(position_bubble) or
+                not speech_reply_available(
+                    pet,
+                    mouse_buttons=bool(app.mouseButtons()),
+                    popup_active=app.activePopupWidget() is not None,
+                    modal_active=app.activeModalWidget() is not None,
+                )):
+            return False
+        timer.stop()
+        bubble.message(text)
+        bubble.is_speech_reply = True
+        position_bubble()
+        timer.start(6000)
+        return bubble.isVisible()
+
     def register(self, definition):
         self._on_thread()
         require(not self.shutting_down and not self.starting_factory and not self.updating_preferences, '控制器忙或正在退出')
@@ -256,6 +304,57 @@ class InstanceController(QObject):
         self.store.save(updated)
         self.registry = updated
         self.definitions = {row['id']: row for row in updated['instances']}
+
+    def register_packages(self, packages, library):
+        """Register a selected batch atomically; imports were fully checked off-process.
+
+        Only metadata/path admission happens here. Actual startup revalidates all
+        media through the existing resolver. No windows are started by this command.
+        """
+        self._on_thread()
+        require(not self.shutting_down and not self.starting_factory and not self.updating_preferences,
+                '控制器忙或正在退出')
+        from pet_library import library_lock, read_json, validate_manifest
+        updated = copy.deepcopy(self.registry)
+        outcomes = []
+        with library_lock(library) as root:
+            with reference_lock(self.store.path):
+                require(not self.store.path.is_symlink() and self.store.path.is_file(), '实例清单不可用')
+                try:
+                    disk_registry = validate_registry(json.loads(self.store.path.read_text(encoding='utf-8')))
+                except (UnicodeError, json.JSONDecodeError, RecursionError) as error:
+                    raise InstanceError('实例清单无效；未添加桌宠') from error
+                require(disk_registry == self.registry, '实例清单已由其它操作更改，请刷新后重试')
+                for package in packages:
+                    existing = next((r for r in updated['instances'] if r['package'] == package), None)
+                    if existing:
+                        outcomes.append(dict(instanceID=existing['id'], accepted=True, changed=False))
+                        continue
+                    target = root / 'packages' / package['id'] / package['version']
+                    require(all(not path.is_symlink() for path in (root / 'packages', target.parent, target)),
+                            '桌宠目录不能是链接')
+                    require(target.is_dir() and not (target / 'manifest.json').is_symlink(), '桌宠目录或清单无效')
+                    manifest = read_json(target / 'manifest.json')
+                    validate_manifest(manifest)
+                    require(manifest['id'] == package['id'] and manifest['version'] == package['version'],
+                            '桌宠目录身份不符')
+                    display_name = manifest['name']
+                    stem = ('pet-' + re.sub(r'[.-]+', '-', package['id']))[:48].rstrip('-')
+                    token = hashlib.sha256((package['id'] + '@' + package['version']).encode()).hexdigest()[:10]
+                    identifier = stem + '-' + token
+                    require(identifier not in {row['id'] for row in updated['instances']}, '桌宠实例身份冲突')
+                    updated['instances'].append(dict(id=identifier, package=copy.deepcopy(package),
+                        displayName=display_name, enabled=True, autoStartOnLaunch=False,
+                        preferences=dict(DEFAULT_PREFERENCES)))
+                    outcomes.append(dict(instanceID=identifier, accepted=True, changed=True))
+                updated = validate_registry(updated)
+                if updated != self.registry:
+                    data = (json.dumps(updated, ensure_ascii=False, allow_nan=False, indent=2) + '\n').encode()
+                    self.store.save_locked_data(data)
+        self.registry = updated
+        self.definitions = {row['id']: row for row in updated['instances']}
+        self.changed.emit('')
+        return outcomes
 
     def set_auto_start(self, identifiers, enabled):
         self._on_thread()
@@ -322,6 +421,7 @@ class InstanceController(QObject):
         self._on_thread()
         return dict(shuttingDown=self.shutting_down, maximumRunning=self.maximum_running,
                     instances=[dict(id=row['id'], package=copy.deepcopy(row['package']), enabled=row['enabled'],
+                                    **({'displayName': row['displayName']} if 'displayName' in row else {}),
                                     autoStartOnLaunch=row['autoStartOnLaunch'],
                                     preferences=copy.deepcopy(row['preferences']),
                                     phase=self.sessions[row['id']].phase if row['id'] in self.sessions else ('failed' if row['id'] in self.last_errors else 'stopped'),
@@ -398,7 +498,7 @@ class InstanceController(QObject):
     def delete(self, identifier):
         self._on_thread()
         require(not self.shutting_down and not self.starting_factory, '控制器忙或正在退出')
-        require(identifier != 'white-dragon', '原始白龙实例受保护，不能删除')
+        require(identifier != 'white-dragon', '原始龙妹实例受保护，不能删除')
         require(identifier in self.definitions, '实例不存在')
         require(identifier not in self.sessions, '实例必须完全停止后才能删除')
         updated = copy.deepcopy(self.registry)

@@ -28,6 +28,33 @@ class BuildInputsTests(unittest.TestCase):
     def test_matching_snapshot(self):
         self.assertTrue(module.check(self.app, self.root)['buildInputs'])
 
+    def test_declared_local_font_must_exist_and_match_hash(self):
+        font = self.app / 'Contents/Resources/fonts/上首软糖体.ttf'
+        font.parent.mkdir(parents=True)
+        font.write_bytes(b'approved local test font')
+        import hashlib
+        expected = hashlib.sha256(font.read_bytes()).hexdigest()
+        with patch.object(module, 'LOCAL_TEST_FONT_SHA256', expected):
+            self.metadata.write_text(json.dumps(dict(
+                buildInputs=module.fingerprints(self.root), localTestFontSHA256=expected)))
+            self.assertEqual(module.check(self.app, self.root)['localTestFontSHA256'], expected)
+            font.write_bytes(b'changed font')
+            with self.assertRaisesRegex(ValueError, 'SSRuanTangTi'):
+                module.check(self.app, self.root)
+            font.unlink()
+            with self.assertRaisesRegex(ValueError, 'SSRuanTangTi'):
+                module.check(self.app, self.root)
+
+    def test_unapproved_local_font_hash_is_rejected(self):
+        self.metadata.write_text(json.dumps(dict(
+            buildInputs=module.fingerprints(self.root), localTestFontSHA256='unapproved')))
+        with self.assertRaisesRegex(ValueError, '未审核'):
+            module.check(self.app, self.root)
+
+    def test_required_local_font_cannot_be_omitted(self):
+        with self.assertRaisesRegex(ValueError, '必须包含 SSRuanTangTi'):
+            module.check(self.app, self.root, require_local_test_font=True)
+
     def test_clone_module_change_is_detected(self):
         (self.root / 'apps/pet-runtime/pets/dragon_instance_ipc.py').write_text('clone changed')
         with self.assertRaisesRegex(ValueError, 'dragon_instance_ipc.py'):

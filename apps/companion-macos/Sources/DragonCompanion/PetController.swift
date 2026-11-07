@@ -234,7 +234,7 @@ final class PetController: NSObject {
     func handoffToMultiPet(completion: @escaping @MainActor (Result<PetInstancePreferences, Error>) -> Void) {
         guard !handoffInProgress, let app = external, !app.isTerminated,
               externalOwned, externalWindowControl, launchTicket == nil, descriptorLoadTask == nil else {
-            completion(.failure(HandoffError(message: "当前白龙不是由本宿主启动的受控增强版。请从白龙自身菜单退出后重试；不会自动关闭其他进程。")))
+            completion(.failure(HandoffError(message: "当前龙妹不是由本宿主启动的受控增强版。请从龙妹自身菜单退出后重试；不会自动关闭其他进程。")))
             return
         }
         handoffInProgress = true
@@ -247,7 +247,7 @@ final class PetController: NSObject {
                 }
                 let quit = try PetWindowControl.send("quit", pid: pid)
                 guard let preferences = quit.preferences else {
-                    throw HandoffError(message: "白龙退出确认未包含偏好；退出结果不确定，没有启动多宠控制器。")
+                    throw HandoffError(message: "龙妹退出确认未包含偏好；退出结果不确定，没有启动多宠控制器。")
                 }
                 return preferences
             }
@@ -266,7 +266,7 @@ final class PetController: NSObject {
                         try await Task.sleep(nanoseconds: 100_000_000)
                     }
                     guard app?.isTerminated != false else {
-                        throw HandoffError(message: "白龙已确认退出请求，但进程仍未退出；为避免双重渲染，没有启动多宠控制器。请确认白龙已关闭后重新尝试。")
+                        throw HandoffError(message: "龙妹已确认退出请求，但进程仍未退出；为避免双重渲染，没有启动多宠控制器。请确认龙妹已关闭后重新尝试。")
                     }
                     self.external = nil
                     self.managedExternal = nil
@@ -309,7 +309,7 @@ final class PetController: NSObject {
         if let app = NSRunningApplication.runningApplications(withBundleIdentifier: descriptor.bundleIdentifier).first(where: { !$0.isTerminated }) {
             if descriptor.catalog != nil,
                app.bundleURL.flatMap({ Bundle(url: $0)?.object(forInfoDictionaryKey: "CFBundleVersion") as? String }) != descriptor.buildVersion {
-                failExternal("已有不同版本的白龙桌宠在运行；请手动退出它后重试，不会自动强退")
+                failExternal("已有不同版本的龙妹桌宠在运行；请手动退出它后重试，不会自动强退")
                 return
             }
             if descriptor.catalog != nil, let launched = app.launchDate,

@@ -4,7 +4,7 @@ import Foundation
 public enum PetInstanceCommand: String, Codable, Sendable {
     case status, startPet = "start_pet", startSelected = "start_selected", stopPet = "stop_pet"
     case stopAll = "stop_all", setPreferences = "set_preferences", clonePet = "clone_pet", shutdown
-    case setPackage = "set_package", deletePet = "delete_pet"
+    case setPackage = "set_package", deletePet = "delete_pet", addPets = "add_pets"
 }
 
 public struct PetPreferencePatch: Codable, Sendable {
@@ -36,12 +36,13 @@ public struct PetInstanceControlRequest: Codable, Sendable {
     public let instanceIDs: [String]?
     public let preferences: PetPreferencePatch?
     public let package: PetPackageReference?
+    public let packages: [PetPackageReference]?
     public init(_ command: PetInstanceCommand, requestId: String = UUID().uuidString,
                 instanceID: String? = nil, cloneID: String? = nil, instanceIDs: [String]? = nil,
-                preferences: PetPreferencePatch? = nil, package: PetPackageReference? = nil) {
+                preferences: PetPreferencePatch? = nil, package: PetPackageReference? = nil, packages: [PetPackageReference]? = nil) {
         self.protocolVersion = 1; self.requestId = requestId; self.command = command
         self.instanceID = instanceID; self.cloneID = cloneID; self.instanceIDs = instanceIDs; self.preferences = preferences
-        self.package = package
+        self.package = package; self.packages = packages
     }
     public func validate() throws {
         func identifier(_ value: String) -> Bool {
@@ -50,7 +51,14 @@ public struct PetInstanceControlRequest: Codable, Sendable {
         guard protocolVersion == 1, requestId.range(of: #"\A[A-Za-z0-9_-]{1,64}\z"#, options: .regularExpression) != nil else {
             throw ConfigurationError("控制协议或requestId无效")
         }
+        guard command == .addPets || packages == nil else { throw ConfigurationError("命令包含多余桌宠列表") }
         switch command {
+        case .addPets:
+            guard let packages, (1...16).contains(packages.count), Set(packages).count == packages.count,
+                  instanceID == nil, cloneID == nil, instanceIDs == nil, preferences == nil, package == nil else {
+                throw ConfigurationError("添加桌宠参数无效（最多16只且不可重复）")
+            }
+            for package in packages { try package.validate() }
         case .status, .stopAll, .shutdown:
             guard instanceID == nil, cloneID == nil, instanceIDs == nil, preferences == nil, package == nil else { throw ConfigurationError("命令包含多余参数") }
         case .startPet, .stopPet, .setPreferences, .deletePet:
@@ -86,6 +94,7 @@ public struct PetInstanceControlStatus: Codable, Sendable {
 public struct PetInstanceControlRow: Codable, Sendable {
     public let id: String
     public let package: PetPackageReference
+    public let displayName: String?
     public let enabled: Bool
     public let autoStartOnLaunch: Bool
     public let preferences: PetInstancePreferences
@@ -93,15 +102,16 @@ public struct PetInstanceControlRow: Codable, Sendable {
     public let error: String?
     public init(id: String, package: PetPackageReference, enabled: Bool, autoStartOnLaunch: Bool = true,
                 preferences: PetInstancePreferences, phase: PetInstancePhase,
-                error: String? = nil) {
-        self.id = id; self.package = package; self.enabled = enabled; self.autoStartOnLaunch = autoStartOnLaunch
+                error: String? = nil, displayName: String? = nil) {
+        self.id = id; self.package = package; self.displayName = displayName; self.enabled = enabled; self.autoStartOnLaunch = autoStartOnLaunch
         self.preferences = preferences; self.phase = phase; self.error = error
     }
-    private enum CodingKeys: String, CodingKey { case id, package, enabled, autoStartOnLaunch, preferences, phase, error }
+    private enum CodingKeys: String, CodingKey { case id, package, displayName, enabled, autoStartOnLaunch, preferences, phase, error }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(String.self, forKey: .id)
         package = try values.decode(PetPackageReference.self, forKey: .package)
+        displayName = try values.decodeIfPresent(String.self, forKey: .displayName)
         enabled = try values.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         autoStartOnLaunch = try values.decodeIfPresent(Bool.self, forKey: .autoStartOnLaunch)
             ?? (id.range(of: #"(?:-copy(?:-[0-9]+)?)+$"#, options: .regularExpression) == nil)
@@ -141,7 +151,7 @@ public struct PetInstanceControlReply: Codable, Sendable {
             guard result.controllerPID > 0, (1...8).contains(result.status.maximumRunning), result.status.instances.count <= 32,
                   Set(result.status.instances.map(\.id)).count == result.status.instances.count else { throw ConfigurationError("控制状态数量无效") }
             for row in result.status.instances {
-                _ = try PetInstanceDefinition(id: row.id, package: row.package, enabled: row.enabled, preferences: row.preferences)
+                _ = try PetInstanceDefinition(id: row.id, package: row.package, enabled: row.enabled, preferences: row.preferences, displayName: row.displayName)
             }
         }
         return reply

@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 import re
 import plistlib
+import shlex
 import shutil
 import subprocess
 
@@ -77,6 +78,14 @@ def cache_candidates():
         path = ROOT / relative
         if safe_directory(path):
             found.append(path)
+    stage = ROOT / '.local/pet-build/generated-source'
+    marker = stage / '.dragon-generated'
+    if safe_directory(stage) and marker.is_file() and not marker.is_symlink():
+        try:
+            if marker.read_text(encoding='utf-8') == 'generated local source\n':
+                found.append(stage)
+        except OSError:
+            pass
     duplicate = ROOT / '.local/pet-build/dist/BailongPet'
     current = ROOT / '.local/pet-build/dist/BailongPet.app'
     if safe_directory(duplicate) and self_contained_helper(current):
@@ -89,14 +98,31 @@ def active_builds():
                             capture_output=True, text=True)
     names = {'swift', 'swift-build', 'swift-test', 'swift-frontend', 'swiftc',
              'xcodebuild', 'clang', 'clang++', 'ld', 'PyInstaller', 'pyinstaller'}
-    markers = ('scripts/build-pet-runtime.py', 'scripts/build.sh',
-               'swift test ', 'swift build ', 'PyInstaller', 'pyinstaller')
     found = []
     for line in result.stdout.splitlines():
         parts = line.strip().split(None, 1)
-        if len(parts) == 2 and (Path(parts[1].split()[0]).name in names
-                                or any(marker in parts[1] for marker in markers)):
+        if len(parts) != 2:
+            continue
+        try:
+            argv = shlex.split(parts[1])
+        except ValueError:
+            continue
+        if not argv:
+            continue
+        executable = Path(argv[0]).name
+        if executable in names:
             found.append(f'{parts[0]} {parts[1][:160]}')
+            continue
+        # Ignore shell -c command text; it may contain this cleaner's own source/docs.
+        if executable in {'sh', 'bash', 'zsh'} and '-c' not in argv and any(
+                Path(arg).name == 'build.sh' for arg in argv[1:]):
+            found.append(f'{parts[0]} {parts[1][:160]}')
+            continue
+        if executable.startswith(('python', 'uv')) and any(
+                Path(arg).name == 'build-pet-runtime.py' for arg in argv[1:]):
+            script_index = next(i for i, arg in enumerate(argv) if Path(arg).name == 'build-pet-runtime.py')
+            if 'build' in argv[script_index + 1:]:
+                found.append(f'{parts[0]} {parts[1][:160]}')
     return found
 
 

@@ -1,11 +1,14 @@
 """紧凑的卡片气泡和菜单；Qt 保留交互，统一绘制圆角、文字和图标。"""
 import math
+import logging
 import sys
 from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QSize, QRectF, QPointF, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import (QFontDatabase, QFontMetricsF, QPainter, QColor,
-                          QTextOption, QPainterPath, QPen, QPalette)
+                          QTextOption, QTextCursor, QTextBlockFormat,
+                          QPainterPath, QPen, QPalette)
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QTextBrowser,
                               QProgressBar, QPushButton, QToolButton, QHBoxLayout,
                               QMenu, QFrame, QLabel, QSizePolicy,
@@ -48,7 +51,7 @@ def system_font(points=10, bold=False):
     return font
 
 
-def bubble_font(points=10, bold=False):
+def bubble_font(points=11, bold=False):
     """Prefer the rounded Chinese families used by the reference bubble."""
     installed = set(QFontDatabase.families())
     preferred = ('ShangshouSoftCandy', 'Yuanti SC', 'YouYuan', '幼圆',
@@ -62,11 +65,83 @@ def bubble_font(points=10, bold=False):
     return font
 
 
+_MESSAGE_FONT_CHECKED = False
+_MESSAGE_FONT_FAMILY = None
+
+
+def message_font(points=13):
+    """Use the bundled SSRuanTangTi font for ordinary message bubbles."""
+    global _MESSAGE_FONT_CHECKED, _MESSAGE_FONT_FAMILY
+    if not _MESSAGE_FONT_CHECKED:
+        _MESSAGE_FONT_CHECKED = True
+        bundle_root = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
+        candidates = (bundle_root / 'fonts/上首软糖体.ttf',
+                     Path(__file__).resolve().parent / 'fonts/上首软糖体.ttf')
+        for path in candidates:
+            if not path.is_file():
+                continue
+            font_id = QFontDatabase.addApplicationFont(str(path))
+            if font_id >= 0:
+                _MESSAGE_FONT_FAMILY = next(
+                    (family for family in QFontDatabase.applicationFontFamilies(font_id)
+                     if family == 'SSRuanTangTi'), None)
+                if _MESSAGE_FONT_FAMILY:
+                    break
+    if _MESSAGE_FONT_FAMILY != 'SSRuanTangTi':
+        logging.getLogger(__name__).warning(
+            '消息气泡未能加载 SSRuanTangTi；请用 --local-test-font 构建本机测试版')
+        return bubble_font(points)
+    font = bubble_font(points)
+    font.setFamily('SSRuanTangTi')
+    return font
+
+
+class RefreshButton(QToolButton):
+    """Compact circular refresh control with a theme-aware custom glyph."""
+    def __init__(self, color, parent=None):
+        super().__init__(parent)
+        self.glyph_color = QColor(color)
+        self.setAutoRaise(True)
+        self.setFixedSize(26, 26)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip('重新查询额度')
+        self.setAccessibleName('重新查询额度')
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self.underMouse() or self.isDown():
+            painter.setPen(Qt.PenStyle.NoPen)
+            alpha = 38 if self.isDown() else 24
+            painter.setBrush(QColor(self.glyph_color.red(), self.glyph_color.green(),
+                                    self.glyph_color.blue(), alpha))
+            painter.drawEllipse(QRectF(1, 1, 24, 24))
+        pen = QPen(self.glyph_color, 1.65, Qt.PenStyle.SolidLine,
+                   Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        path = QPainterPath(QPointF(19, 7))
+        path.lineTo(19, 11)
+        path.lineTo(15, 11)
+        path.moveTo(5, 17)
+        path.lineTo(5, 13)
+        path.lineTo(9, 13)
+        path.moveTo(5, 7)
+        path.cubicTo(7.8, 3.7, 13, 3.3, 16.3, 6.2)
+        path.lineTo(19, 7)
+        path.moveTo(19, 17)
+        path.cubicTo(16.2, 20.3, 11, 20.7, 7.7, 17.8)
+        path.lineTo(5, 17)
+        painter.drawPath(path)
+
+
 class FittedText(QTextBrowser):
     """先按最终宽度测量文字，再决定高度；只在超过阅读预算时滚动。"""
-    def __init__(self, text='', parent=None, cap=168):
+    def __init__(self, text='', parent=None, cap=168, line_height=160):
         super().__init__(parent)
         self.cap = self.preferred_cap = cap
+        self.line_height = line_height
+        self.text_alignment = Qt.AlignmentFlag.AlignLeft
         self._fitting = False
         self._measure_width = 240
         self.setFont(bubble_font())
@@ -88,6 +163,25 @@ class FittedText(QTextBrowser):
     def setText(self, text):
         self.setPlainText(text)
 
+    def setPlainText(self, text):
+        super().setPlainText(text)
+        cursor = QTextCursor(self.document())
+        cursor.select(QTextCursor.SelectionType.Document)
+        block = QTextBlockFormat()
+        block.setLineHeight(self.line_height, QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
+        block.setAlignment(self.text_alignment)
+        cursor.mergeBlockFormat(block)
+        self.fit()
+
+    def set_text_alignment(self, alignment):
+        self.text_alignment = alignment
+        cursor = QTextCursor(self.document())
+        cursor.select(QTextCursor.SelectionType.Document)
+        block = QTextBlockFormat()
+        block.setAlignment(alignment)
+        cursor.mergeBlockFormat(block)
+        self.fit()
+
     def fit(self, width=None):
         if self._fitting:
             return
@@ -103,7 +197,8 @@ class FittedText(QTextBrowser):
                 extent = self.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent)
                 self.document().setTextWidth(max(24, width - extent))
                 needed = math.ceil(self.document().size().height()) + 1
-            height = min(self.cap, max(math.ceil(QFontMetricsF(self.font()).height()) + 1, needed))
+            minimum = math.ceil(QFontMetricsF(self.font()).height() * self.line_height / 100) + 1
+            height = min(self.cap, max(minimum, needed))
             self.setFixedSize(width, height)
         finally:
             self._fitting = False
@@ -123,8 +218,9 @@ class Bubble(QWidget):
         self.layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         # 6px 阴影 + 卡片内部左右 10px、上下 8px。
         self.layout.setContentsMargins(16, 14, 16, 14)
-        self.layout.setSpacing(4)
+        self.layout.setSpacing(6)
         self.is_followed_work = False
+        self.is_speech_reply = False
         self.is_task_progress = self.is_quota_result = False
         self.kind = 'message'
         self.preferred_width = 260
@@ -158,6 +254,7 @@ class Bubble(QWidget):
         views = self._views()
         if not views:
             return
+        self.layout.setContentsMargins(16, 14, 16, 14)
         margins = self.layout.contentsMargins()
         outer = margins.left() + margins.right()
         natural = max((QFontMetricsF(v.font()).horizontalAdvance(line)
@@ -170,7 +267,8 @@ class Bubble(QWidget):
             widget = self.layout.itemAt(i).widget()
             if not isinstance(widget, FittedText):
                 chrome += widget.sizeHint().boundedTo(widget.maximumSize()).expandedTo(widget.minimumSize()).height()
-        line_heights = [math.ceil(QFontMetricsF(v.font()).height()) + 1 for v in views]
+        line_heights = [math.ceil(QFontMetricsF(v.font()).height() * v.line_height / 100) + 1
+                        for v in views]
         budget = max(sum(line_heights), min(264, area.height() - 24) - chrome)
         # 短标题实际用多少算多少，不按最大高度占位；优先把空间留给正文。
         remaining = budget
@@ -179,6 +277,14 @@ class Bubble(QWidget):
             view.cap = max(line_heights[i], min(view.preferred_cap, remaining - reserve))
             view.fit(width - outer)
             remaining -= view.height()
+        if self.kind == 'message' and len(views) == 1:
+            view = views[0]
+            if view.document().size().height() <= view.height():
+                # Qt places the extra proportional line leading below the glyphs.
+                # Offset only the short-message viewport; keep the total margins unchanged.
+                optical_offset = min(8, round(QFontMetricsF(view.font()).height() * .4))
+                self.layout.setContentsMargins(16, 14 + optical_offset,
+                                               16, 14 - optical_offset)
         height = chrome + sum(v.height() for v in views)
         self.setFixedSize(width, height)
         self.layout.activate()
@@ -212,13 +318,14 @@ class Bubble(QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
 
-    def label(self, text, cap=None, title=False):
-        label = FittedText(text, self, cap=cap or self.text_cap)
+    def label(self, text, cap=None, title=False, muted=False, line_height=160):
+        label = FittedText(text, self, cap=cap or self.text_cap, line_height=line_height)
         if title:
-            label.setFont(bubble_font(10, bold=True))
+            label.setFont(bubble_font(11, bold=True))
             label.document().setDefaultFont(label.font())
         palette = label.palette()
-        palette.setColor(QPalette.ColorRole.Text, QColor(card_colors(self)['text']))
+        colors = card_colors(self)
+        palette.setColor(QPalette.ColorRole.Text, QColor(colors['muted'] if muted else colors['text']))
         label.setPalette(palette)
         self.layout.addWidget(label)
         return label
@@ -231,21 +338,27 @@ class Bubble(QWidget):
     def message(self, text):
         self.kind = 'message'
         self.is_followed_work = False
+        self.is_speech_reply = False
         self.is_task_progress = self.is_quota_result = False
         self.configure_width(284)
         self.clear()
         self.result_view = self.label(text)
+        self.result_view.set_text_alignment(Qt.AlignmentFlag.AlignHCenter)
+        self.result_view.setFont(message_font())
+        self.result_view.document().setDefaultFont(self.result_view.font())
+        self.result_view.fit()
         self.finish()
 
     def task_result(self, title, text, details):
         self.kind = 'result'
         self.is_followed_work = False
+        self.is_speech_reply = False
         self.is_task_progress = False
         self.is_quota_result = True
         self.configure_width(316)
         self.clear()
-        self.result_title = self.label(title, cap=42, title=True)
-        self.result_view = self.label(text, cap=168)
+        self.result_title = self.label(title, cap=42, title=True, line_height=125)
+        self.result_view = self.label(text, cap=168, line_height=130)
         button = QPushButton('详情', self)
         button.setAccessibleName('详情')
         button.setFont(bubble_font(9))
@@ -260,6 +373,7 @@ class Bubble(QWidget):
     def quota(self, windows, refreshed_at=None, refresh=None):
         self.kind = 'quota'
         self.is_followed_work = False
+        self.is_speech_reply = False
         self.is_task_progress = False
         self.is_quota_result = True
         is_balance = any(w.get('kind') == 'balance' for w in windows)
@@ -271,31 +385,46 @@ class Bubble(QWidget):
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(6)
         title = QLabel('中转余额' if is_balance else '额度', header)
-        title.setFont(bubble_font(10, bold=True))
+        title.setFont(bubble_font(11, bold=True))
         title.setStyleSheet('color:'+colors['text']+';')
         header_layout.addWidget(title)
         header_layout.addStretch(1)
         if refresh is not None:
-            button = QToolButton(header)
-            button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
-            button.setAutoRaise(True)
-            button.setFixedSize(24, 24)
-            button.setToolTip('重新查询额度')
-            button.setAccessibleName('重新查询额度')
+            button = RefreshButton(colors['accent'], header)
             button.clicked.connect(lambda checked=False: refresh())
             header_layout.addWidget(button)
         self.layout.addWidget(header)
+        self.layout.addWidget(self.separator())
         if is_balance:
             window = next(w for w in windows if w.get('kind') == 'balance')
-            amount = FittedText(f"{window['remaining']:,.2f}", self, cap=38)
-            amount.setFont(bubble_font(23, bold=True))
+            amount = FittedText(f"{window['remaining']:,.2f}", self, cap=52, line_height=115)
+            amount.setFont(bubble_font(25, bold=True))
             amount.document().setDefaultFont(amount.font())
             amount.setPalette(self.palette())
+            amount.setStyleSheet('QTextBrowser {color:'+colors['accent']+';background:transparent;border:0;padding:0;}')
             self.layout.addWidget(amount)
-            self.label(f"{window['name']} · {window['unit']}", cap=20)
+            footer = QWidget(self)
+            footer.setObjectName('quotaBalanceFooter')
+            footer_layout = QHBoxLayout(footer)
+            footer_layout.setContentsMargins(0, 0, 0, 0)
+            footer_layout.setSpacing(8)
+            source = QLabel(f"{window['name']} · {window['unit']}", footer)
+            source.setObjectName('quotaBalanceSource')
+            source.setFont(bubble_font(9))
+            source.setStyleSheet('color:'+colors['muted']+';')
+            source.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            source.setToolTip(source.text())
+            footer_layout.addWidget(source, 1)
+            if refreshed_at:
+                queried = QLabel('查询于 ' + refreshed_at.strftime('%H:%M'), footer)
+                queried.setObjectName('quotaBalanceQueriedAt')
+                queried.setFont(bubble_font(9))
+                queried.setStyleSheet('color:'+colors['muted']+';')
+                queried.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                footer_layout.addWidget(queried, 0)
+            self.layout.addWidget(footer)
             if len(windows) > 1:
-                self.layout.addWidget(self.separator())
-                self.label('其他窗口', cap=18, title=True)
+                self.label('其他窗口', cap=20, title=True, line_height=140)
         for window in windows:
             if window.get('kind') == 'balance' and is_balance:
                 continue
@@ -305,28 +434,31 @@ class Bubble(QWidget):
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(4)
             label = QLabel(window['name'], row)
-            label.setFont(bubble_font(9))
+            label.setFont(bubble_font(10))
             label.setStyleSheet('color:'+colors['text']+';')
-            row_layout.addWidget(label)
-            row_layout.addStretch(1)
+            label.setMinimumWidth(0)
+            label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            label.setToolTip(window['name'])
             remaining = QLabel(f"{value:g}% 剩余" if value is not None else '暂未提供', row)
-            remaining.setFont(bubble_font(9, bold=True))
+            remaining.setFont(bubble_font(10, bold=True))
             remaining.setStyleSheet('color:'+colors['text']+';')
-            row_layout.addWidget(remaining)
+            remaining.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            row_layout.addWidget(label, 1)
+            row_layout.addWidget(remaining, 0)
             self.layout.addWidget(row)
             bar = QProgressBar(self)
             bar.setRange(0, 100)
             bar.setValue(round(value) if value is not None else 0)
             bar.setTextVisible(False)
-            bar.setFixedHeight(6)
+            bar.setFixedHeight(7)
             fill = '#35a36f' if value is not None and value >= 60 else '#d69a36' if value is not None and value >= 25 else '#d65c58'
             bar.setStyleSheet('QProgressBar {border:0;border-radius:3px;background:'+colors['separator']+';}'
                               'QProgressBar::chunk {background:'+fill+';border-radius:3px;}')
             self.layout.addWidget(bar)
             if window.get('resetsAt'):
-                self.label('重置于 ' + datetime.fromtimestamp(window['resetsAt']).strftime('%m月%d日 %H:%M'), cap=20)
-        if refreshed_at:
-            self.label('查询于 ' + refreshed_at.strftime('%H:%M'), cap=18)
+                self.label('重置于 ' + datetime.fromtimestamp(window['resetsAt']).strftime('%m月%d日 %H:%M'), cap=22, muted=True, line_height=140)
+        if refreshed_at and not is_balance:
+            self.label('查询于 ' + refreshed_at.strftime('%H:%M'), cap=20, muted=True, line_height=140)
         self.finish()
 
     def separator(self):

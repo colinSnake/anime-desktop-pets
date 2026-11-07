@@ -101,6 +101,17 @@ class PublicationTests(unittest.TestCase):
         self.assertIn("config['externalPetAssetsPath'] = str(Path(sys.argv[3]).expanduser().resolve())", build_script)
         self.assertIn('BAILONG_ASSETS_DIR', pet_controller)
 
+    def test_host_has_dock_identity_and_branded_status_item(self):
+        build_script = (ROOT / 'scripts/build.sh').read_text()
+        main = (ROOT / 'apps/companion-macos/Sources/DragonCompanion/Main.swift').read_text()
+        coordinator = (ROOT / 'apps/companion-macos/Sources/DragonCompanion/Coordinator.swift').read_text()
+        self.assertNotIn('LSUIElement', build_script)
+        self.assertIn('mode == .controlTest ? .prohibited : .regular', main)
+        self.assertIn('let icon = makeStatusItemImage()', coordinator)
+        self.assertIn('NSImage(size: NSSize(width: 18, height: 18))', coordinator)
+        self.assertIn('image.isTemplate = true', coordinator)
+        self.assertNotIn('forResource: "AppIcon", withExtension: "icns"', coordinator)
+
     def test_cleanup_checks_ownership_and_keeps_current_and_symlink_apps(self):
         owned = bundle(self.build / '桌边小崽.previous.20261104-120000-1.app')
         bundle(self.build / '桌边小崽.previous.20261104-120000-2.app', identity='other')
@@ -139,13 +150,24 @@ class CacheCleanupTests(unittest.TestCase):
     def test_only_explicit_cache_allowlist_is_selected(self):
         cache = self.directory('.build/out/ModuleCache.noindex')
         work = self.directory('.local/pet-build/work')
+        stage = self.directory('.local/pet-build/generated-source')
+        (stage / '.dragon-generated').write_text('generated local source\n')
         protected = [self.directory(p) for p in (
             '.build/out/Products', '.local/pet-build/source',
-            '.local/pet-build/generated-source', '.local/pet-build/venv',
-            '.local/pet-build/benchmark-20261105', '.local/reports',
+            '.local/pet-build/venv', '.local/pet-build/benchmark-20261105', '.local/reports',
             '.local/downloads', 'build')]
-        self.assertEqual(set(cleaner.cache_candidates()), {cache, work})
+        self.assertEqual(set(cleaner.cache_candidates()), {cache, work, stage})
         self.assertTrue(all(p.exists() for p in protected))
+
+    def test_generated_stage_requires_exact_ownership_marker(self):
+        stage = self.directory('.local/pet-build/generated-source')
+        marker = stage / '.dragon-generated'
+        marker.write_text('user data\n')
+        self.assertNotIn(stage, cleaner.cache_candidates())
+        marker.write_text('generated local source\n')
+        marker.unlink()
+        marker.symlink_to(self.root / 'outside-marker')
+        self.assertNotIn(stage, cleaner.cache_candidates())
 
     def test_symlink_cache_and_symlink_ancestor_are_not_selected(self):
         target = self.directory('outside')
@@ -179,9 +201,14 @@ class CacheCleanupTests(unittest.TestCase):
             self.assertEqual(cleaner.candidates(host=False), [old.parent])
 
     def test_active_build_processes_are_detected(self):
-        result = subprocess.CompletedProcess([], 0, stdout='123 /usr/bin/swift-frontend\n124 /usr/bin/python3\n125 python scripts/build-pet-runtime.py build\n')
+        result = subprocess.CompletedProcess([], 0, stdout=(
+            '123 /usr/bin/swift-frontend\n124 /usr/bin/python3\n'
+            '125 python scripts/build-pet-runtime.py build\n'
+            '126 /bin/zsh -c docs mention scripts/build.sh and PyInstaller\n'))
         with patch.object(cleaner.subprocess, 'run', return_value=result):
-            self.assertEqual(cleaner.active_builds(), ['123 /usr/bin/swift-frontend', '125 python scripts/build-pet-runtime.py build'])
+            self.assertEqual(cleaner.active_builds(), [
+                '123 /usr/bin/swift-frontend',
+                '125 python scripts/build-pet-runtime.py build'])
 
     def test_dry_run_and_busy_paths_preserve_data_then_clear_idle_cache(self):
         cache = self.directory('.build/out/ModuleCache.noindex')
@@ -289,7 +316,7 @@ class InstallFixtureTests(unittest.TestCase):
     def test_uninstall_removes_only_current_app_and_preserves_data(self):
         bundle(self.home / 'Applications' / publisher.APP_NAME)
         unrelated = bundle(self.home / 'Applications' / 'Unrecognized.app')
-        data = self.home / 'Library/Application Support/DragonCodexCompanion/keep.txt'
+        data = self.home / 'Library/Application Support/AnimeDesktopPets/keep.txt'
         data.parent.mkdir(parents=True); data.write_text('keep')
         result = self.run_script('uninstall.sh', '--confirm')
         self.assertEqual(result.returncode, 0, result.stderr)

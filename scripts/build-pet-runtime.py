@@ -23,15 +23,16 @@ SOURCE = ROOT.parent.parent / 'github/codex-pet/bailong-desktop-pet-macos'
 STAGE = LOCAL / 'generated-source'
 APP = LOCAL / 'dist/BailongPet.app'
 PYTHON = LOCAL / 'venv/bin/python'
-VERSION = 'dragon.42'
-BUNDLE_VERSION = '36'
+VERSION = 'dragon.43'
+BUNDLE_VERSION = '37'
+LOCAL_TEST_FONT_SHA256 = '5f5099a065b5eb3ba55e9bd293af7707fdbd7858bf99d9381b7c6319445c2e62'
 
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def stage(source, bundle_assets=False):
+def stage(source, bundle_assets=False, local_test_font=None):
     if not (STOCK / 'Contents/Resources/outputs').is_dir():
         raise ValueError('缺少原始完整素材，请先运行 prepare-full-pet.py fetch')
     extra_source = ROOT / '.local/animation-sources/jingh12312-v0.5.1-extra'
@@ -84,8 +85,22 @@ def stage(source, bundle_assets=False):
         "ASSETS=Path(os.environ.get('BAILONG_ASSETS_DIR', ROOT/'outputs/白龙桌宠素材')).expanduser().resolve()", 1))
     for name in ('dragon_frames.py', 'dragon_ui.py', 'dragon_behavior.py', 'dragon_playback.py', 'dragon_tasks.py', 'dragon_quota.py', 'dragon_visibility.py'):
         shutil.copy2(RUNTIME_BAILONG / name, STAGE / 'app' / name)
-    for name in ('dragon_instances.py', 'dragon_instance_ipc.py', 'dragon_pet_helper.py', 'pet_reference_lock.py', 'pet_library.py'):
+    for name in ('dragon_instances.py', 'dragon_instance_ipc.py', 'dragon_pet_helper.py', 'pet_reference_lock.py', 'pet_library.py', 'pet_sources.py'):
         shutil.copy2(RUNTIME_PETS / name, STAGE / 'app' / name)
+    local_font_sha256 = None
+    if local_test_font is not None:
+        local_test_font = Path(local_test_font).expanduser().resolve()
+        if not local_test_font.is_file() or digest(local_test_font) != LOCAL_TEST_FONT_SHA256:
+            raise ValueError('本机测试字体缺失或哈希不匹配，停止打包')
+        notice = local_test_font.with_name('FONT-LOCAL-TEST-NOTICE.txt')
+        notice_text = ' '.join(notice.read_text().split()) if notice.is_file() else ''
+        if 'must not be committed, published, or redistributed' not in notice_text:
+            raise ValueError('本机测试字体缺少禁止再分发说明，停止打包')
+        font_dir = STAGE / 'app/fonts'
+        font_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(local_test_font, font_dir / '上首软糖体.ttf')
+        shutil.copy2(notice, font_dir / notice.name)
+        local_font_sha256 = LOCAL_TEST_FONT_SHA256
     pet_entry = STAGE / 'app/pet.py'
     pet_text = pet_entry.read_text()
     if '--multi-profile' not in pet_text:
@@ -93,7 +108,10 @@ def stage(source, bundle_assets=False):
         marker = next((value for value in markers if value in pet_text), None)
         if marker is None:
             raise ValueError('增强桌宠入口缺少可注入的 QApplication 初始化点')
-        dispatch = ("    if '--multi-profile' in sys.argv:\n"
+        dispatch = ("    if '--pet-sources' in sys.argv:\n"
+                    "        from pet_sources import main as sources_main\n"
+                    "        return sources_main()\n"
+                    "    if '--multi-profile' in sys.argv:\n"
                     "        from dragon_pet_helper import main as multi_main\n"
                     "        return multi_main()\n")
         pet_entry.write_text(pet_text.replace(marker, dispatch + marker, 1))
@@ -102,7 +120,7 @@ def stage(source, bundle_assets=False):
     spec_text = spec_text.replace(
         "'animation_frames', 'dragon_frames', 'dragon_ui', 'dragon_behavior', 'dragon_playback', 'desktop_visibility', 'quota'",
         "'animation_frames', 'dragon_frames', 'dragon_ui', 'dragon_behavior', 'dragon_playback', "
-        "'dragon_instances', 'dragon_instance_ipc', 'dragon_pet_helper', 'pet_reference_lock', 'pet_library', 'desktop_visibility', 'quota'")
+        "'dragon_instances', 'dragon_instance_ipc', 'dragon_pet_helper', 'pet_reference_lock', 'pet_library', 'pet_sources', 'desktop_visibility', 'quota'")
     spec_text = spec_text.replace(
         "datas = [(str(root/'outputs'), 'outputs'),",
         "datas = ([(str(root/'outputs'), 'outputs')] if __import__('os').environ.get('DRAGON_BUNDLE_PET_ASSETS') == '1' else []) + [")
@@ -115,7 +133,8 @@ def stage(source, bundle_assets=False):
                     upstreamCommit='8e5466d9a438deb6cb43f460e7f5a9bdb9d7a578',
                     upstreamArchiveSHA256='c7df79f2b7e3fb90736e3ed8fb21be2fd6f8fe2d3982c494f0ee1c68004ccdb2',
                     scope='private local adaptation; preserve all upstream notices',
-                    assetsBundled=bundle_assets, windowControlProtocol=1,
+                    assetsBundled=bundle_assets, windowControlProtocol=1, localPetManagementProtocol=1,
+                    localTestFontSHA256=local_font_sha256,
                     extraAnimations=extra_source,
                     releaseCache=json.loads((STAGE / 'outputs/白龙桌宠素材/dragon-release/catalog.json').read_text()),
                     assetOverlaySHA256=digest(ROOT / 'scripts/extra-animation-overlay.py'),
@@ -124,8 +143,8 @@ def stage(source, bundle_assets=False):
     return metadata
 
 
-def build(source, bundle_assets=False):
-    metadata = stage(source, bundle_assets=bundle_assets)
+def build(source, bundle_assets=False, local_test_font=None):
+    metadata = stage(source, bundle_assets=bundle_assets, local_test_font=local_test_font)
     if not PYTHON.is_file():
         raise ValueError('缺少专用构建虚拟环境，参见 docs/桌宠增强与性能构建.md')
     env = os.environ.copy()
@@ -180,6 +199,8 @@ def main():
                         help='从 --source Git 仓库导出指定提交后再构建；不修改工作树')
     parser.add_argument('--bundle-assets', action='store_true',
                         help='将动画素材内嵌到增强 helper；默认引用本地素材目录')
+    parser.add_argument('--local-test-font', type=Path,
+                        help='仅限本机授权的 SSRuanTangTi 测试字体；校验固定 SHA-256，不得分发')
     args = parser.parse_args()
     temporary = None
     try:
@@ -187,10 +208,12 @@ def main():
         if args.source_revision:
             temporary, source = materialize_git_source(source, args.source_revision)
         if args.action == 'stage':
-            metadata = stage(source, bundle_assets=args.bundle_assets)
+            metadata = stage(source, bundle_assets=args.bundle_assets,
+                             local_test_font=args.local_test_font)
             print(json.dumps({'source': str(STAGE), 'patch': metadata['patchVersion']}, ensure_ascii=False))
         else:
-            build(source, bundle_assets=args.bundle_assets)
+            build(source, bundle_assets=args.bundle_assets,
+                  local_test_font=args.local_test_font)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         parser.exit(1, str(error) + '\n')
     finally:

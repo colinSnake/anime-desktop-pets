@@ -4,7 +4,7 @@
 
 ## 项目概况
 
-- 项目是 macOS 13+ 的轻量 Monorepo。产品展示名为 Anime Desktop Pets，macOS 应用文件名及系统显示名为「桌边小崽」。当前主要角色是对应 Codex 的白龙；其他助手角色仍属规划，不代表客户端集成已交付。
+- 项目是 macOS 13+ 的轻量 Monorepo。产品展示名为 Anime Desktop Pets，macOS 应用文件名及系统显示名为「桌边小崽」。当前主要角色是对应 Codex 的龙妹；其他助手角色仍属规划，不代表客户端集成已交付。
 - Swift/AppKit 宿主位于 `apps/companion-macos/`，负责应用生命周期、启动动画和外部桌宠协调；Python/PySide6 桌宠运行时位于 `apps/pet-runtime/`。完整动画由独立辅助应用播放。
 - 本项目是独立应用，不是官方 Codex 插件；不修改或注入官方客户端。
 - 实际仓库即当前工作目录。`/Users/ming/Documents/coding/github/codex-pet` 是只读参考项目，不是构建目录。固定上游及构建方法见[桌宠增强与性能构建](docs/桌宠增强与性能构建.md)和[完整桌宠接入说明](docs/完整桌宠接入说明.md)。
@@ -14,14 +14,15 @@
 
 - `apps/companion-macos/Sources/DragonCore/`：配置、状态机及可独立验证的核心逻辑。
 - `apps/companion-macos/Sources/DragonCompanion/`：AppKit 宿主、视频、控制接口和桌宠生命周期。
-- `apps/pet-runtime/bailong/`：白龙播放、UI、行为和帧调度增强层；`integrations/bailong/` 保存固定上游接入补丁及清单。
-- `scripts/`：构建、验证、预览和维护入口；`docs/`：需求、设计、使用及验证文档。
+- `apps/pet-runtime/bailong/`：龙妹播放、UI、行为和帧调度增强层；`integrations/bailong/` 保存固定上游接入补丁及清单。
+- `scripts/`：构建、验证、预览和维护入口；通用宿主控制命令为 `scripts/petctl.sh`；`docs/`：需求、设计、使用及验证文档。
 
 在仓库根目录执行：
 
 ```bash
-# 修改增强运行时后重建辅助应用，再重建宿主
-python3 scripts/build-pet-runtime.py build
+# 修改增强运行时后，用本机已审核字体重建辅助应用，再重建宿主
+LOCAL_TEST_FONT=".local/pet-build/local-fonts/上首软糖体.ttf"
+python3 scripts/build-pet-runtime.py build --source-revision 8e5466d9a438deb6cb43f460e7f5a9bdb9d7a578 --local-test-font "$LOCAL_TEST_FONT"
 ./scripts/build.sh
 
 # 离线回归；多宠/IPC 使用独立入口
@@ -29,7 +30,7 @@ python3 scripts/build-pet-runtime.py build
 ./scripts/test-multi-pet.sh
 
 # 只读检查当前构建状态，不启动正常桌面联动
-./scripts/dragonctl.sh --check
+./scripts/petctl.sh --check
 ```
 
 环境准备、固定上游校验、素材与构建输入指纹要求见[构建说明](docs/桌宠增强与性能构建.md)。测试入口可能因缺少环境而跳过部分检查；必须查看实际输出，跳过不算通过。仅文档修改无需无故重建、安装或启动应用。
@@ -37,10 +38,12 @@ python3 scripts/build-pet-runtime.py build
 ## 实现约定
 
 - 优先沿用现有模块边界、工具和测试模式；修改保持在请求涉及的范围内。不要在 Swift 业务代码中写入本机绝对路径。
-- 产品可见名称统一为「桌边小崽」。Bundle ID、内部可执行名、数据目录及配置键保持兼容，除非用户明确要求迁移。
+- 新建通用文件、模块和命令使用产品/职责命名（如 `pet_*`、`speech_*`），不要把当前角色名 `dragon` 写进通用层文件名。`apps/pet-runtime/bailong/dragon_*` 是龙妹角色实现，保留角色名；`apps/pet-runtime/pets/dragon_instances.py`、`dragon_instance_ipc.py`、`dragon_pet_helper.py` 是待迁移的历史通用名，内容纳入冻结 helper 指纹，必须等固定上游可重建、兼容测试完成后成组迁移，不能留下失配的已发布 helper。
+- 产品可见名称统一为「桌边小崽」。Bundle ID、内部可执行名与配置键保持兼容；用户数据默认位于 `~/Library/Application Support/AnimeDesktopPets`，旧 `DragonCodexCompanion` 只作为安全迁移及兼容链接路径保留。
 - 完整增强版默认包含 35 个动作；`--full-pet` 明确选择未经增强的原版，`--native-pet` 是静态 PNG 降级。不要把静态图效果描述为完整动画播放器。
 - 默认增强 helper 不内嵌动画素材。保持现有全局缓存、解码并发和线程边界；QPixmap 只能在 GUI 线程使用，真实绘制不得回退到同步 WebP 解码。实现细节见专题构建文档。
-- 当前优先完成白龙本机闭环，再考虑新增角色。真实桌面矩阵由用户选择安全时机，不自动启动应用或中断 Codex；自动化测试不能替代多屏、Space、焦点、长期资源和安装验收。
+- **本机 SSRuanTangTi 构建铁律：** 当前桌宠消息气泡采用 `SSRuanTangTi` 时，任何交付给用户的增强版 `.app` 都必须通过 `python3 scripts/build-pet-runtime.py build --source-revision 8e5466d9a438deb6cb43f460e7f5a9bdb9d7a578 --local-test-font <已审核本机字体路径>` 重建 helper，再构建宿主。不得省略 `--local-test-font` 后直接发布/安装。发布前必须由 `scripts/pet-build-inputs.py` 校验最终嵌入的 `Contents/Helpers/BailongPet.app/Contents/Resources/fonts/上首软糖体.ttf` 与 `DRAGON_PATCH.json` 的 SHA-256，并通过 helper/宿主签名检查；任一缺失或不匹配都必须停止发布。字体仅限该用户授权的本机测试，不得提交、公开发布或再分发。
+- 当前优先完成龙妹本机闭环，再考虑新增角色。真实桌面矩阵由用户选择安全时机，不自动启动应用或中断 Codex；自动化测试不能替代多屏、Space、焦点、长期资源和安装验收。
 
 ## 关键防回归要求
 
@@ -87,4 +90,4 @@ python3 scripts/build-pet-runtime.py build
 - [文档索引](docs/文档索引.md)：专题文档导航。
 - [测试与人工验收](docs/测试与人工验收.md)：自动测试边界和真实桌面验收方法。
 - [实际验证记录](docs/实际验证记录.md)：按日期记录版本、执行结果及待验收事项。
-- [路线图](docs/roadmap.md)：白龙本机闭环门槛和后续优先级。
+- [路线图](docs/roadmap.md)：龙妹本机闭环门槛和后续优先级。

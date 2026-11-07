@@ -16,7 +16,7 @@
 构建脚本会把本地媒体打进开发 App。它**不是已获授权的公开发行打包流程**，
 所有素材权利明确前，不应再分发该 App。
 
-## 2. 完整白龙 Mac 辅助应用
+## 2. 完整龙妹 Mac 辅助应用
 
 新增本地依赖为 `chihayaanon210-spec/bailong-desktop-pet-macos` 的固定发布
 `v0.4.1-mac.3`，下载地址、字节数与 SHA-256 记录在获取脚本及本地 `source.json`。
@@ -62,10 +62,10 @@ AppKit、AVFoundation、AVKit、CoreGraphics、ImageIO、QuartzCore 是系统框
 ## 桌边小崽应用的原创几何标识（2026-11-02 设计初版）
 
 `resources/branding/app-icon.svg`、`app-icon.png` 与 `AppIcon.icns` 由本项目
-`scripts/build-app-icon.swift` 中新绘制的几何形状离线导出，不是白龙媒体的描摹、
+`scripts/build-app-icon.swift` 中新绘制的几何形状离线导出，不是龙妹媒体的描摹、
 上游图标或图片模型生成结果。本项目原创几何资产随本项目原创源码适用根 MIT 许可；
 这不涉及第三方桌宠角色、动画、媒体或平台商标的重新授权。标识尚待视觉确认，
 没有进行商标查重，不承诺商标可注册性或独占权。
 
-白龙外观观察与提示词仅是对既有素材的描述性归纳，不恢复原始生成参数，
+龙妹外观观察与提示词仅是对既有素材的描述性归纳，不恢复原始生成参数，
 不使第三方角色成为本项目原创，也不授予新生成衍生角色的商用或再分发权利。

@@ -359,7 +359,7 @@ class ControllerChecks(unittest.TestCase):
     def test_delete_only_removes_stopped_non_original_definition_and_keeps_state(self):
         state = self.store.state_directory('second')
         marker = state / 'keep.txt'; marker.write_text('preserve')
-        with self.assertRaisesRegex(InstanceError, '原始白龙'):
+        with self.assertRaisesRegex(InstanceError, '原始龙妹'):
             self.controller.delete('white-dragon')
         window = self.running('second')
         with self.assertRaisesRegex(InstanceError, '完全停止'):

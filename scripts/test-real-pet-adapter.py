@@ -16,13 +16,16 @@ os.environ.update(HOME=HOME.name, BAILONG_DATA_DIR=HOME.name, QT_QPA_PLATFORM='o
 sys.path[:0] = [str(ROOT / 'apps/pet-runtime/pets'), str(ROOT / 'apps/pet-runtime/bailong'), str(ROOT / '.local/pet-build/generated-source/app')]
 from PIL import Image
 from PySide6.QtCore import QCoreApplication, QEvent, QTimer, QPoint, QPointF, Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 from dragon_instances import InstanceController, InstanceStore
 from dragon_pet_helper import _factory
 import pet
+import dragon_ui
 
 APP = QApplication.instance() or QApplication([])
 APP.setQuitOnLastWindowClosed(False)
+dragon_ui._MESSAGE_FONT_CHECKED = True
+dragon_ui._MESSAGE_FONT_FAMILY = 'SSRuanTangTi'
 
 
 def spin(condition, seconds=5):
@@ -114,6 +117,45 @@ class RealAdapterTests(unittest.TestCase):
             self.assertFalse(window.bubble.isVisible())
             self.assertFalse(window.bubble.is_followed_work)
             self.assertFalse(window.task_active)
+
+    def start_speech_pet(self):
+        self.install_work()
+        self.controller.register(dict(id='white-dragon', package=dict(
+            id='local.bailong.white-dragon', version='0.4.1'), enabled=True, preferences={}))
+        return self.start('white-dragon')
+
+    def test_speech_reply_replaces_work_and_survives_work_visibility_sync(self):
+        from dragon_tasks import apply_task_snapshot, TaskSnapshot
+        window = self.start_speech_pet()
+        with patch.object(window.behavior, 'motion_reduced', return_value=False):
+            apply_task_snapshot(window, TaskSnapshot('working', 1, 1))
+            self.assertTrue(window.bubble.is_followed_work)
+            self.assertTrue(self.controller.display_speech_reply('合成测试回复'))
+            self.assertTrue(window.task_active)
+            self.assertTrue(window.bubble.is_speech_reply)
+            self.assertFalse(window.bubble.is_followed_work)
+            for index in range(3):
+                window.play(window.work_slots[index], 'working')
+                window.sync_dialogue_visibility()
+                APP.processEvents()
+                self.assertTrue(window.bubble.isVisible())
+                self.assertEqual(window.bubble.result_view.toPlainText(), '合成测试回复')
+            self.assertTrue(self.controller.display_speech_reply('下一条合成回复'))
+            apply_task_snapshot(window, TaskSnapshot('idle'))
+            self.assertTrue(window.bubble.isVisible())
+            self.assertEqual(window.bubble.result_view.toPlainText(), '下一条合成回复')
+
+    def test_speech_reply_preserves_drag_hidden_and_manual_bubble_guards(self):
+        window = self.start_speech_pet()
+        window.dragging = True
+        self.assertFalse(self.controller.display_speech_reply('不覆盖拖拽'))
+        window.dragging = False
+        with patch.object(window, 'desktop_hidden', return_value=True):
+            self.assertFalse(self.controller.display_speech_reply('不覆盖隐藏状态'))
+        window.bubble.message('人工气泡')
+        self.assertFalse(self.controller.display_speech_reply('不覆盖人工气泡'))
+        self.assertEqual(window.bubble.result_view.toPlainText(), '人工气泡')
+        self.assertFalse(window.bubble.is_speech_reply)
 
     def test_new_turn_waits_for_interaction_and_coalesces_only_active_start(self):
         from dragon_tasks import apply_task_snapshot, TaskSnapshot
@@ -271,7 +313,14 @@ class RealAdapterTests(unittest.TestCase):
         self.assertFalse(window.bubble.findChildren(QProgressBar))
         self.assertTrue(window.bubble.is_quota_result)
         self.assertTrue(any('12.50' in label.toPlainText() for label in window.bubble._views()))
-        self.assertTrue(any('12:30' in label.toPlainText() for label in window.bubble._views()))
+        source = window.bubble.findChild(QLabel, 'quotaBalanceSource')
+        queried = window.bubble.findChild(QLabel, 'quotaBalanceQueriedAt')
+        self.assertIsNotNone(source)
+        self.assertIsNotNone(queried)
+        self.assertEqual(source.text(), 'TiMi CC · USD')
+        self.assertEqual(queried.text(), '查询于 12:30')
+        self.assertLess(source.geometry().right(), queried.geometry().left())
+        self.assertEqual(queried.alignment(), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         window.bubble.hide()
 
     def test_quota_bubble_has_manual_refresh_and_two_subscription_rows(self):
@@ -286,8 +335,24 @@ class RealAdapterTests(unittest.TestCase):
         self.assertEqual([bar.value() for bar in bars], [76, 21])
         button = window.bubble.findChild(QToolButton)
         self.assertIsNotNone(button)
+        self.assertEqual(type(button).__name__, 'RefreshButton')
+        self.assertEqual(button.accessibleName(), '重新查询额度')
         button.click()
         self.assertEqual(called, [True])
+        window.bubble.hide()
+
+    def test_long_quota_name_cannot_overlap_remaining_value(self):
+        from PySide6.QtWidgets import QLabel
+        window = self.start()
+        name = 'Very long provider name that must not collide with remaining percentage'
+        window.bubble.quota([dict(name=name, remaining=76, resetsAt=None)])
+        labels = window.bubble.findChildren(QLabel)
+        provider = next(label for label in labels if label.text() == name)
+        remaining = next(label for label in labels if label.text() == '76% 剩余')
+        self.assertGreater(provider.width(), 0)
+        self.assertGreater(remaining.width(), 0)
+        self.assertLessEqual(provider.geometry().right(), remaining.geometry().left())
+        self.assertEqual(provider.toolTip(), name)
         window.bubble.hide()
 
     def test_observer_diagnostics_contain_only_aggregate_state(self):
@@ -338,6 +403,19 @@ class RealAdapterTests(unittest.TestCase):
                 apply_task_snapshot(window, TaskSnapshot('working', 1))
                 self.assertEqual(window.mode, 'work-start')
                 apply_task_snapshot(window, TaskSnapshot('idle'))
+
+    def test_task_following_takes_over_stationary_held_release_animation(self):
+        from dragon_tasks import apply_task_snapshot, TaskSnapshot
+        self.install_work(); window = self.start()
+        with patch.object(window.behavior, 'motion_reduced', return_value=False):
+            window.mode = 'autonomous-motion'
+            window.behavior.held_release_animation = True
+            window.behavior.release_spring = None
+            apply_task_snapshot(window, TaskSnapshot('working', 1))
+        self.assertFalse(window._task_pose_pending)
+        self.assertTrue(window.task_active)
+        self.assertEqual(window.mode, 'work-start')
+        self.assertFalse(window.behavior.held_release_animation)
 
     def test_task_following_respects_reduced_motion_and_restores_when_disabled(self):
         from dragon_tasks import apply_task_snapshot, TaskSnapshot
@@ -556,9 +634,10 @@ class RealAdapterTests(unittest.TestCase):
         self.assertTrue(first_spring.settled)
         self.assertIsNone(window.behavior.release_spring)
         self.assertIsNone(window.behavior.release_tick_at)
-        self.assertIsNone(window.behavior.release_facing)
+        self.assertIsNotNone(window.behavior.release_facing)
         self.assertIsNone(window.behavior.motion)
-        self.assertEqual(window.mode,'idle')
+        self.assertTrue(window.behavior.held_release_animation)
+        self.assertEqual(window.mode,'autonomous-motion')
 
         second_initial_sample=self.mouse_flick(window)
         second_spring=window.behavior.release_spring

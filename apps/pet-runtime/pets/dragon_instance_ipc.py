@@ -3,11 +3,13 @@ from collections import OrderedDict
 import copy
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
 import socket
 import stat
+import time
 import uuid
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -22,13 +24,107 @@ MAX_CONNECTIONS = 16
 MAX_BATCH = 32
 TIMEOUT_MS = 2000
 SOCKET_NAME = 'pet-control.sock'
+SPEECH_SOCKET_NAME = 'speech-presentation.sock'
+MAX_SPEECH_EVENT = 4096
 REQUEST_ID = re.compile(r'[A-Za-z0-9_-]{1,64}\Z')
 COMMAND_FIELDS = {
+    'add_pets': {'packages'},
     'status': set(), 'start_pet': {'instanceID'}, 'stop_pet': {'instanceID'},
     'start_selected': {'instanceIDs'}, 'stop_all': set(),
     'set_preferences': {'instanceID', 'preferences'}, 'set_package': {'instanceID', 'package'},
     'clone_pet': {'instanceID', 'cloneID'}, 'delete_pet': {'instanceID'}, 'shutdown': set(),
 }
+
+
+def validate_speech_event(data, now=None):
+    require(isinstance(data, bytes) and len(data) <= MAX_SPEECH_EVENT, '语音呈现事件超限')
+    value = json_object(data)
+    require(isinstance(value, dict) and set(value) == {'protocolVersion', 'type', 'text', 'createdAt'},
+            '语音呈现字段无效')
+    require(type(value['protocolVersion']) is int and value['protocolVersion'] == 1 and
+            value['type'] == 'display_reply', '语音呈现协议无效')
+    text = value['text']
+    require(isinstance(text, str) and 0 < len(text) <= 120 and
+            not any(ord(char) < 32 or ord(char) == 127 for char in text), '语音回复文本无效')
+    created = value['createdAt']
+    require(type(created) in (int, float) and math.isfinite(created), '语音呈现时间无效')
+    current = time.time() if now is None else now
+    require(-1 <= current - created <= 10, '语音呈现事件已过期或来自未来')
+    return text
+
+
+class SpeechPresentationServer(QObject):
+    """A separate, text-only channel; it cannot control pet lifecycle or preferences."""
+
+    def __init__(self, controller, directory, parent=None):
+        super().__init__(parent)
+        self.controller = controller
+        root = Path(directory).expanduser().absolute()
+        info = root.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and
+                stat.S_IMODE(info.st_mode) == 0o700, '呈现目录必须为本用户私有目录')
+        self.path = root / SPEECH_SOCKET_NAME
+        require(len(os.fsencode(self.path)) < 104, '语音呈现socket路径过长')
+        self.server = QLocalServer(self)
+        self.server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
+        if self.path.exists() or self.path.is_symlink():
+            info = self.path.lstat()
+            require(stat.S_ISSOCK(info.st_mode) and info.st_uid == os.getuid(),
+                    '语音呈现路径不是本用户socket，拒绝覆盖')
+            with socket.socket(socket.AF_UNIX) as probe:
+                probe.settimeout(.15)
+                try:
+                    probe.connect(str(self.path))
+                except ConnectionRefusedError:
+                    require(QLocalServer.removeServer(str(self.path)), '无法移除过期呈现socket')
+                else:
+                    raise InstanceError('语音呈现socket仍在使用')
+        require(self.server.listen(str(self.path)), '无法监听语音呈现socket：' + self.server.errorString())
+        os.chmod(self.path, 0o600)
+        self.server.newConnection.connect(self._accept)
+
+    def _accept(self):
+        while self.server.hasPendingConnections():
+            connection = self.server.nextPendingConnection()
+            connection.setReadBufferSize(MAX_SPEECH_EVENT + 2)
+            state = {'buffer': bytearray(), 'handled': False}
+            connection.readyRead.connect(lambda c=connection, s=state: self._read(c, s))
+            connection.disconnected.connect(connection.deleteLater)
+            timer = QTimer(connection); timer.setSingleShot(True); timer.start(TIMEOUT_MS)
+            timer.timeout.connect(connection.abort)
+            if connection.bytesAvailable(): self._read(connection, state)
+
+    def _read(self, connection, state):
+        if state['handled']:
+            return
+        state['buffer'].extend(bytes(connection.readAll()))
+        if len(state['buffer']) > MAX_SPEECH_EVENT + 1:
+            self._reply(connection, state, False, 'event_too_large')
+            return
+        if b'\n' not in state['buffer']:
+            return
+        line, extra = bytes(state['buffer']).split(b'\n', 1)
+        try:
+            require(not extra, '每连接仅允许一个呈现事件')
+            text = validate_speech_event(line)
+            accepted = self.controller.display_speech_reply(text)
+            self._reply(connection, state, accepted, None if accepted else 'pet_busy')
+        except (InstanceError, ValueError, TypeError, RecursionError):
+            self._reply(connection, state, False, 'invalid_event')
+
+    def _reply(self, connection, state, accepted, reason):
+        state['handled'] = True
+        response = json.dumps({'ok': accepted, 'reason': reason}, separators=(',', ':')).encode() + b'\n'
+        connection.write(response); connection.flush(); connection.disconnectFromServer()
+
+    def close(self):
+        self.server.close()
+        try:
+            info = self.path.lstat()
+        except FileNotFoundError:
+            return
+        if stat.S_ISSOCK(info.st_mode) and info.st_uid == os.getuid():
+            self.server.removeServer(str(self.path))
 
 
 def endpoint(directory):
@@ -83,6 +179,12 @@ def validate_request(request):
         if 'x' in probe and 'y' not in probe: probe['y'] = 0
         if 'y' in probe and 'x' not in probe: probe['x'] = 0
         preferences(probe)
+    if 'packages' in request:
+        packages = request['packages']
+        require(isinstance(packages, list) and 1 <= len(packages) <= 16, '一次添加需为1–16只桌宠')
+        probe = [dict(id='probe-' + str(i), package=p, preferences={}) for i, p in enumerate(packages)]
+        validate_registry(dict(schemaVersion=1, instances=probe))
+        require(len({(p['id'], p['version']) for p in packages}) == len(packages), '桌宠列表重复')
     if 'package' in request:
         value = request['package']
         require(isinstance(value, dict) and set(value) == {'id', 'version'}, '素材包引用无效')
@@ -108,7 +210,7 @@ def validate_reply(reply, request_id):
             and 1 <= status['maximumRunning'] <= 8, '控制器状态参数无效')
     rows = status.get('instances')
     require(isinstance(rows, list) and len(rows) <= 32 and all(isinstance(row, dict) for row in rows), '实例状态数量无效')
-    validate_registry(dict(schemaVersion=1, instances=[{k: row[k] for k in ('id', 'package', 'enabled', 'autoStartOnLaunch', 'preferences') if k in row} for row in rows]))
+    validate_registry(dict(schemaVersion=1, instances=[{k: row[k] for k in ('id', 'package', 'displayName', 'enabled', 'autoStartOnLaunch', 'preferences') if k in row} for row in rows]))
     for row in rows:
         require(row.get('phase') in ('stopped', 'starting', 'running', 'stopping', 'failed'), '未知实例阶段')
         require(row.get('error') is None or (isinstance(row['error'], str) and len(row['error']) <= 512), '实例错误信息超限')
@@ -127,7 +229,11 @@ def dispatch(controller, request):
     validate_request(request)
     command = request['command']
     outcomes = []
-    if command == 'start_selected':
+    if command == 'add_pets':
+        library = os.environ.get('BAILONG_PET_LIBRARY_DIR')
+        require(bool(library), '本地桌宠目录未配置')
+        outcomes = controller.register_packages(request['packages'], library)
+    elif command == 'start_selected':
         identifiers = request['instanceIDs']
         require(not controller.shutting_down and not controller.starting_factory, '控制器正在退出或忙')
         for identifier in identifiers:
@@ -179,7 +285,8 @@ def dispatch(controller, request):
             clone_preferences['x'] = area.x() + 32 if area else 32
             clone_preferences['y'] = area.y() + 32 if area else 32
         controller.register(dict(id=request['cloneID'], package=copy.deepcopy(source['package']),
-                                 enabled=source['enabled'], autoStartOnLaunch=False, preferences=clone_preferences))
+                                 enabled=source['enabled'], autoStartOnLaunch=False, preferences=clone_preferences,
+                                 **({'displayName': source['displayName'][:77] + '·分身'} if 'displayName' in source else {})))
         outcomes.append(dict(instanceID=request['cloneID'], accepted=True, changed=True))
     elif command == 'shutdown':
         controller.shutdown()

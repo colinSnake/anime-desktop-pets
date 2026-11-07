@@ -15,6 +15,22 @@ final class InstanceLock {
             throw ConfigurationError("\(AppCopy.name)已经在运行了；用 --status 查看状态，或用 --show 显示桌宠")
         }
     }
+
+    static func isHeld(at url: URL) throws -> Bool {
+        let descriptor = Darwin.open(url.path, O_RDWR | O_NOFOLLOW)
+        if descriptor < 0 {
+            if errno == ENOENT { return false }
+            throw ConfigurationError("无法检查旧数据目录的实例锁：\(String(cString: strerror(errno)))")
+        }
+        defer { Darwin.close(descriptor) }
+        guard systemFlock(descriptor, LOCK_EX | LOCK_NB) != 0 else {
+            _ = systemFlock(descriptor, LOCK_UN)
+            return false
+        }
+        if errno == EWOULDBLOCK || errno == EAGAIN { return true }
+        throw ConfigurationError("无法检查旧数据目录的实例锁：\(String(cString: strerror(errno)))")
+    }
+
     deinit { _ = systemFlock(fd, LOCK_UN); Darwin.close(fd) }
 }
 

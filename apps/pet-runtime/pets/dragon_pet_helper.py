@@ -1,4 +1,4 @@
-"""Real white-dragon Qt adapter for the multi-instance controller."""
+"""Real Longmei Qt adapter for the multi-instance controller."""
 
 from __future__ import annotations
 
@@ -232,19 +232,22 @@ def _factory(row, state):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--initial-single', action='store_true', help='首次接管仅登记原宠，不额外创建分身')
     parser.add_argument('--multi-profile', required=True, type=Path)
     parser.add_argument('--initial-from-assets', type=Path)
     parser.add_argument('--initial-preferences')
     args = parser.parse_args(argv)
     if (args.initial_from_assets is None) != (args.initial_preferences is None):
         parser.error('首次初始化必须同时提供素材目录和白名单偏好')
+    if args.initial_single and args.initial_from_assets is None:
+        parser.error('--initial-single 只能随首次初始化使用')
     profile = args.multi_profile.expanduser().resolve()
     profile.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.environ['BAILONG_DATA_DIR'] = str(profile)
 
     root = Path(__file__).resolve().parent
     sys.path.insert(0, str(root))
-    from dragon_instance_ipc import InstanceCommandServer
+    from dragon_instance_ipc import InstanceCommandServer, SpeechPresentationServer
     from dragon_instances import InstanceController, InstanceStore
 
     app = QApplication.instance() or QApplication(sys.argv)
@@ -256,16 +259,18 @@ def main(argv=None):
             initial_preferences = json.loads(args.initial_preferences)
             if not isinstance(initial_preferences, dict) or set(initial_preferences) - allowed:
                 raise ValueError('首次初始化偏好包含不支持的字段')
-            store.create_initial_from_assets(args.initial_from_assets, initial_preferences)
+            store.create_initial_from_assets(args.initial_from_assets, initial_preferences, include_clone=not args.initial_single)
         except Exception:
             store.close()
             raise
     controller = InstanceController(store, _factory, parent=app)
     server = InstanceCommandServer(controller, parent=app)
+    speech_server = SpeechPresentationServer(controller, profile, parent=app)
     # The controller confirms all windows first; the server quits only after
     # the shutdown acknowledgement has been flushed and connections drained.
     server.finished.connect(app.quit)
     app.aboutToQuit.connect(server.close)
+    app.aboutToQuit.connect(speech_server.close)
     return app.exec()
 
 

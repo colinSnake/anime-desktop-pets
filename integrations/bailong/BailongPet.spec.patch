@@ -1,12 +1,15 @@
 --- a/macos/BailongPet.spec
 +++ b/macos/BailongPet.spec
-@@ -8,11 +8,12 @@
+@@ -8,11 +8,15 @@
           (str(root/'MACOS.txt'), '.'),
           (str(root/'NOTICE.md'), '.'),
           (str(root/'THIRD_PARTY_NOTICES.md'), '.'),
 -         (str(root/'BUILD_INFO.json'), '.')]
 +         (str(root/'BUILD_INFO.json'), '.'),
-+         (str(root/'DRAGON_PATCH.json'), '.')]
++         (str(root/'DRAGON_PATCH.json'), '.')] + (
++         [(str(root/'app/fonts/上首软糖体.ttf'), 'fonts'),
++          (str(root/'app/fonts/FONT-LOCAL-TEST-NOTICE.txt'), 'fonts')]
++         if (root/'app/fonts/上首软糖体.ttf').is_file() else [])
  a = Analysis([str(root/'app/pet.py')], pathex=[str(root/'app')],
               binaries=[], datas=datas,
               hiddenimports=['autostart', 'selftest', 'runtime_paths', 'version',

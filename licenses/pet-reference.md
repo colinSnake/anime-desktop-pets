@@ -2,7 +2,7 @@
 
 ## 原项目
 
-本适配基于 [jingh12312-rgb/bailong-desktop-pet](https://github.com/jingh12312-rgb/bailong-desktop-pet) 的 v0.4.1 发布源码、25 段角色动画和相关文件。白龙娘角色美术、原始动画、原作者代码及其相关权利仍归原权利人所有。
+本适配基于 [jingh12312-rgb/bailong-desktop-pet](https://github.com/jingh12312-rgb/bailong-desktop-pet) 的 v0.4.1 发布源码、25 段角色动画和相关文件。龙妹角色美术、原始动画、原作者代码及其相关权利仍归原权利人所有。
 
 这是独立的 macOS 社区适配版，不是 OpenAI 官方产品；公开发布不表示 OpenAI 或原作者对本适配版作出背书。
 

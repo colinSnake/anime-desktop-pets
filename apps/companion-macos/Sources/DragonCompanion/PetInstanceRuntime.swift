@@ -13,6 +13,7 @@ final class PetInstanceRuntime {
     private struct InitialBootstrap {
         let assets: URL
         let preferences: PetInstancePreferences
+        let includeClone: Bool
     }
     var taskFollowingAllowed = false
     var onDiagnostic: ((String) -> Void)?
@@ -30,6 +31,7 @@ final class PetInstanceRuntime {
     }
     private var pending: [Operation] = []
     private var sending = false
+    private var requestCompletions: [String: (Result<PetInstanceControlReply, Error>) -> Void] = [:]
     private var reservedCloneIDs = Set<String>()
     private var terminationWaiters: [@MainActor () -> Void] = []
     private var initialBootstrap: InitialBootstrap?
@@ -82,7 +84,7 @@ final class PetInstanceRuntime {
             PetInstanceControlRow(id: definition.id, package: definition.package,
                                   enabled: definition.enabled, autoStartOnLaunch: definition.autoStartOnLaunch,
                                   preferences: definition.preferences,
-                                  phase: .stopped, error: nil)
+                                  phase: .stopped, error: nil, displayName: definition.displayName)
         }
     }
 
@@ -125,12 +127,13 @@ final class PetInstanceRuntime {
         if let initialBootstrap {
             guard let data = try? JSONEncoder().encode(initialBootstrap.preferences),
                   let json = String(data: data, encoding: .utf8) else {
-                let error = InitialCreationError(message: "无法编码白龙白名单偏好；没有启动多实例控制器。")
+                let error = InitialCreationError(message: "无法编码龙妹白名单偏好；没有启动多实例控制器。")
                 finishInitialCreation(.failure(error)); fail(error.localizedDescription)
                 return
             }
             child.arguments = (child.arguments ?? []) + ["--initial-from-assets", initialBootstrap.assets.path,
                                                          "--initial-preferences", json]
+            if !initialBootstrap.includeClone { child.arguments?.append("--initial-single") }
         }
         child.currentDirectoryURL = executable.deletingLastPathComponent()
         var environment = ["BAILONG_DATA_DIR": profile.path]
@@ -152,6 +155,7 @@ final class PetInstanceRuntime {
             waitForControlSocket(token: token)
         } catch {
             pending.removeAll(); reservedCloneIDs.removeAll()
+            failPendingRequests(error)
             fail(error.localizedDescription)
             finishInitialCreation(.failure(error))
         }
@@ -169,7 +173,7 @@ final class PetInstanceRuntime {
         drain()
     }
 
-    func createInitialPair(assets: URL, preferences: PetInstancePreferences,
+    func createInitialPair(assets: URL, preferences: PetInstancePreferences, includeClone: Bool = true,
                            completion: @escaping (Result<Void, Error>) -> Void) {
         guard registryIsMissing, !initialCreationFinished, initialCreationCompletion == nil,
               process?.isRunning != true else {
@@ -178,10 +182,10 @@ final class PetInstanceRuntime {
         }
         do { try preferences.validate() }
         catch { completion(.failure(error)); return }
-        initialBootstrap = InitialBootstrap(assets: assets, preferences: preferences)
+        initialBootstrap = InitialBootstrap(assets: assets, preferences: preferences, includeClone: includeClone)
         initialCreationCompletion = completion
         // Restore the original only; the newly created copy remains stopped for this handoff.
-        pending.append(.restore(excluding: ["white-dragon-copy"], automaticOnly: true))
+        pending.append(.restore(excluding: includeClone ? ["white-dragon-copy"] : [], automaticOnly: true))
         launchIfNeeded()
         drain()
     }
@@ -220,7 +224,7 @@ final class PetInstanceRuntime {
     func delete(instanceID: String) {
         guard instanceID != "white-dragon", let row = instances.first(where: { $0.id == instanceID }),
               row.phase == .stopped || row.phase == .failed else {
-            lastError = "只能删除已停止且清理完成的分身；原始白龙不可删除。"
+            lastError = "只能删除已停止且清理完成的分身；原始龙妹不可删除。"
             onChanged?()
             return
         }
@@ -246,6 +250,20 @@ final class PetInstanceRuntime {
         setPreferences(.init(size: size), for: instanceID)
     }
 
+    func addPets(_ packages: [PetPackageReference]) async throws -> PetInstanceControlReply {
+        let request = PetInstanceControlRequest(.addPets, packages: packages)
+        try request.validate()
+        guard hasValidRegistry, !expectedTermination else {
+            throw InitialCreationError(message: "实例控制器尚未就绪或正在退出；未添加桌宠。")
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            requestCompletions[request.requestId] = { continuation.resume(with: $0) }
+            pending.append(.request(request))
+            launchIfNeeded()
+            drain()
+        }
+    }
+
     func setPackage(_ package: PetPackageReference, for instanceID: String) {
         pending.append(.request(.init(.setPackage, instanceID: instanceID, package: package)))
         launchIfNeeded()
@@ -255,6 +273,7 @@ final class PetInstanceRuntime {
     func stop() {
         poll?.invalidate(); poll = nil
         pending.removeAll()
+        failPendingRequests(InitialCreationError(message: "控制器正在退出，添加结果未确认；请重新打开后核对实例，系统不会自动重放。"))
         guard process?.isRunning == true else { return }
         expectedTermination = true
     }
@@ -312,7 +331,9 @@ final class PetInstanceRuntime {
                 try? await Task.sleep(nanoseconds: 50_000_000)
             }
             guard let self, self.generation == token else { return }
-            let message = "白龙多实例控制通道启动超时；首次创建结果可能不确定。请退出并重新打开桌边小崽核对实例清单和恢复状态，不要重复创建。"
+            let message = "龙妹多实例控制通道启动超时；首次创建结果可能不确定。请退出并重新打开桌边小崽核对实例清单和恢复状态，不要重复创建。"
+            self.pending.removeAll()
+            self.failPendingRequests(InitialCreationError(message: message))
             self.fail(message)
             self.finishInitialCreation(.failure(InitialCreationError(message: message)))
         }
@@ -360,7 +381,9 @@ final class PetInstanceRuntime {
                     let reply = try await self.sendAsync(request)
                     guard self.generation == token else { return }
                     self.apply(reply)
+                    self.requestCompletions.removeValue(forKey: request.requestId)?(.success(reply))
                 } catch {
+                    self.requestCompletions.removeValue(forKey: request.requestId)?(.failure(error))
                     guard self.generation == token else { return }
                     self.fail(error.localizedDescription)
                 }
@@ -384,7 +407,8 @@ final class PetInstanceRuntime {
         lastError = reply.ok ? nil : reply.error?.message
         if let rows = status?.instances,
            rows.contains(where: { $0.id == "white-dragon" && $0.enabled }),
-           rows.contains(where: { $0.id == "white-dragon-copy" && $0.enabled && $0.phase == .stopped }) {
+           (initialBootstrap?.includeClone == false ||
+            rows.contains(where: { $0.id == "white-dragon-copy" && $0.enabled && $0.phase == .stopped })) {
             finishInitialCreation(.success(()))
         }
         if !reply.ok, initialCreationCompletion != nil {
@@ -412,8 +436,9 @@ final class PetInstanceRuntime {
         generation = UUID()
         controlReady = false; sending = false
         pending.removeAll(); reservedCloneIDs.removeAll()
+        failPendingRequests(InitialCreationError(message: "控制器已退出，添加结果未确认；请重新打开管理窗口核对，系统不会自动重放。"))
         status = nil
-        if !expectedTermination && lastError == nil { lastError = "白龙多实例 helper 已退出" }
+        if !expectedTermination && lastError == nil { lastError = "龙妹多实例 helper 已退出" }
         if initialCreationCompletion != nil {
             finishInitialCreation(.failure(InitialCreationError(
                 message: "多宠控制器已退出，首次创建结果不确定；重新打开菜单核对清单后再操作，系统不会自动重放。")))
@@ -421,6 +446,12 @@ final class PetInstanceRuntime {
         expectedTermination = false
         onChanged?()
         finishTerminationWaiters()
+    }
+
+    private func failPendingRequests(_ error: Error) {
+        let completions = Array(requestCompletions.values)
+        requestCompletions.removeAll()
+        for completion in completions { completion(.failure(error)) }
     }
 
     private func finishTerminationWaiters() {

@@ -2,7 +2,7 @@ import AppKit
 import ApplicationServices
 import DragonCore
 
-/// Only the new launch's matching standard window is resized, once. No UI text is read.
+/// Only the new launch's matching standard window is resized. No UI text is read.
 @MainActor
 enum StartupWindowSizing {
     enum Result: String { case requested, accessibilityRequired, unavailable, fullScreen, failed }

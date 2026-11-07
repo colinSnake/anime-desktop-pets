@@ -22,9 +22,14 @@ from PySide6.QtCore import QEvent
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 from dragon_frames import (AnimationFrameStore, AnimationResourceBudget,
                            LazyAnimationFrames, webp_frame_count, decode_image)
-from dragon_ui import Bubble, NativeMenu, FittedText, bubble_font
+import dragon_ui
+from dragon_ui import Bubble, NativeMenu, FittedText, bubble_font, message_font
 APP = QApplication.instance() or QApplication([])
 APP.setQuitOnLastWindowClosed(False)
+# These UI tests verify family selection; the frozen-build test verifies that
+# the real font file is embedded and registered by Qt.
+dragon_ui._MESSAGE_FONT_CHECKED = True
+dragon_ui._MESSAGE_FONT_FAMILY = 'SSRuanTangTi'
 
 
 def spin_until(condition, seconds=8):
@@ -304,6 +309,68 @@ class UITests(unittest.TestCase):
                       QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont).family())
         self.assertEqual(bubble_font().family(),expected)
         self.assertEqual(self.bubble.font().family(),expected)
+        self.assertEqual(bubble_font().pointSizeF(),11)
+    def test_multiline_text_uses_spacious_measured_line_height(self):
+        from PySide6.QtGui import QTextBlockFormat
+        text='翻翻资料，陪你找一下下一步灵感。\n我会把每一行清楚地排开。'
+        self.bubble.message(text);APP.processEvents()
+        view=self.bubble.result_view
+        block=view.document().begin().blockFormat()
+        self.assertEqual(block.lineHeightType(),QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
+        self.assertEqual(block.lineHeight(),160)
+        self.assertGreaterEqual(view.height(),view.document().size().height())
+        self.assertEqual(view.verticalScrollBar().maximum(),0)
+    def test_message_copy_uses_bundled_soft_candy_font(self):
+        self.bubble.message('翻翻资料，陪你找一下下一步灵感。');APP.processEvents()
+        self.assertEqual(self.bubble.result_view.font().family(), 'SSRuanTangTi')
+        self.assertEqual(self.bubble.result_view.font().pointSizeF(), 13)
+    def test_normal_message_clears_speech_reply_marker(self):
+        self.bubble.is_speech_reply = True
+        self.bubble.message('你好，龙妹');APP.processEvents()
+        self.assertFalse(self.bubble.is_speech_reply)
+    def test_message_font_loader_warns_when_missing_and_registers_exact_family(self):
+        from unittest.mock import patch
+        dragon_ui._MESSAGE_FONT_CHECKED = False
+        dragon_ui._MESSAGE_FONT_FAMILY = None
+        try:
+            with patch.object(dragon_ui.Path, 'is_file', return_value=True), \
+                    patch.object(dragon_ui.QFontDatabase, 'addApplicationFont', return_value=7) as add_font, \
+                    patch.object(dragon_ui.QFontDatabase, 'applicationFontFamilies',
+                                 return_value=['SSRuanTangTi']):
+                self.assertEqual(message_font().family(), 'SSRuanTangTi')
+                add_font.assert_called_once()
+            dragon_ui._MESSAGE_FONT_CHECKED = False
+            dragon_ui._MESSAGE_FONT_FAMILY = None
+            with patch.object(dragon_ui.Path, 'is_file', return_value=False):
+                with self.assertLogs('dragon_ui', level='WARNING') as output:
+                    font = message_font()
+                self.assertIn('SSRuanTangTi', output.output[0])
+                self.assertEqual(font.family(), bubble_font().family())
+        finally:
+            dragon_ui._MESSAGE_FONT_CHECKED = True
+            dragon_ui._MESSAGE_FONT_FAMILY = 'SSRuanTangTi'
+    def test_message_ink_is_centered_horizontally_and_vertically_in_bubble(self):
+        from PySide6.QtCore import Qt
+        for text in ('翻翻资料，陪你找一下下一步灵感。',
+                     '第一行较长的文案内容\n第二行短一些'):
+            self.bubble.message(text);APP.processEvents()
+            view=self.bubble.result_view
+            block=view.document().begin().blockFormat()
+            self.assertEqual(block.alignment(),Qt.AlignmentFlag.AlignHCenter)
+            self.assertEqual(view.verticalScrollBar().maximum(),0)
+            image=self.bubble.grab().toImage()
+            ink_rows=[]
+            for y in range(image.height()):
+                for x in range(12,image.width()-12):
+                    color=image.pixelColor(x,y)
+                    if color.alpha()>220 and color.red()<100 and color.green()<100 and color.blue()<100:
+                        ink_rows.append(y)
+                        break
+            self.assertTrue(ink_rows)
+            top_gap=min(ink_rows)-6
+            bottom_gap=image.height()-7-max(ink_rows)
+            self.assertLessEqual(abs(top_gap-bottom_gap),4,
+                                 f'visible text margins differ: {top_gap}px vs {bottom_gap}px')
     def test_multiline_message_shows_all_lines_without_scroll_when_short(self):
         text='第一行：你好\n第二行：透明边缘\n第三行：动画已就绪\n第四行：文字完整'
         self.bubble.message(text);APP.processEvents()
@@ -429,7 +496,7 @@ class UITests(unittest.TestCase):
     def test_short_popup_has_no_stale_blank_space_after_long_content(self):
         self.bubble.message('完成。');APP.processEvents()
         short=self.bubble.size()
-        self.assertLessEqual(short.height(),58)
+        self.assertLessEqual(short.height(),72)
         self.bubble.task_result('任务进度','很长的记录\n'*100,lambda:None);APP.processEvents()
         self.assertLessEqual(self.bubble.height(),264)
         self.bubble.message('完成。');APP.processEvents()
@@ -441,7 +508,7 @@ class UITests(unittest.TestCase):
         before=self.bubble.height()
         self.bubble.result_view.setPlainText('已完成。');self.bubble.finish();APP.processEvents()
         self.assertLess(self.bubble.height(),before)
-        self.assertLess(self.bubble.height(),120)
+        self.assertLessEqual(self.bubble.height(),120)
         self.assertEqual(self.bubble.result_view.verticalScrollBar().maximum(),0)
 
     def test_quota_uses_actual_bar_height_without_extra_space(self):
@@ -543,6 +610,7 @@ class BehaviorTests(unittest.TestCase):
 
     def test_jitter_interval_and_silent_nonrepeating_animation(self):
         self.behavior.motion_enabled = False
+        self.behavior.next_greeting_at = float('inf')
         chosen = []
         with patch.object(self.pet, 'say', side_effect=AssertionError('自动弹窗')), \
              patch.object(self.pet, 'play_click_sound', side_effect=AssertionError('自动声音')), \
@@ -552,8 +620,8 @@ class BehaviorTests(unittest.TestCase):
                 self.pet.waiting_first_frame = False
                 self.due()
                 chosen.append(self.pet.current['id'])
-                self.assertGreaterEqual(self.behavior.next_at - self.now, 12)
-                self.assertLessEqual(self.behavior.next_at - self.now, 24)
+                self.assertGreaterEqual(self.behavior.next_at - self.now, 20)
+                self.assertLessEqual(self.behavior.next_at - self.now, 34)
                 self.assertEqual(self.pet.mode, 'variant')
                 self.now += 45
         self.assertTrue(all(a != b for a, b in zip(chosen, chosen[1:])))
@@ -593,6 +661,64 @@ class BehaviorTests(unittest.TestCase):
         self.behavior._check_motion_at = 0
         self.behavior.reduce_motion = lambda: (_ for _ in ()).throw(RuntimeError('query failed'))
         self.assertFalse(self.behavior.perform(preview=True))
+
+    def test_idle_greeting_appears_as_a_short_bubble_and_rotates_slowly(self):
+        self.behavior.next_greeting_at = self.now
+        self.behavior.tick()
+        self.assertTrue(self.pet.bubble.isVisible())
+        text = self.pet.bubble.findChild(FittedText).toPlainText()
+        self.assertIn(text, self.behavior.IDLE_GREETINGS)
+        self.assertLess(self.pet.bubble.frameGeometry().bottom(), self.pet.body_geometry().top())
+        self.assertGreaterEqual(self.pet.bubble_timer.remainingTime(), 4000)
+        self.assertLessEqual(self.pet.bubble_timer.remainingTime(), 5000)
+        self.assertGreaterEqual(self.behavior.next_greeting_at - self.now, 150)
+        self.assertLessEqual(self.behavior.next_greeting_at - self.now, 240)
+
+    def test_idle_greeting_defers_during_work_or_user_interaction(self):
+        self.behavior.next_greeting_at = self.now
+        for name, value in (('task_active', True), ('dragging', True), ('manual_hidden', True),
+                            ('mode', 'variant')):
+            original = getattr(self.pet, name)
+            setattr(self.pet, name, value)
+            with patch.object(self.pet, 'say') as say:
+                self.behavior.tick()
+            say.assert_not_called()
+            self.assertGreaterEqual(self.behavior.next_greeting_at - self.now, 15)
+            self.assertLessEqual(self.behavior.next_greeting_at - self.now, 25)
+            setattr(self.pet, name, original)
+            self.behavior.next_greeting_at = self.now
+
+    def test_idle_greeting_respects_activity_and_reduce_motion_settings(self):
+        self.behavior.next_greeting_at = self.now
+        self.behavior.enabled = False
+        with patch.object(self.pet, 'say') as say:
+            self.behavior.tick()
+        say.assert_not_called()
+
+    def test_recent_user_activity_quiets_actions_and_delays_greeting(self):
+        self.behavior.on_play('variant')
+        self.assertEqual(self.behavior.last_user_activity_at, self.now)
+        self.assertGreaterEqual(self.behavior.next_at - self.now, 36)
+        self.assertLessEqual(self.behavior.next_at - self.now, 56)
+        self.assertEqual(self.behavior.next_greeting_at,
+                         self.now + self.behavior.GREETING_AFTER_ACTIVITY)
+        self.assertIn(self.behavior.next_action(), self.pet.idles)
+        self.assertIn(self.behavior.next_action(), self.pet.idles)
+
+    def test_longmei_specific_greeting_is_not_used_for_other_packages(self):
+        self.pet.definition = {'package': {'id': 'local.synthetic'}}
+        self.behavior.next_greeting_at = self.now
+        with patch.object(self.pet, 'say') as say:
+            self.behavior.tick()
+        say.assert_not_called()
+
+        self.behavior.enabled = True
+        self.behavior.next_greeting_at = self.now
+        self.behavior._check_motion_at = 0
+        self.behavior.reduce_motion = lambda: True
+        with patch.object(self.pet, 'say') as say:
+            self.behavior.tick()
+        say.assert_not_called()
 
     def test_paths_stay_inside_single_monitor_and_return_without_drift(self):
         from dragon_behavior import Motion
@@ -1803,8 +1929,7 @@ class ReleasePresentationTests(unittest.TestCase):
             self.assertTrue(self.pet.current['id'].startswith(prefix))
         self.assertNotIn('releasePreference',self.pet.settings.allKeys())
 
-    def test_release_returns_to_idle_through_visible_280ms_blend(self):
-        from dragon_playback import pose_pixmap
+    def test_released_locomotion_stays_held_until_next_scheduled_action(self):
         for prefix in ('move02','move03'):
             for direction in (-1,1):
                 with self.subTest(prefix=prefix,direction=direction):
@@ -1812,44 +1937,74 @@ class ReleasePresentationTests(unittest.TestCase):
                     self.behavior.drag_samples.clear()
                     self.behavior.drag_samples.extend([(self.now-.1,100,100),(self.now,100+direction*50,100)])
                     self.behavior.drag_distance=50.
+                    self.behavior.motion_enabled=True
                     with patch.object(self.behavior.rng,'choice',side_effect=lambda values:next(v for v in values if v['id'].startswith(prefix))):
                         self.assertTrue(self.behavior.release_drag())
                     self.present(.1)
-                    source=self.pet.displayed_canvas.toImage().copy();size=self.pet.size()
+                    source=self.pet.displayed_canvas.toImage().copy()
+                    size=self.pet.size()
                     spring=self.behavior.release_spring
                     spring.y=spring.bottom-.01;spring.vy=10.;spring.vx=0
                     self.now+=.02;self.behavior.tick()
                     self.assertTrue(spring.settled)
-                    self.assertIs(self.pet.current,self.pet.idles[0])
+                    item=self.pet.current
                     clock=self.pet.presentation
-                    self.assertAlmostEqual(clock.blend_duration,.28)
+                    self.assertTrue(item['id'].startswith(prefix))
+                    self.assertTrue(self.behavior.held_release_animation)
+                    self.assertIsNone(self.behavior.release_spring)
+                    self.assertEqual(self.pet.mode,'autonomous-motion')
                     self.assertEqual(self.pet.displayed_canvas.toImage(),source)
-                    self.assertTrue(self.pet.pose_bridge_ready);self.assertIsNone(self.pet.pose_bridge)
-                    base=clock.last
-                    with patch('pet.pose_bridge',side_effect=AssertionError('drag must not resize by silhouette')):
-                        with patch('pet.time.monotonic',return_value=base):self.pet.animate()
-                        self.assertEqual(clock.alpha,0)
-                        seen_indices={clock.index}
-                        middle=None
-                        for _ in range(20):
-                            target_position=clock.offset+min(clock.elapsed+.035,clock.length)
-                            target_index=clock.index_at(target_position)
-                            self.pet.frames.request(target_index)
-                            spin_until(lambda:self.pet.frames.ready(target_index) is not None)
-                            with patch('pet.time.monotonic',return_value=clock.last+.035):self.pet.animate()
-                            seen_indices.add(clock.index)
-                            self.assertEqual(self.pet.size(),size)
-                            if middle is None and clock.blend_elapsed >= .14:
-                                middle=self.pet.displayed_canvas.toImage().copy()
-                            if not clock.blending:
-                                break
-                        self.assertGreater(len(seen_indices),1)
-                        self.assertGreater(clock.alpha,0);self.assertEqual(clock.alpha,1)
-                        self.assertNotEqual(middle,source)
-                        target_frame=self.pet.frames.ready(clock.index)
-                        target=pose_pixmap(target_frame,self.pet.current,self.pet.frame_size,padding=__import__('dragon_playback').canvas_padding(self.pet.frame_size)).toImage()
-                        self.assertEqual(self.pet.displayed_canvas.toImage(),target)
-                        self.assertIsNone(self.pet.bridge_source)
+                    self.assertEqual(self.pet.size(),size)
+                    self.assertIsNotNone(clock.loop_range)
+                    expected=(item['moveStartMs']/1000,item['moveStopMs']/1000)
+                    self.assertEqual(clock.loop_range,expected)
+                    facing=self.behavior.release_facing
+                    self.assertIn(facing,('left','right'))
+                    self.behavior.release_facing='left' if item['sourceFacing']=='right' else 'right'
+                    self.present(.2)
+                    self.assertTrue(self.pet.pose_mirrored)
+
+                    # Keep the current locomotion loop while stationary, then let
+                    # the normal scheduler replace it with its next chosen action.
+                    self.behavior.motion_enabled=False
+                    self.behavior.next_greeting_at=float('inf')
+                    self.behavior.next_at=self.now
+                    self.now+=.02
+                    self.behavior.tick()
+                    self.assertFalse(self.behavior.held_release_animation)
+                    self.assertIsNot(self.pet.current,item)
+                    self.assertEqual(self.pet.mode,'variant')
+                    self.assertIsNone(self.behavior.release_facing)
+                    self.assertIsNone(self.pet.presentation.loop_range)
+
+    def test_held_release_yields_to_user_play_pause_and_reduce_motion(self):
+        item=next(v for v in self.original_movements if v['id'].startswith('move02'))
+        self.behavior._play(item,'autonomous-motion')
+        self.behavior.held_release_animation=True
+        self.behavior.set_enabled(False)
+        self.assertFalse(self.behavior.held_release_animation)
+        self.assertEqual(self.pet.mode,'idle')
+
+        self.behavior.enabled=True
+        self.behavior._play(item,'autonomous-motion')
+        self.behavior.held_release_animation=True
+        self.pet.play(self.pet.variants[0],'variant')
+        self.assertFalse(self.behavior.held_release_animation)
+        self.assertEqual(self.pet.current,self.pet.variants[0])
+
+        self.behavior._play(item,'autonomous-motion')
+        self.behavior.held_release_animation=True
+        self.pet.play(self.pet.idles[0],'idle')
+        self.assertFalse(self.behavior.held_release_animation)
+
+        self.behavior._play(item,'autonomous-motion')
+        self.behavior.held_release_animation=True
+        self.behavior.reduce_motion=lambda:True
+        self.behavior._check_motion_at=0
+        self.behavior.next_greeting_at=float('inf')
+        self.behavior.tick()
+        self.assertFalse(self.behavior.held_release_animation)
+        self.assertEqual(self.pet.mode,'idle')
 
     def test_drag_and_release_keep_user_size_and_calibrated_render_scale(self):
         original_percent=self.pet.size_percent
@@ -1990,7 +2145,7 @@ class ReleasePresentationTests(unittest.TestCase):
         self.assertEqual(self.pet.displayed_canvas.toImage(),source)
         self.assertEqual(self.pet.pos(),origin)
 
-    def test_release_position_follows_physics_then_idle(self):
+    def test_release_position_follows_physics_then_held_locomotion(self):
         from PySide6.QtCore import QPoint
         area=APP.primaryScreen().availableGeometry()
         origin_x=area.center().x()
@@ -2025,10 +2180,38 @@ class ReleasePresentationTests(unittest.TestCase):
             self.present(clock.elapsed + .5)
         self.assertIsNone(self.behavior.release_spring)
         self.assertIsNone(self.behavior.motion)
-        self.assertIn(self.pet.mode,('landing','idle'))
+        self.assertEqual(self.pet.mode,'autonomous-motion')
+        self.assertTrue(self.behavior.held_release_animation)
+        self.assertIsNotNone(self.behavior.release_pose_until)
+        self.assertTrue(self.pet.current['id'].startswith(('move02','move03')))
         self.assertNotEqual(self.pet.current.get('id'), self.pet.manifest['landingAnimation']['id'])
         self.assertEqual(self.pet.y(), area.bottom() + 1 - self.pet.height() + self.pet.render_margin)
         self.assertTrue(spring.settled)
+
+    def test_release_pose_hold_is_separate_from_autonomous_schedule(self):
+        self.assertTrue(self.behavior.release_drag())
+        spring = self.behavior.release_spring
+        spring.restitution = .92
+        for _ in range(80):
+            if self.behavior.release_spring is None:
+                break
+            self.present(self.pet.presentation.elapsed + .5)
+        self.assertTrue(spring.settled)
+        self.assertTrue(self.behavior.held_release_animation)
+        scheduler_deadline = self.behavior.next_at
+        self.assertGreater(scheduler_deadline - self.now, 10.)
+
+        self.now = self.behavior.release_pose_until - .01
+        self.behavior.tick()
+        self.assertEqual(self.pet.mode, 'autonomous-motion')
+        self.assertTrue(self.behavior.held_release_animation)
+        self.assertEqual(self.behavior.next_at, scheduler_deadline)
+
+        self.now = self.behavior.release_pose_until + .01
+        self.behavior.tick()
+        self.assertEqual(self.pet.mode, 'idle')
+        self.assertFalse(self.behavior.held_release_animation)
+        self.assertEqual(self.behavior.next_at, scheduler_deadline)
 
     def test_release_clip_expiry_cannot_cancel_unsettled_spring(self):
         self.assertTrue(self.behavior.release_drag())
@@ -2097,9 +2280,10 @@ class ReleasePresentationTests(unittest.TestCase):
             self.present(self.pet.presentation.elapsed+.25)
         self.assertTrue(spring.settled)
         self.assertIsNone(self.behavior.motion)
-        self.assertIs(self.pet.current,self.pet.idles[0])
-        self.assertEqual(self.pet.mode,'idle')
-        self.assertIsNone(self.pet.presentation.loop_range)
+        self.assertIs(self.pet.current,item)
+        self.assertTrue(self.behavior.held_release_animation)
+        self.assertEqual(self.pet.mode,'autonomous-motion')
+        self.assertIsNotNone(self.pet.presentation.loop_range)
 
     def test_release_spring_moves_while_new_first_frame_is_decoding(self):
         from PySide6.QtCore import QPoint

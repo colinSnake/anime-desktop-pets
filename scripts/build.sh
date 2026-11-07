@@ -50,23 +50,23 @@ cp -R "$ROOT/resources/media" "$ROOT/resources/pet" "$ROOT/resources/poster" "$B
 cp "$ROOT/resources/branding/AppIcon.icns" "$BUNDLE/Contents/Resources/AppIcon.icns"
 # Absolute source locations in assets.local.json are deliberately not bundled.
 cp "$ROOT/config/companion.example.json" "$BUNDLE/Contents/Resources/"
-PET_LIBRARY_PYTHON="$ROOT/.local/pet-build/venv/bin/python"
-if [[ -x "$PET_LIBRARY_PYTHON" ]] && "$PET_LIBRARY_PYTHON" -c 'import PyInstaller, PySide6, PIL' >/dev/null 2>&1; then
-  LIBRARY_STAGE="$STAGING/pet-library"
-  mkdir -p "$LIBRARY_STAGE"
-  "$PET_LIBRARY_PYTHON" -m PyInstaller --noconfirm --clean --windowed \
-    --name DragonPetLibrary --specpath "$LIBRARY_STAGE" --paths "$ROOT/apps/pet-runtime/pets" \
-    --distpath "$LIBRARY_STAGE/dist" --workpath "$LIBRARY_STAGE/work" \
-    "$ROOT/scripts/pet-library-ui.py"
-  mkdir -p "$BUNDLE/Contents/Helpers"
-  ditto "$LIBRARY_STAGE/dist/DragonPetLibrary.app" "$BUNDLE/Contents/Helpers/DragonPetLibrary.app"
-  /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.dragon.codex-companion.pet-library' \
-    "$BUNDLE/Contents/Helpers/DragonPetLibrary.app/Contents/Info.plist"
-  codesign --force --deep --sign - "$BUNDLE/Contents/Helpers/DragonPetLibrary.app"
-fi
+# Local project discovery hints; keep machine-specific paths out of Swift code.
+python3 - "$BUNDLE/Contents/Resources/pet-search-directories.json" "$ROOT" <<'PYSOURCES'
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[2])
+Path(sys.argv[1]).write_text(json.dumps([str(root / name) for name in
+    ('resources/pets', 'pets', '.local/pets')], ensure_ascii=False) + '\n')
+PYSOURCES
 if [[ "$MODE" != --native-pet ]]; then
   mkdir -p "$BUNDLE/Contents/Helpers"
   ditto "$FULL_APP" "$BUNDLE/Contents/Helpers/BailongPet.app"
+  if [[ "$MODE" == --enhanced-pet ]]; then
+    # Validate the embedded copy, not only the source helper, before signing or publishing.
+    python3 "$ROOT/scripts/pet-build-inputs.py" \
+      --app "$BUNDLE/Contents/Helpers/BailongPet.app" \
+      --require-local-test-font
+  fi
   python3 - "$BUNDLE/Contents/Resources/companion.example.json" "$MODE" "$PET_ASSETS_DIR" <<'PYCONFIG'
 import json,sys
 from pathlib import Path
@@ -85,8 +85,9 @@ with open(sys.argv[1],'wb') as out:
     plistlib.dump(dict(CFBundleName='桌边小崽', CFBundleDisplayName='桌边小崽',
         CFBundleExecutable='DragonCompanion', CFBundleIdentifier='local.dragon.codex-companion',
         CFBundleIconFile='AppIcon.icns',
-        CFBundlePackageType='APPL', CFBundleShortVersionString='0.7.10', CFBundleVersion='30',
-        LSMinimumSystemVersion='13.0', LSUIElement=True, NSHighResolutionCapable=True),out)
+        CFBundlePackageType='APPL', CFBundleShortVersionString='0.7.11', CFBundleVersion='31',
+        NSMicrophoneUsageDescription='用于将你的语音在本机转成文字并生成桌宠回复。录音不会上传或保存为聊天历史。',
+        LSMinimumSystemVersion='13.0', NSHighResolutionCapable=True),out)
 PY
 codesign --force --sign - "$BUNDLE"
 codesign --verify --deep --strict "$BUNDLE"

@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import socket
 import stat
 import subprocess
@@ -15,8 +16,9 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'apps/pet-runtime/pets'))
-from dragon_instance_ipc import MAX_REQUEST, SOCKET_NAME, InstanceCommandServer, endpoint, send_command, validate_request, validate_reply
-from dragon_instances import InstanceController, InstanceError, InstanceStore
+from dragon_instance_ipc import (MAX_REQUEST, SOCKET_NAME, InstanceCommandServer, SpeechPresentationServer, endpoint,
+                                 send_command, validate_request, validate_reply, validate_speech_event)
+from dragon_instances import InstanceController, InstanceError, InstanceStore, speech_reply_available
 
 
 def request(command='status', **fields):
@@ -52,13 +54,17 @@ def fixture_server(profile):
                                      enabled=identifier != 'disabled', autoStartOnLaunch=identifier != 'third',
                                      preferences={}))
     server = InstanceCommandServer(controller)
+    class SyntheticSpeechTarget:
+        def display_speech_reply(self, text):
+            return text == 'synthetic reply'
+    speech_server = SpeechPresentationServer(SyntheticSpeechTarget(), profile, parent=app)
     server.finished.connect(app.quit)
     # 防测试失败遗留进程；不是后台监视器或产品自动退出策略。
     QTimer.singleShot(30000, app.quit)
     try:
         return app.exec()
     finally:
-        server.close(); controller.shutdown(); store.close()
+        speech_server.close(); server.close(); controller.shutdown(); store.close()
 
 
 def transport_fixture(profile, mode):
@@ -84,6 +90,57 @@ def transport_fixture(profile, mode):
 
 
 class RequestChecks(unittest.TestCase):
+    def test_speech_reply_is_allowed_during_task_following_but_respects_interactions(self):
+        bubble = SimpleNamespace(isVisible=lambda: False, is_followed_work=False, is_speech_reply=False)
+        pet = SimpleNamespace(
+            _stopping=False,
+            dragging=False,
+            desktop_hidden=lambda: False,
+            quota_inflight=False,
+            task_active=True,
+            click_timer=SimpleNamespace(isActive=lambda: False),
+            behavior=SimpleNamespace(release_spring=None),
+            bubble=bubble,
+        )
+        self.assertTrue(speech_reply_available(pet))
+        self.assertFalse(speech_reply_available(pet, mouse_buttons=True))
+        self.assertFalse(speech_reply_available(pet, popup_active=True))
+        self.assertFalse(speech_reply_available(pet, modal_active=True))
+        pet.dragging = True
+        self.assertFalse(speech_reply_available(pet))
+
+    def test_speech_reply_can_replace_work_or_previous_speech_bubble_only(self):
+        bubble = SimpleNamespace(isVisible=lambda: True, is_followed_work=True, is_speech_reply=False)
+        pet = SimpleNamespace(
+            _stopping=False,
+            dragging=False,
+            desktop_hidden=lambda: False,
+            quota_inflight=False,
+            task_active=True,
+            click_timer=SimpleNamespace(isActive=lambda: False),
+            behavior=SimpleNamespace(release_spring=None),
+            bubble=bubble,
+        )
+        self.assertTrue(speech_reply_available(pet))
+        bubble.is_followed_work = False
+        bubble.is_speech_reply = True
+        self.assertTrue(speech_reply_available(pet))
+        bubble.is_speech_reply = False
+        self.assertFalse(speech_reply_available(pet))
+
+    def test_speech_event_accepts_only_fresh_bounded_display_reply(self):
+        event = dict(protocolVersion=1, type='display_reply', text='本地合成回复', createdAt=1000)
+        self.assertEqual(validate_speech_event(json.dumps(event).encode(), now=1001), '本地合成回复')
+        for patch in (
+            {'type': 'speaking'}, {'extra': True}, {'text': 'x' * 121},
+            {'createdAt': 970}, {'createdAt': 1010}, {'text': 'bad\ntext'},
+        ):
+            invalid = dict(event); invalid.update(patch)
+            with self.subTest(patch=patch), self.assertRaises(InstanceError):
+                validate_speech_event(json.dumps(invalid).encode(), now=1000)
+        with self.assertRaises(InstanceError):
+            validate_speech_event(b'x' * 4097, now=1000)
+
     def test_whitelist_and_unknown_fields(self):
         for bad in [request('run_shell'), request(path='/private'), request(protocolVersion=True),
                     request('start_pet', instanceID='../bad'), request('start_pet'), request('status', requestId='bad\n')]:
@@ -171,11 +228,12 @@ class IPCChecks(unittest.TestCase):
         self.child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--fixture-server', str(self.profile)],
                                       env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.path = self.profile / SOCKET_NAME
+        self.speech_path = self.profile / 'speech-presentation.sock'
         for _ in range(150):
-            if self.path.exists(): break
+            if self.path.exists() and self.speech_path.exists(): break
             if self.child.poll() is not None: self.fail(str(self.child.communicate()))
             time.sleep(.01)
-        self.assertTrue(self.path.exists(), 'fixture socket未就绪')
+        self.assertTrue(self.path.exists() and self.speech_path.exists(), 'fixture socket未就绪')
 
     def tearDown(self):
         if self.child.poll() is None:
@@ -216,6 +274,21 @@ class IPCChecks(unittest.TestCase):
         self.assertTrue(all(row['phase'] == 'stopped' for row in result['status']['instances']))
         reply = self.raw((json.dumps(request(), ensure_ascii=False) + '\n').encode(), fragments=True)
         self.assertTrue(reply['ok'])
+
+    def test_text_only_speech_socket_requires_fresh_event_and_reports_delivery(self):
+        self.assertEqual(stat.S_IMODE(self.speech_path.stat().st_mode), 0o600)
+        event = dict(protocolVersion=1, type='display_reply', text='synthetic reply', createdAt=time.time())
+        with socket.socket(socket.AF_UNIX) as connection:
+            connection.settimeout(2); connection.connect(str(self.speech_path))
+            connection.sendall(json.dumps(event).encode() + b'\n')
+            reply = json.loads(connection.recv(1024))
+        self.assertEqual(reply, {'ok': True, 'reason': None})
+        event['text'] = 'not permitted'
+        with socket.socket(socket.AF_UNIX) as connection:
+            connection.settimeout(2); connection.connect(str(self.speech_path))
+            connection.sendall(json.dumps(event).encode() + b'\n')
+            reply = json.loads(connection.recv(1024))
+        self.assertEqual(reply, {'ok': False, 'reason': 'pet_busy'})
 
     def test_individual_start_resize_and_stop_do_not_affect_other(self):
         self.command('start_selected', instanceIDs=['first', 'second'])

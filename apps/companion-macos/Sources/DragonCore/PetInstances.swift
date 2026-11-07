@@ -50,20 +50,22 @@ public struct PetInstancePreferences: Codable, Equatable, Sendable {
 public struct PetInstanceDefinition: Codable, Equatable, Sendable {
     public let id: String
     public let package: PetPackageReference
+    public let displayName: String?
     public var enabled: Bool
     public var autoStartOnLaunch: Bool
     public var preferences: PetInstancePreferences
     public init(id: String, package: PetPackageReference, enabled: Bool = true, autoStartOnLaunch: Bool = true,
-                preferences: PetInstancePreferences = .init()) throws {
-        self.id = id; self.package = package; self.enabled = enabled
+                preferences: PetInstancePreferences = .init(), displayName: String? = nil) throws {
+        self.id = id; self.package = package; self.displayName = displayName; self.enabled = enabled
         self.autoStartOnLaunch = autoStartOnLaunch; self.preferences = preferences
         try validate()
     }
-    private enum CodingKeys: String, CodingKey { case id, package, enabled, autoStartOnLaunch, preferences }
+    private enum CodingKeys: String, CodingKey { case id, package, displayName, enabled, autoStartOnLaunch, preferences }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(String.self, forKey: .id)
         package = try values.decode(PetPackageReference.self, forKey: .package)
+        displayName = try values.decodeIfPresent(String.self, forKey: .displayName)
         enabled = try values.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         autoStartOnLaunch = try values.decodeIfPresent(Bool.self, forKey: .autoStartOnLaunch)
             ?? !Self.isLegacyCloneID(id)
@@ -73,6 +75,7 @@ public struct PetInstanceDefinition: Codable, Equatable, Sendable {
     public func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
         try values.encode(id, forKey: .id); try values.encode(package, forKey: .package)
+        try values.encodeIfPresent(displayName, forKey: .displayName)
         try values.encode(enabled, forKey: .enabled); try values.encode(autoStartOnLaunch, forKey: .autoStartOnLaunch)
         try values.encode(preferences, forKey: .preferences)
     }
@@ -87,6 +90,12 @@ public struct PetInstanceDefinition: Codable, Equatable, Sendable {
             throw ConfigurationError("实例ID无效")
         }
         try package.validate()
+        if let displayName {
+            guard !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, displayName.count <= 80,
+                  !displayName.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+                throw ConfigurationError("桌宠名称无效")
+            }
+        }
         if allowLegacySize {
             guard (96...512).contains(preferences.size) else { throw ConfigurationError("实例尺寸无效") }
             var coordinates = preferences

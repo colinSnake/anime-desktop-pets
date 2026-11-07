@@ -448,7 +448,8 @@ def apply_task_snapshot(pet, snapshot):
     blocked = next((name for name, value in (
         ('dragging', pet.dragging), ('quota', pet.quota_inflight), ('hidden', pet.desktop_hidden()),
         ('release_spring', pet.behavior.release_spring is not None),
-        ('user_animation', pet.mode in ('variant', 'autonomous-motion', 'landing')),
+        ('user_animation', pet.mode in ('variant', 'landing') or
+         (pet.mode == 'autonomous-motion' and not getattr(pet.behavior, 'held_release_animation', False))),
         ('click', pet.click_timer.isActive()),
         ('bubble', pet.bubble.isVisible() and not getattr(pet.bubble, 'is_followed_work', False)),
         ('mouse', bool(QApplication.mouseButtons())), ('menu', QApplication.activePopupWidget()),

@@ -4,6 +4,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 swift test --package-path "$ROOT/apps/companion-macos" --scratch-path "$ROOT/.build"
 python3 "$ROOT/scripts/test-codex-tasks.py"
 python3 "$ROOT/scripts/test-provider-quota.py"
+python3 "$ROOT/scripts/test-speech-runtime-queue.py"
+python3 "$ROOT/scripts/test-speech-runtime-session.py"
+python3 "$ROOT/scripts/test-speech-runtime-service.py"
+python3 "$ROOT/scripts/test-speech-mlx-backend.py"
 python3 "$ROOT/scripts/test-startup-upscale.py"
 python3 "$ROOT/scripts/check-project.py"
 python3 "$ROOT/scripts/test-app-bundle.py"
@@ -15,12 +19,12 @@ if [[ -x "$ROOT/.local/pet-build/venv/bin/python" ]]; then
   /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network*)' \
     "$ROOT/.local/pet-build/venv/bin/python" "$ROOT/scripts/test-pet-library.py"
   /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network*)' \
-    "$ROOT/.local/pet-build/venv/bin/python" "$ROOT/scripts/test-pet-library-ui.py"
+    "$ROOT/.local/pet-build/venv/bin/python" "$ROOT/scripts/test-pet-sources.py"
   /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network*)' \
     "$ROOT/.local/pet-build/venv/bin/python" "$ROOT/scripts/test-derived-animation-audit.py"
 else
   python3 "$ROOT/scripts/test-pet-library.py"
-  echo 'Pet library UI and derived-animation audit tests skipped: prepared PySide6 runtime is unavailable.'
+  echo 'Pet-source management and derived-animation audit tests skipped: prepared runtime is unavailable.'
 fi
 if [[ -x "$ROOT/.local/pet-build/venv/bin/python" && -f "$ROOT/.local/pet-build/generated-source/DRAGON_PATCH.json" ]]; then
   /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network*)' \
