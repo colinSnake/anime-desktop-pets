@@ -78,19 +78,19 @@ public struct CharacterActionRequestContext: Equatable, Sendable {
     fileprivate let operationID: UUID
     fileprivate let source: Source
     fileprivate let approvalTokenReference: UUID
-    fileprivate let expiresAt: Date
+    fileprivate let expiresAtUptime: TimeInterval
     fileprivate let replayNonce: UUID
     fileprivate let kind: CharacterActionKind
     fileprivate let reversibility: Reversibility
     fileprivate let approvalGranted: Bool
 
     fileprivate init(operationID: UUID, source: Source, approvalTokenReference: UUID,
-                     expiresAt: Date, replayNonce: UUID, kind: CharacterActionKind,
+                     expiresAtUptime: TimeInterval, replayNonce: UUID, kind: CharacterActionKind,
                      reversibility: Reversibility, approvalGranted: Bool) {
         self.operationID = operationID
         self.source = source
         self.approvalTokenReference = approvalTokenReference
-        self.expiresAt = expiresAt
+        self.expiresAtUptime = expiresAtUptime
         self.replayNonce = replayNonce
         self.kind = kind
         self.reversibility = reversibility
@@ -108,40 +108,54 @@ public final class CharacterActionContextIssuer {
 
     private var registrations: [UUID: Registration] = [:]
     private let lifetime: TimeInterval
+    private let uptime: @MainActor () -> TimeInterval
 
     public init(lifetime: TimeInterval = 30) {
         self.lifetime = min(max(lifetime, 1), 120)
+        uptime = { ProcessInfo.processInfo.systemUptime }
+    }
+
+    internal init(lifetime: TimeInterval, uptime: @escaping @MainActor () -> TimeInterval) {
+        self.lifetime = min(max(lifetime, 1), 120)
+        self.uptime = uptime
     }
 
     /// Call only from a concrete user event handler, never with model-provided
     /// provenance. Model suggestions can be registered separately as untrusted.
     public func issueFromUserEvent(kind: CharacterActionKind,
-                                   reversibility: CharacterActionRequestContext.Reversibility = .unknown,
-                                   now: Date = .now) -> CharacterActionRequestContext {
+                                   reversibility: CharacterActionRequestContext.Reversibility = .unknown) -> CharacterActionRequestContext {
         issue(kind: kind, source: .userInitiated, reversibility: reversibility,
-              approvalGranted: false, now: now)
+              approvalGranted: false)
     }
 
-    public func issueAfterUserApproval(kind: CharacterActionKind,
-                                       reversibility: CharacterActionRequestContext.Reversibility = .unknown,
-                                       now: Date = .now) -> CharacterActionRequestContext {
-        issue(kind: kind, source: .userInitiated, reversibility: reversibility,
-              approvalGranted: true, now: now)
+    public func issueAfterUserApproval(for pendingContext: CharacterActionRequestContext) -> CharacterActionRequestContext? {
+        let now = uptime()
+        guard let registration = registrations[pendingContext.approvalTokenReference],
+              registration.context == pendingContext,
+              pendingContext.expiresAtUptime > now,
+              Self.requiresExplicitApproval(pendingContext.kind),
+              case .requireUserApproval = CharacterActionPolicy.decision(for: pendingContext) else {
+            return nil
+        }
+
+        registrations.removeValue(forKey: pendingContext.approvalTokenReference)
+        return issue(kind: pendingContext.kind, source: .userInitiated,
+                     reversibility: pendingContext.reversibility,
+                     approvalGranted: true, operationID: pendingContext.operationID)
     }
 
-    public func issueModelSuggestion(kind: CharacterActionKind,
-                                     now: Date = .now) -> CharacterActionRequestContext {
+    public func issueModelSuggestion(kind: CharacterActionKind) -> CharacterActionRequestContext {
         issue(kind: kind, source: .modelSuggested, reversibility: .unknown,
-              approvalGranted: false, now: now)
+              approvalGranted: false)
     }
 
     /// This is the final local preflight. A token is consumed only if policy
     /// allows the action; every denial, stale context, or replay fails closed.
-    public func authorizeForExecution(_ context: CharacterActionRequestContext,
-                                      now: Date = .now) -> CharacterActionDecision {
+    public func authorizeForExecution(_ context: CharacterActionRequestContext) -> CharacterActionDecision {
+        let now = uptime()
         guard let registration = registrations[context.approvalTokenReference],
               registration.context == context,
-              context.expiresAt > now else {
+              context.expiresAtUptime > now else {
             return .deny("操作凭证无效、已过期或已使用，请重新发起。")
         }
 
@@ -155,15 +169,26 @@ public final class CharacterActionContextIssuer {
                        source: CharacterActionRequestContext.Source,
                        reversibility: CharacterActionRequestContext.Reversibility,
                        approvalGranted: Bool,
-                       now: Date) -> CharacterActionRequestContext {
-        registrations = registrations.filter { $0.value.context.expiresAt > now }
+                       operationID: UUID = UUID()) -> CharacterActionRequestContext {
+        let now = uptime()
+        registrations = registrations.filter { $0.value.context.expiresAtUptime > now }
         let token = UUID()
         let context = CharacterActionRequestContext(
-            operationID: UUID(), source: source, approvalTokenReference: token,
-            expiresAt: now.addingTimeInterval(lifetime), replayNonce: UUID(), kind: kind,
+            operationID: operationID, source: source, approvalTokenReference: token,
+            expiresAtUptime: now + lifetime, replayNonce: UUID(), kind: kind,
             reversibility: reversibility, approvalGranted: approvalGranted
         )
         registrations[token] = Registration(context: context)
         return context
+    }
+
+    private static func requiresExplicitApproval(_ kind: CharacterActionKind) -> Bool {
+        switch kind {
+        case .deleteLocalData, .changeIdentity, .publishExternalContent, .makePayment, .changePermission:
+            return true
+        case .readCharacterData, .writeLocalMemory, .createLocalGoal, .updateLocalGoal,
+             .sendOnlineRequest, .accessCredential, .unknown:
+            return false
+        }
     }
 }

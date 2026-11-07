@@ -1,5 +1,5 @@
 import CharacterCore
-import CharacterUI
+@testable import CharacterUI
 import XCTest
 
 final class CharacterCoreTests: XCTestCase {
@@ -184,86 +184,102 @@ final class CharacterCoreTests: XCTestCase {
 
     func testActionPolicyAllowsOnlyIssuedExplicitReversibleLocalChanges() async {
         await MainActor.run {
-            let issuer = CharacterActionContextIssuer()
-            let now = Date(timeIntervalSince1970: 100)
-            let read = issuer.issueFromUserEvent(kind: .readCharacterData, now: now)
-            XCTAssertEqual(issuer.authorizeForExecution(read, now: now),
+            var uptime: TimeInterval = 100
+            let issuer = CharacterActionContextIssuer(lifetime: 30, uptime: { uptime })
+            let read = issuer.issueFromUserEvent(kind: .readCharacterData)
+            XCTAssertEqual(issuer.authorizeForExecution(read),
                            .allowAutomatically("只读取角色资料目录，不访问其它用户文件。"))
 
             let write = issuer.issueFromUserEvent(kind: .writeLocalMemory,
-                                                  reversibility: .confirmed, now: now)
-            XCTAssertEqual(issuer.authorizeForExecution(write, now: now),
+                                                  reversibility: .confirmed)
+            XCTAssertEqual(issuer.authorizeForExecution(write),
                            .allowAutomatically("用户已明确提出，且变更仅限本机、可撤销。"))
 
-            let unknownReversibility = issuer.issueFromUserEvent(kind: .updateLocalGoal, now: now)
-            XCTAssertEqual(issuer.authorizeForExecution(unknownReversibility, now: now),
+            let unknownReversibility = issuer.issueFromUserEvent(kind: .updateLocalGoal)
+            XCTAssertEqual(issuer.authorizeForExecution(unknownReversibility),
                            .requireUserApproval("变更的撤销能力未确认，需要人工审核。"))
 
-            let suggestion = issuer.issueModelSuggestion(kind: .writeLocalMemory, now: now)
-            XCTAssertEqual(issuer.authorizeForExecution(suggestion, now: now),
+            let suggestion = issuer.issueModelSuggestion(kind: .writeLocalMemory)
+            XCTAssertEqual(issuer.authorizeForExecution(suggestion),
                            .requireUserApproval("必须由用户明确提出，不能从普通对话推断。"))
+            uptime += 1
         }
     }
 
     func testActionPolicyRequiresApprovalForHighImpactAndDeniesCredentialAccess() async {
         await MainActor.run {
             let issuer = CharacterActionContextIssuer()
-            let now = Date(timeIntervalSince1970: 100)
             let protectedKinds: [CharacterActionKind] = [
                 .deleteLocalData, .changeIdentity, .publishExternalContent, .makePayment, .changePermission
             ]
             for kind in protectedKinds {
                 guard case .requireUserApproval = issuer.authorizeForExecution(
-                    issuer.issueFromUserEvent(kind: kind, now: now), now: now
+                    issuer.issueFromUserEvent(kind: kind)
                 ) else {
                     return XCTFail("\(kind.rawValue) must require approval")
                 }
             }
 
-            let credential = issuer.issueFromUserEvent(kind: .accessCredential, now: now)
-            XCTAssertEqual(issuer.authorizeForExecution(credential, now: now),
+            let credential = issuer.issueFromUserEvent(kind: .accessCredential)
+            XCTAssertEqual(issuer.authorizeForExecution(credential),
                            .deny("桌边小崽不读取或暴露密码、API Key、Token 等凭证。"))
 
-            let unknown = issuer.issueModelSuggestion(kind: .unknown, now: now)
-            XCTAssertEqual(issuer.authorizeForExecution(unknown, now: now),
+            let unknown = issuer.issueModelSuggestion(kind: .unknown)
+            XCTAssertEqual(issuer.authorizeForExecution(unknown),
                            .requireUserApproval("未知动作不得自动执行。"))
         }
     }
 
     func testActionContextIsOneTimeExpiresAndCannotCrossIssuer() async {
         await MainActor.run {
-            let now = Date(timeIntervalSince1970: 100)
-            let issuer = CharacterActionContextIssuer(lifetime: 5)
-            let context = issuer.issueFromUserEvent(kind: .sendOnlineRequest, now: now)
-            XCTAssertEqual(issuer.authorizeForExecution(context, now: now),
+            var uptime: TimeInterval = 100
+            let issuer = CharacterActionContextIssuer(lifetime: 5, uptime: { uptime })
+            let context = issuer.issueFromUserEvent(kind: .sendOnlineRequest)
+            XCTAssertEqual(issuer.authorizeForExecution(context),
                            .allowAutomatically("用户已明确发起本轮请求；身份和记忆分享仍分别受授权控制。"))
-            XCTAssertEqual(issuer.authorizeForExecution(context, now: now),
+            XCTAssertEqual(issuer.authorizeForExecution(context),
                            .deny("操作凭证无效、已过期或已使用，请重新发起。"))
 
-            let foreign = CharacterActionContextIssuer().issueFromUserEvent(kind: .readCharacterData, now: now)
-            XCTAssertEqual(issuer.authorizeForExecution(foreign, now: now),
+            let foreignIssuer = CharacterActionContextIssuer(lifetime: 5, uptime: { uptime })
+            let foreign = foreignIssuer.issueFromUserEvent(kind: .readCharacterData)
+            XCTAssertEqual(issuer.authorizeForExecution(foreign),
                            .deny("操作凭证无效、已过期或已使用，请重新发起。"))
 
-            let expired = issuer.issueFromUserEvent(kind: .readCharacterData, now: now)
-            XCTAssertEqual(issuer.authorizeForExecution(expired, now: now.addingTimeInterval(6)),
+            let expired = issuer.issueFromUserEvent(kind: .readCharacterData)
+            uptime += 6
+            XCTAssertEqual(issuer.authorizeForExecution(expired),
                            .deny("操作凭证无效、已过期或已使用，请重新发起。"))
         }
     }
 
     func testSensitiveActionNeedsFreshApprovalContext() async {
         await MainActor.run {
-            let issuer = CharacterActionContextIssuer()
-            let now = Date(timeIntervalSince1970: 100)
-            let request = issuer.issueFromUserEvent(kind: .publishExternalContent, now: now)
-            guard case .requireUserApproval = issuer.authorizeForExecution(request, now: now) else {
+            var uptime: TimeInterval = 100
+            let issuer = CharacterActionContextIssuer(lifetime: 5, uptime: { uptime })
+            let request = issuer.issueFromUserEvent(kind: .publishExternalContent)
+            guard case .requireUserApproval = issuer.authorizeForExecution(request) else {
                 return XCTFail("Unapproved external action must not pass")
             }
 
-            let approved = issuer.issueAfterUserApproval(kind: .publishExternalContent, now: now)
-            XCTAssertEqual(issuer.authorizeForExecution(approved, now: now),
+            guard let approved = issuer.issueAfterUserApproval(for: request) else {
+                return XCTFail("A valid pending external action should be approvable")
+            }
+            XCTAssertEqual(issuer.authorizeForExecution(approved),
                            .allowAutomatically("用户已对本次明确操作作出确认。"))
-            XCTAssertEqual(issuer.authorizeForExecution(approved, now: now),
+            XCTAssertEqual(issuer.authorizeForExecution(approved),
                            .deny("操作凭证无效、已过期或已使用，请重新发起。"))
+            XCTAssertNil(issuer.issueAfterUserApproval(for: request), "A pending approval can be renewed only once")
+
+            let foreignIssuer = CharacterActionContextIssuer(lifetime: 5, uptime: { uptime })
+            let foreignRequest = foreignIssuer.issueFromUserEvent(kind: .makePayment)
+            XCTAssertNil(issuer.issueAfterUserApproval(for: foreignRequest), "Approval cannot cross issuers")
+
+            let expired = issuer.issueFromUserEvent(kind: .changeIdentity)
+            uptime += 6
+            XCTAssertNil(issuer.issueAfterUserApproval(for: expired), "Expired actions cannot be approved")
+
+            let credential = issuer.issueFromUserEvent(kind: .accessCredential)
+            XCTAssertNil(issuer.issueAfterUserApproval(for: credential), "Credential access cannot be approved")
         }
     }
 }
