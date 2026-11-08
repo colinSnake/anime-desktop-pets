@@ -328,6 +328,40 @@ class UITests(unittest.TestCase):
         self.bubble.is_speech_reply = True
         self.bubble.message('你好，龙妹');APP.processEvents()
         self.assertFalse(self.bubble.is_speech_reply)
+    def test_bubble_announces_visible_messages_and_can_suppress_replies(self):
+        announced=[]
+        self.bubble.speech_callback=announced.append
+        self.bubble.message('收到任务。',speak=True)
+        self.bubble.flush_speech()
+        self.assertEqual(announced,['收到任务。'])
+        self.bubble.message('语音回复。',speak=False)
+        self.bubble.flush_speech()
+        self.assertEqual(announced,['收到任务。'])
+    def test_task_and_quota_bubbles_announce_latest_status(self):
+        announced=[]
+        self.bubble.speech_callback=announced.append
+        self.bubble.task_result('任务完成','代码和日志详情',lambda:None)
+        self.bubble.flush_speech()
+        self.assertEqual(announced,['任务完成。代码和日志详情'])
+        self.bubble.quota([{'name':'5小时','remaining':62.5,'resetsAt':None}])
+        self.bubble.flush_speech()
+        self.assertEqual(announced[-1],'额度查询完成。5小时剩余62.5%')
+        self.bubble.quota([])
+        self.bubble.flush_speech()
+        self.assertEqual(announced[-1],'额度查询完成。暂无额度数据')
+    def test_busy_popup_defers_and_new_bubble_replaces_pending_speech(self):
+        from unittest.mock import patch
+        announced=[]
+        self.bubble.speech_callback=announced.append
+        self.bubble.message('旧气泡')
+        self.bubble.message('最新气泡')
+        with patch.object(QApplication,'activeModalWidget',return_value=None), \
+                patch.object(QApplication,'activePopupWidget',return_value=object()):
+            self.bubble.flush_speech()
+            self.assertEqual(announced,[])
+            self.assertEqual(self.bubble._pending_speech,'最新气泡')
+        self.bubble.flush_speech()
+        self.assertEqual(announced,['最新气泡'])
     def test_message_font_loader_warns_when_missing_and_registers_exact_family(self):
         from unittest.mock import patch
         dragon_ui._MESSAGE_FONT_CHECKED = False
@@ -608,11 +642,11 @@ class BehaviorTests(unittest.TestCase):
         self.behavior.next_at = self.now
         self.behavior.tick()
 
-    def test_jitter_interval_and_silent_nonrepeating_animation(self):
+    def test_jitter_interval_and_speaking_nonrepeating_animation(self):
         self.behavior.motion_enabled = False
         self.behavior.next_greeting_at = float('inf')
         chosen = []
-        with patch.object(self.pet, 'say', side_effect=AssertionError('自动弹窗')), \
+        with patch.object(self.pet, 'say') as say, \
              patch.object(self.pet, 'play_click_sound', side_effect=AssertionError('自动声音')), \
              patch.object(self.pet, 'quota', side_effect=AssertionError('自动联网')):
             for _ in range(8):
@@ -626,6 +660,7 @@ class BehaviorTests(unittest.TestCase):
                 self.now += 45
         self.assertTrue(all(a != b for a, b in zip(chosen, chosen[1:])))
         self.assertFalse(self.pet.task_active)
+        self.assertTrue(say.call_count)
 
     def test_busy_hidden_drag_task_quota_and_user_animation_defer(self):
         cases = [('dragging', True), ('task_active', True), ('quota_inflight', True),
@@ -1933,6 +1968,9 @@ class ReleasePresentationTests(unittest.TestCase):
         for prefix in ('move02','move03'):
             for direction in (-1,1):
                 with self.subTest(prefix=prefix,direction=direction):
+                    # Scheduled speech now shows a bubble; isolate the next
+                    # synthetic drag from the previous subtest's UI state.
+                    self.pet.bubble.close()
                     self.behavior.interrupt()
                     self.behavior.drag_samples.clear()
                     self.behavior.drag_samples.extend([(self.now-.1,100,100),(self.now,100+direction*50,100)])

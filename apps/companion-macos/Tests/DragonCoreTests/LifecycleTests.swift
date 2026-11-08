@@ -144,4 +144,11 @@ final class ControlMessageTests: XCTestCase {
     func testUnknownCommandRejected() {
         XCTAssertThrowsError(try JSONDecoder().decode(ControlRequest.self, from: Data("{\"command\":\"run-shell\"}".utf8)))
     }
+
+    func testSpeakCommandCarriesOnlyTextPayload() throws {
+        let request = ControlRequest(.speak, text: "主人，休息一下吧。")
+        let decoded = try JSONDecoder().decode(ControlRequest.self, from: JSONEncoder().encode(request))
+        XCTAssertEqual(decoded.command, .speak)
+        XCTAssertEqual(decoded.text, request.text)
+    }
 }

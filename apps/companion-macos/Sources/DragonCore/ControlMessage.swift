@@ -1,11 +1,14 @@
 import Foundation
 
 public enum ControlCommand: String, Codable, CaseIterable, Sendable {
-    case status, show, hide, dismiss, pause, resume, quit
+    case status, show, hide, dismiss, pause, resume, quit, speak
 }
 public struct ControlRequest: Codable, Sendable {
     public let command: ControlCommand
-    public init(_ command: ControlCommand) { self.command = command }
+    public let text: String?
+    public init(_ command: ControlCommand, text: String? = nil) {
+        self.command = command; self.text = text
+    }
 }
 public struct CompanionStatus: Codable, Sendable {
     public let ok: Bool

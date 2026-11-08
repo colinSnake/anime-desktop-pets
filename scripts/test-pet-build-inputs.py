@@ -75,6 +75,11 @@ class BuildInputsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'dragon_tasks.py'):
             module.check(self.app, self.root)
 
+    def test_speech_cue_change_is_detected(self):
+        (self.root / 'apps/pet-runtime/bailong/dragon_speech.py').write_text('speech cue changed')
+        with self.assertRaisesRegex(ValueError, 'dragon_speech.py'):
+            module.check(self.app, self.root)
+
     def test_pre_monorepo_path_snapshot_is_rejected(self):
         old = {}
         for key, value in module.fingerprints(self.root).items():

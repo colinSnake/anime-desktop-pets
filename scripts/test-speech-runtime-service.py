@@ -6,6 +6,7 @@ import io
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -13,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "apps" / "speech-runtime"))
 
 from protocol import MAX_COMMAND_BYTES, decode_command
-from stdio_service import SilentPlayer, SoundDevicePlayer, amplify_pcm16, serve
+from stdio_service import SilentPlayer, SoundDevicePlayer, serve
 
 
 class FakeBackend:
@@ -34,47 +35,35 @@ class FakeBackend:
 class FakePlayer:
     def __init__(self):
         self.chunks = []
+        self.finished = 0
         self.closed = False
 
     def write(self, chunk):
         self.chunks.append(chunk)
+
+    def finish_turn(self):
+        self.finished += 1
 
     def close(self):
         self.closed = True
 
 
 class ProtocolTests(unittest.TestCase):
-    def test_speech_output_gain_boosts_quiet_audio_and_limits_peaks(self):
-        import array
-
-        source = array.array("h", [1000, -1000, 30000, -32768]).tobytes()
-        if sys.byteorder != "little":
-            values = array.array("h")
-            values.frombytes(source)
-            values.byteswap()
-            source = values.tobytes()
-
-        amplified = array.array("h")
-        amplified.frombytes(amplify_pcm16(source))
-        if sys.byteorder != "little":
-            amplified.byteswap()
-
-        self.assertEqual(amplified.tolist(), [1800, -1800, 32767, -32768])
-        with self.assertRaises(ValueError):
-            amplify_pcm16(b"\x00")
-
     def test_silent_player_never_imports_or_opens_an_audio_device(self):
         player = SilentPlayer(24000)
         self.assertEqual(player.sample_rate, 24000)
         self.assertIsNone(player.write(b"\x10\x00"))
         self.assertIsNone(player.close())
 
-    def test_speaker_output_opens_lazily_and_closes_after_turn(self):
+    def test_speaker_output_stays_warm_between_turns_and_closes_on_shutdown(self):
         calls = []
+        written = threading.Event()
 
         class Stream:
             def start(self): calls.append("start")
-            def write(self, chunk): calls.append(("write", chunk))
+            def write(self, chunk):
+                calls.append(("write", chunk))
+                written.set()
             def stop(self): calls.append("stop")
             def close(self): calls.append("close")
 
@@ -85,12 +74,27 @@ class ProtocolTests(unittest.TestCase):
         with patch.dict(sys.modules, {"sounddevice": fake_sounddevice}):
             player = SoundDevicePlayer(24000)
             self.assertEqual(calls, [])
-            player.write(b"\x10\x00")
+            player.write(b"\x10\x00\x20\x00")
+            player.finish_turn()
+            player.write(b"\x30\x00\x40\x00")
+            player.finish_turn()
+            self.assertEqual([call for call in calls if call == "start"], ["start"])
+            self.assertEqual([call for call in calls if call == "stop"], [])
+            self.assertEqual([call for call in calls if call == "close"], [])
             player.close()
             player.close()
 
+        self.assertTrue(written.wait(1))
         self.assertEqual([call for call in calls if call in ("start", "stop", "close")],
                          ["start", "stop", "close"])
+        self.assertIn(("write", b"\x10\x00\x20\x00"), calls)
+        self.assertIn(("write", b"\x30\x00\x40\x00"), calls)
+
+    def test_speaker_output_rejects_partial_pcm_sample(self):
+        player = SoundDevicePlayer(24000)
+        with self.assertRaises(ValueError):
+            player.write(b"\x00")
+        player.close()
 
     def test_accepts_only_supported_command_shapes(self):
         command, error = decode_command('{"type":"chat","platform":"bilibili","text":"你好"}')
@@ -189,6 +193,7 @@ class ServiceLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([event["state"] for event in events if event["type"] == "session"],
                          ["thinking", "reply", "speaking", "audio_started", "idle"])
         self.assertEqual(player.chunks, [b"\x10\x00"])
+        self.assertEqual(player.finished, 1)
         self.assertTrue(player.closed)
         self.assertNotIn("合成弹幕", repr(events))
 

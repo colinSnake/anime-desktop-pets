@@ -584,7 +584,7 @@ class AutonomousBehavior:
             if self.pet.manifest.get('movementAnimations'):
                 if self.perform_movement(preview=preview):
                     return True
-                return self._perform_action_unchecked()
+                return self._perform_action(preview=preview)
             kinds = [kind for kind in self.KINDS if kind != self.last_kind]
             kind = self.rng.choice(kinds)
             screen = QApplication.screenAt(self.pet.frameGeometry().center()) or QApplication.primaryScreen()
@@ -607,7 +607,19 @@ class AutonomousBehavior:
             return False
         self.last_action = item['id']
         self._play(item, 'variant')
+        # 自主调度动作也沿用互动气泡语音开关；没有台词的素材只播放动画。
+        line = item.get('line', '')
+        if not getattr(self, '_suppress_scheduled_speech', False) and line:
+            self.pet.say(line, ms=4000)
         return True
+
+    def _perform_action(self, *, preview=False):
+        previous = getattr(self, '_suppress_scheduled_speech', False)
+        self._suppress_scheduled_speech = bool(preview)
+        try:
+            return self._perform_action_unchecked()
+        finally:
+            self._suppress_scheduled_speech = previous
 
     def perform_action(self, preview=False):
         """手动“表演一套动作”只选动作池，不误触发移动轨迹。"""
@@ -617,7 +629,7 @@ class AutonomousBehavior:
             self.defer()
             return False
         self.defer()
-        return self._perform_action_unchecked()
+        return self._perform_action(preview=preview)
 
     def perform_movement(self, item=None, preview=False, *, released=False, velocity=(0., 0.)):
         """菜单只增加动作入口，定时调用静默；任务和减少动态效果始终优先。"""

@@ -137,6 +137,9 @@ final class PetInstanceRuntime {
         }
         child.currentDirectoryURL = executable.deletingLastPathComponent()
         var environment = ["BAILONG_DATA_DIR": profile.path]
+        // The helper is owned by this host. It also watches this PID so an
+        // unexpected host exit cannot leave a visible orphan behind.
+        environment["BAILONG_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
         environment["BAILONG_PET_LIBRARY_DIR"] = runtime.petLibraryURL.path
         environment["DRAGON_TASK_LEASE"] = taskFollowingAllowed ? runtime.state.appendingPathComponent("codex-task-lease.json").path : ""
         if let assetsURL = runtime.configuration.externalPetAssetsURL(relativeTo: runtime.resources) {
@@ -294,8 +297,31 @@ final class PetInstanceRuntime {
                 guard let process, process.isRunning else { break }
                 Thread.sleep(forTimeInterval: 0.1)
             }
-            let timedOut = process?.isRunning == true
-            RunLoop.main.perform(inModes: [.default, .modalPanel]) { [weak self] in
+            var timedOut = process?.isRunning == true
+            if timedOut, let process {
+                DispatchQueue.main.async { [weak self] in
+                    self?.onDiagnostic?("multi-pet.shutdown-timeout; sending terminate")
+                }
+                process.terminate()
+                for _ in 0..<10 {
+                    guard process.isRunning else { break }
+                    Thread.sleep(forTimeInterval: 0.1)
+                }
+                if process.isRunning {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.onDiagnostic?("multi-pet.shutdown-terminate-timeout; forcing owned helper to exit")
+                    }
+                    _ = kill(process.processIdentifier, SIGKILL)
+                    for _ in 0..<10 {
+                        guard process.isRunning else { break }
+                        Thread.sleep(forTimeInterval: 0.1)
+                    }
+                }
+                timedOut = process.isRunning
+            }
+            // Termination runs a nested AppKit event loop in event-tracking
+            // mode; without it the waiter never reaches the application reply.
+            RunLoop.main.perform(inModes: [.default, .modalPanel, .eventTracking]) { [weak self] in
                 guard let self else { return }
                 MainActor.assumeIsolated {
                     if timedOut { self.onDiagnostic?("multi-pet.shutdown-timeout") }

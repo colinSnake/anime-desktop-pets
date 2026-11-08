@@ -5,7 +5,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSize, QRectF, QPointF, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QSize, QRectF, QPointF, QPropertyAnimation, QEasingCurve, QTimer
 from PySide6.QtGui import (QFontDatabase, QFontMetricsF, QPainter, QColor,
                           QTextOption, QTextCursor, QTextBlockFormat,
                           QPainterPath, QPen, QPalette)
@@ -223,6 +223,11 @@ class Bubble(QWidget):
         self.is_speech_reply = False
         self.is_task_progress = self.is_quota_result = False
         self.kind = 'message'
+        self.speech_callback = None
+        self._pending_speech = None
+        self.speech_timer = QTimer(self)
+        self.speech_timer.setSingleShot(True)
+        self.speech_timer.timeout.connect(self.flush_speech)
         self.preferred_width = 260
         self.text_cap = 168
         self.fade = QPropertyAnimation(self, b'windowOpacity', self)
@@ -302,6 +307,8 @@ class Bubble(QWidget):
                 self.fade.start()
 
     def hideEvent(self, event):
+        self.speech_timer.stop()
+        self._pending_speech = None
         self.fade.stop()
         self.setWindowOpacity(1)
         super().hideEvent(event)
@@ -335,7 +342,33 @@ class Bubble(QWidget):
         self._reflow(area)
         self.show()
 
-    def message(self, text):
+    def announce(self, text, *, speak=True):
+        if not speak or self.is_speech_reply or self.speech_callback is None:
+            self.speech_timer.stop()
+            self._pending_speech = None
+            return
+        self._pending_speech = text
+        self.speech_timer.start(300)
+
+    def flush_speech(self):
+        if self._pending_speech is None:
+            return
+        if not self.isVisible():
+            self._pending_speech = None
+            return
+        if (QApplication.activeModalWidget() is not None or
+                QApplication.activePopupWidget() is not None):
+            self.speech_timer.start(250)
+            return
+        text, self._pending_speech = self._pending_speech, None
+        callback = self.speech_callback
+        if callback is not None and not self.is_speech_reply:
+            try:
+                callback(text)
+            except Exception:
+                pass
+
+    def message(self, text, *, speak=True):
         self.kind = 'message'
         self.is_followed_work = False
         self.is_speech_reply = False
@@ -348,6 +381,7 @@ class Bubble(QWidget):
         self.result_view.document().setDefaultFont(self.result_view.font())
         self.result_view.fit()
         self.finish()
+        self.announce(text, speak=speak)
 
     def task_result(self, title, text, details):
         self.kind = 'result'
@@ -369,6 +403,7 @@ class Bubble(QWidget):
         button.clicked.connect(lambda checked=False: details())
         self.layout.addWidget(button, 0, Qt.AlignmentFlag.AlignRight)
         self.finish()
+        self.announce(title + '。' + text)
 
     def quota(self, windows, refreshed_at=None, refresh=None):
         self.kind = 'quota'
@@ -460,6 +495,20 @@ class Bubble(QWidget):
         if refreshed_at and not is_balance:
             self.label('查询于 ' + refreshed_at.strftime('%H:%M'), cap=20, muted=True, line_height=140)
         self.finish()
+        try:
+            if is_balance:
+                window = next(w for w in windows if w.get('kind') == 'balance')
+                summary = f"{window['name']}余额 {window['remaining']:,.2f} {window['unit']}"
+            else:
+                entries = [
+                    f"{window['name']}剩余{window['remaining']:g}%"
+                    if window.get('remaining') is not None else f"{window['name']}暂无额度数据"
+                    for window in windows if window.get('kind') != 'balance'
+                ]
+                summary = '额度查询完成。' + ('；'.join(entries) if entries else '暂无额度数据')
+        except (KeyError, TypeError, ValueError, StopIteration):
+            summary = '额度查询完成，详情请查看气泡。'
+        self.announce(summary)
 
     def separator(self):
         line = QFrame(self)

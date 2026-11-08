@@ -11,6 +11,7 @@ final class SpeechSettingsStoreTests: XCTestCase {
         XCTAssertEqual(settings, SpeechSettings())
         XCTAssertTrue(settings.displayReplies)
         XCTAssertFalse(settings.speakReplies)
+        XCTAssertFalse(settings.speakInteractiveBubbles)
         XCTAssertTrue(settings.referenceAudioPath.isEmpty)
     }
 
@@ -26,6 +27,7 @@ final class SpeechSettingsStoreTests: XCTestCase {
         settings.referenceTranscript = "准确转写内容"
         settings.microphoneUID = "BuiltInMicrophoneDevice"
         settings.speakReplies = false
+        settings.speakInteractiveBubbles = true
 
         try store.save(settings)
 
@@ -46,7 +48,65 @@ final class SpeechSettingsStoreTests: XCTestCase {
         XCTAssertNil(settings.referenceAudioBookmark)
         XCTAssertTrue(settings.referenceTranscript.isEmpty)
         XCTAssertFalse(settings.speakReplies)
+        XCTAssertFalse(settings.speakInteractiveBubbles)
         XCTAssertNil(settings.microphoneUID)
+    }
+
+    func testInteractiveBubbleSpeechIsIndependentFromReplySpeech() throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SpeechSettingsStore(stateDirectory: root)
+        var settings = SpeechSettings()
+        settings.referenceAudioPath = "/Users/test/voice.wav"
+        settings.referenceAudioBookmark = Data([1, 2, 3, 4])
+        settings.referenceTranscript = "准确转写内容"
+        settings.speakReplies = true
+        settings.speakInteractiveBubbles = false
+
+        try store.save(settings)
+        let loaded = try store.load()
+
+        XCTAssertTrue(loaded.speakReplies)
+        XCTAssertFalse(loaded.speakInteractiveBubbles)
+    }
+
+    func testInteractiveBubbleToggleChangesOnlyItsOwnPreference() throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SpeechSettingsStore(stateDirectory: root)
+        var settings = SpeechSettings()
+        settings.referenceAudioPath = "/Users/test/voice.wav"
+        settings.referenceAudioBookmark = Data([1, 2, 3, 4])
+        settings.referenceTranscript = "准确转写内容"
+        settings.speakReplies = true
+        try store.save(settings)
+
+        let enabled = try store.toggleInteractiveBubbleSpeech()
+        XCTAssertTrue(enabled.speakInteractiveBubbles)
+        XCTAssertTrue(enabled.speakReplies)
+        XCTAssertEqual(try store.load(), enabled)
+
+        let disabled = try store.toggleInteractiveBubbleSpeech()
+        XCTAssertFalse(disabled.speakInteractiveBubbles)
+        XCTAssertTrue(disabled.speakReplies)
+    }
+
+    func testInteractiveBubbleToggleRequiresReferenceAndDoesNotWriteOnRejection() throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SpeechSettingsStore(stateDirectory: root)
+
+        XCTAssertThrowsError(try store.toggleInteractiveBubbleSpeech()) { error in
+            XCTAssertEqual(error as? SpeechSettings.StoreError, .missingInteractiveSpeechReference)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.fileURL.path))
+        var disabled = SpeechSettings()
+        disabled.referenceAudioPath = "/Users/test/voice.wav"
+        disabled.referenceAudioBookmark = Data([1, 2, 3, 4])
+        disabled.referenceTranscript = "准确转写内容"
+        try store.save(disabled)
+        XCTAssertTrue(try store.toggleInteractiveBubbleSpeech().speakInteractiveBubbles)
+        XCTAssertFalse(try store.toggleInteractiveBubbleSpeech().speakInteractiveBubbles)
     }
 
     func testLegacySettingsWithoutMicrophoneSelectionRemainCompatible() throws {
@@ -58,6 +118,19 @@ final class SpeechSettingsStoreTests: XCTestCase {
         try legacy.write(to: SpeechSettingsStore(stateDirectory: root).fileURL)
 
         XCTAssertNil(try SpeechSettingsStore(stateDirectory: root).load().microphoneUID)
+    }
+
+    func testLegacyInteractiveSpeechDoesNotInheritReplySpeechPreference() throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let legacy = Data("""
+        {"schemaVersion":1,"platform":"bilibili","roomIdentifier":"","referenceAudioPath":"/tmp/voice.wav","referenceAudioBookmark":"AQID","referenceTranscript":"准确转写","displayReplies":true,"speakReplies":true}
+        """.utf8)
+        try legacy.write(to: SpeechSettingsStore(stateDirectory: root).fileURL)
+
+        let settings = try SpeechSettingsStore(stateDirectory: root).load()
+        XCTAssertTrue(settings.speakReplies)
+        XCTAssertFalse(settings.speakInteractiveBubbles)
     }
 
     func testRejectsUnknownPlatformAndControlCharacters() {

@@ -13,6 +13,8 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
     private var server: ControlSocket?
     private var coordinator: Coordinator?
     private var terminating = false
+    private var terminationReplySent = false
+    private var terminationTimeout: Timer?
     private(set) var exitStatus: Int32 = 0
     init(runtime: Runtime, mode: Coordinator.Mode) { self.runtime = runtime; self.mode = mode }
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -34,8 +36,27 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
         guard let coordinator else { return .terminateNow }
         guard !terminating else { return .terminateLater }
         terminating = true
+        let timeout = Timer(timeInterval: 16, repeats: false) { [weak self, weak sender] _ in
+            MainActor.assumeIsolated {
+                guard let self, let sender, !self.terminationReplySent else { return }
+                self.terminationReplySent = true
+                self.terminationTimeout = nil
+                fputs("Dragon: shutdown exceeded 16 seconds; allowing host application to exit.\n", stderr)
+                sender.reply(toApplicationShouldTerminate: true)
+            }
+        }
+        terminationTimeout = timeout
+        RunLoop.main.add(timeout, forMode: .common)
+        // AppKit re-enters the run loop in event-tracking mode while waiting
+        // for terminateLater. A timer in common/default modes alone can never
+        // fire here, leaving the agent stuck even after its children exit.
+        RunLoop.main.add(timeout, forMode: .eventTracking)
         coordinator.stop()
         coordinator.finishStopping {
+            guard !self.terminationReplySent else { return }
+            self.terminationReplySent = true
+            self.terminationTimeout?.invalidate()
+            self.terminationTimeout = nil
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater

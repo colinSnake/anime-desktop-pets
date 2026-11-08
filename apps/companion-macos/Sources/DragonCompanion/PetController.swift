@@ -106,7 +106,7 @@ final class PetController: NSObject {
         // AppKit termination runs a nested modal loop; the main dispatch queue
         // may already be inside terminate(). Deliver in the modal run-loop mode.
         windowCommandQueue.async {
-            RunLoop.main.perform(inModes: [.default, .modalPanel]) {
+            RunLoop.main.perform(inModes: [.default, .modalPanel, .eventTracking]) {
                 MainActor.assumeIsolated { completion() }
             }
         }

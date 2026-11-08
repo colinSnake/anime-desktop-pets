@@ -1,0 +1,28 @@
+--- a/app/pet.py
++++ b/app/pet.py
+@@ -442,9 +442,14 @@
+             score=max(0,overlap.width())*max(0,overlap.height())
+             positions.append((score,x,y))
+         _,x,y=min(positions,key=lambda item:item[0]);self.bubble.move(x,y)
+-    def say(self,text,ms=4000):
++    def speak_bubble(self,text):
++        from dragon_speech import speech_display_ms, speech_summary
++        self.bubble_timer.stop()
++        self.speech_cue.send_async(speech_summary(text))
++        self.bubble_timer.start(speech_display_ms(text))
++    def say(self,text,ms=4000,*,speak=True):
+         if self.speech_hidden():return
+-        self.bubble_timer.stop();self.bubble.message(text);self.position_bubble()
++        self.bubble_timer.stop();self.bubble.message(text,speak=speak);self.position_bubble()
+         if ms:self.bubble_timer.start(ms)
+     def dismiss_bubble(self):
+         self.bubble.hide()
+@@ -565,7 +568,7 @@
+                 except RuntimeError:pass
+     def choose(self,item):
+         self.click_timer.stop();self.last_click=None;self.generation+=1
+-        try:self.play_click_sound();self.play(item,'variant');self.say(item.get('line',''),4000)
++        try:self.play_click_sound();self.play(item,'variant');self.say(item.get('line',''),4000,speak=True)
+         except Exception as error:self.idle();self.say('唔，主人，这个动作暂时没能准备好：'+str(error))
+     def single_click(self):
+         self.last_click=None

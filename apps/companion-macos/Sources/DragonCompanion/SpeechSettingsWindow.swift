@@ -21,6 +21,7 @@ final class SpeechSettingsWindow: NSWindowController, NSWindowDelegate {
     private let transcript = NSTextField(string: "")
     private let display = NSButton(checkboxWithTitle: "在桌宠气泡中显示生成的回复", target: nil, action: nil)
     private let speak = NSButton(checkboxWithTitle: "朗读生成的回复（播放到扬声器）", target: nil, action: nil)
+    private let speakInteractive = NSButton(checkboxWithTitle: "朗读桌宠互动气泡", target: nil, action: nil)
     private let status = NSTextField(wrappingLabelWithString: "回复由“模型管理”中配置的在线服务生成；语音识别在本机完成。")
     private let saveButton = NSButton(title: "保存", target: nil, action: nil)
     private let demoButton = NSButton(title: "运行在线模型演示", target: nil, action: nil)
@@ -47,6 +48,11 @@ final class SpeechSettingsWindow: NSWindowController, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         voiceRecorder.cancel()
         isTestingMicrophone = false
+    }
+
+    func setInteractiveBubbleSpeechEnabled(_ enabled: Bool) {
+        settings.speakInteractiveBubbles = enabled
+        speakInteractive.state = enabled ? .on : .off
     }
 
     private func buildContent() {
@@ -90,6 +96,8 @@ final class SpeechSettingsWindow: NSWindowController, NSWindowDelegate {
         display.action = #selector(changedPreference)
         speak.target = self
         speak.action = #selector(changedPreference)
+        speakInteractive.target = self
+        speakInteractive.action = #selector(changedPreference)
 
         status.textColor = .secondaryLabelColor
         let credentialNote = NSTextField(wrappingLabelWithString:
@@ -148,7 +156,7 @@ final class SpeechSettingsWindow: NSWindowController, NSWindowDelegate {
         room.widthAnchor.constraint(greaterThanOrEqualToConstant: 300).isActive = true
         transcript.widthAnchor.constraint(greaterThanOrEqualToConstant: 300).isActive = true
 
-        let stack = NSStackView(views: [title, note, fields, display, speak, voiceChatButton, credentialNote, footer])
+        let stack = NSStackView(views: [title, note, fields, display, speak, speakInteractive, voiceChatButton, credentialNote, footer])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 16
@@ -222,6 +230,7 @@ final class SpeechSettingsWindow: NSWindowController, NSWindowDelegate {
         }
         display.state = value.displayReplies ? .on : .off
         speak.state = value.speakReplies ? .on : .off
+        speakInteractive.state = value.speakInteractiveBubbles ? .on : .off
         if !value.referenceAudioPath.isEmpty {
             reference.stringValue = URL(fileURLWithPath: value.referenceAudioPath).lastPathComponent
             reference.toolTip = value.referenceAudioPath
@@ -237,6 +246,7 @@ final class SpeechSettingsWindow: NSWindowController, NSWindowDelegate {
     @objc private func changedPreference() {
         settings.displayReplies = display.state == .on
         settings.speakReplies = speak.state == .on
+        settings.speakInteractiveBubbles = speakInteractive.state == .on
         settings.referenceTranscript = transcript.stringValue
     }
 

@@ -266,9 +266,33 @@ def main(argv=None):
     controller = InstanceController(store, _factory, parent=app)
     server = InstanceCommandServer(controller, parent=app)
     speech_server = SpeechPresentationServer(controller, profile, parent=app)
+
+    # The host normally sends an explicit shutdown command. Keep a second,
+    # bounded ownership guard for crashes, force-quits, or a host timeout: a
+    # Qt helper must never survive as a visible orphan after its owner exits.
+    parent_watch = None
+    raw_parent_pid = os.environ.get('BAILONG_PARENT_PID', '').strip()
+    try:
+        parent_pid = int(raw_parent_pid) if raw_parent_pid else 0
+    except ValueError:
+        parent_pid = 0
+    if parent_pid > 1 and parent_pid != os.getpid():
+        parent_watch = QTimer(app)
+        parent_watch.setInterval(250)
+
+        def check_parent():
+            if os.getppid() != parent_pid:
+                parent_watch.stop()
+                controller.shutdown()
+
+        parent_watch.timeout.connect(check_parent)
+        parent_watch.start()
+
     # The controller confirms all windows first; the server quits only after
     # the shutdown acknowledgement has been flushed and connections drained.
     server.finished.connect(app.quit)
+    if parent_watch is not None:
+        server.finished.connect(parent_watch.stop)
     app.aboutToQuit.connect(server.close)
     app.aboutToQuit.connect(speech_server.close)
     return app.exec()

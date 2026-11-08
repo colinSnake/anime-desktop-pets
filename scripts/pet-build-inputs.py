@@ -16,7 +16,7 @@ def fingerprints(root=ROOT):
              root / 'scripts/extra-animation-overlay.py', root / 'scripts/prepare-release-animations.py']
     paths += sorted(p for p in (root / 'integrations/bailong').iterdir() if p.is_file())
     paths += [root / 'apps/pet-runtime/bailong' / name for name in
-              ('dragon_frames.py', 'dragon_ui.py', 'dragon_behavior.py', 'dragon_playback.py', 'dragon_tasks.py', 'dragon_quota.py', 'dragon_visibility.py')]
+              ('dragon_frames.py', 'dragon_ui.py', 'dragon_behavior.py', 'dragon_playback.py', 'dragon_tasks.py', 'dragon_quota.py', 'dragon_visibility.py', 'dragon_speech.py')]
     paths += [root / 'apps/pet-runtime/pets' / name for name in
               ('dragon_instances.py', 'dragon_instance_ipc.py', 'dragon_pet_helper.py', 'pet_reference_lock.py', 'pet_library.py', 'pet_sources.py')]
     return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}

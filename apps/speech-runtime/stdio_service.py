@@ -2,12 +2,13 @@
 
 import argparse
 import asyncio
-from array import array
 from contextlib import redirect_stdout
 import json
 from pathlib import Path
+import queue as thread_queue
 import stat
 import sys
+import threading
 
 from mlx_backend import LocalMLXBackend
 from protocol import MAX_COMMAND_BYTES, decode_command
@@ -16,49 +17,109 @@ from session import SessionEvent, SpeechSession
 
 
 class SoundDevicePlayer:
+    """Play PCM chunks through a persistent blocking-output buffer.
+
+    TTS generation and PortAudio writes run at different cadences.  Keeping
+    the blocking device call on one worker prevents model scheduling from
+    turning each streamed chunk into a separate real-time deadline. The
+    device stays open between turns so the next sentence does not pay the
+    CoreAudio/PortAudio startup cost again.
+    """
+
+    _QUEUE_CAPACITY = 24
+    _CLOSE_SENTINEL = object()
+
     def __init__(self, sample_rate):
         self._sample_rate = sample_rate
         self._stream = None
+        self._chunks = thread_queue.Queue(maxsize=self._QUEUE_CAPACITY)
+        self._worker = None
+        self._error = None
+        self._state_lock = threading.Lock()
+        self._closed = False
 
     def _ensure_stream(self):
-        if self._stream is not None:
-            return
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("audio output is closed")
+            if self._stream is not None:
+                return
         import sounddevice as sd
 
         sd.check_output_settings(samplerate=self._sample_rate, channels=1, dtype="int16")
-        self._stream = sd.RawOutputStream(
+        stream = sd.RawOutputStream(
             samplerate=self._sample_rate,
             channels=1,
             dtype="int16",
             blocksize=0,
         )
-        self._stream.start()
+        stream.start()
+        worker = threading.Thread(target=self._run, args=(stream,), name="speech-audio-output", daemon=True)
+        with self._state_lock:
+            if self._stream is not None:
+                stream.stop()
+                stream.close()
+                return
+            self._stream = stream
+            self._worker = worker
+        worker.start()
+
+    def _run(self, stream):
+        try:
+            while True:
+                chunk = self._chunks.get()
+                try:
+                    if chunk is self._CLOSE_SENTINEL:
+                        return
+                    stream.write(chunk)
+                finally:
+                    self._chunks.task_done()
+        except BaseException as error:
+            with self._state_lock:
+                self._error = error
 
     def write(self, pcm16):
+        if len(pcm16) % 2:
+            raise ValueError("PCM16 data must contain whole samples")
         self._ensure_stream()
-        self._stream.write(amplify_pcm16(pcm16))
+        with self._state_lock:
+            error = self._error
+        if error is not None:
+            raise RuntimeError("audio output failed") from error
+        try:
+            self._chunks.put(pcm16, timeout=2.0)
+        except thread_queue.Full as error:
+            raise RuntimeError("audio output buffer stalled") from error
+        with self._state_lock:
+            error = self._error
+        if error is not None:
+            raise RuntimeError("audio output failed") from error
+
+    def finish_turn(self):
+        """Wait until all PCM already accepted for this turn has played."""
+        self._chunks.join()
+        with self._state_lock:
+            error = self._error
+        if error is not None:
+            raise RuntimeError("audio output failed") from error
 
     def close(self):
-        if self._stream is None:
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            stream = self._stream
+            worker = self._worker
+            self._stream = None
+            self._worker = None
+        if stream is None or worker is None:
             return
-        self._stream.stop()
-        self._stream.close()
-        self._stream = None
-
-
-def amplify_pcm16(pcm16, gain=1.8):
-    """Raise quiet synthesized speech by about 5 dB with a hard peak ceiling."""
-    if len(pcm16) % 2:
-        raise ValueError("PCM16 data must contain whole samples")
-    samples = array("h")
-    samples.frombytes(pcm16)
-    if sys.byteorder != "little":
-        samples.byteswap()
-    for index, sample in enumerate(samples):
-        samples[index] = max(-32768, min(32767, round(sample * gain)))
-    if sys.byteorder != "little":
-        samples.byteswap()
-    return samples.tobytes()
+        self._chunks.put(self._CLOSE_SENTINEL)
+        worker.join(timeout=5.0)
+        if worker.is_alive():
+            raise RuntimeError("audio output worker did not stop")
+        stream.stop()
+        stream.close()
 
 
 class SilentPlayer:
@@ -68,6 +129,9 @@ class SilentPlayer:
         self.sample_rate = sample_rate
 
     def write(self, pcm16):
+        return None
+
+    def finish_turn(self):
         return None
 
     def close(self):
@@ -98,9 +162,9 @@ async def serve(backend, player, reference_audio=None, reference_text=None, stdi
     wake = asyncio.Event()
     input_closed = asyncio.Event()
 
-    def publish(event: SessionEvent):
+    async def publish(event: SessionEvent):
         if event.state == "idle":
-            player.close()
+            await asyncio.to_thread(player.finish_turn)
         fields = {"state": event.state}
         if event.reply is not None:
             fields["reply"] = event.reply
@@ -114,28 +178,28 @@ async def serve(backend, player, reference_audio=None, reference_text=None, stdi
         nonlocal audio_started
         if not audio_started:
             audio_started = True
-            publish(SessionEvent("audio_started"))
+            await publish(SessionEvent("audio_started"))
         await asyncio.to_thread(player.write, pcm16)
 
     async def respond(text, should_speak):
         audio_started = False
-        publish(SessionEvent("reply", reply=text))
+        await publish(SessionEvent("reply", reply=text))
         if not should_speak:
-            publish(SessionEvent("idle"))
+            await publish(SessionEvent("idle"))
             return
-        publish(SessionEvent("speaking"))
+        await publish(SessionEvent("speaking"))
         try:
             async for chunk in backend.synthesize(text, reference_audio, reference_text):
                 if not audio_started:
                     audio_started = True
-                    publish(SessionEvent("audio_started"))
+                    await publish(SessionEvent("audio_started"))
                 await asyncio.to_thread(player.write, chunk)
             if not audio_started:
-                publish(SessionEvent("error", reason="synthesis_failed"))
+                await publish(SessionEvent("error", reason="synthesis_failed"))
                 return
-            publish(SessionEvent("idle"))
+            await publish(SessionEvent("idle"))
         except Exception:
-            publish(SessionEvent("error", reason="synthesis_failed"))
+            await publish(SessionEvent("error", reason="synthesis_failed"))
 
     session = SpeechSession(
         queue,

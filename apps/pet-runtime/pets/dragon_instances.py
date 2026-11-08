@@ -289,7 +289,7 @@ class InstanceController(QObject):
                 )):
             return False
         timer.stop()
-        bubble.message(text)
+        bubble.message(text, speak=False)
         bubble.is_speech_reply = True
         position_bubble()
         timer.start(6000)

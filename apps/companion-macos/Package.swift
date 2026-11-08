@@ -14,7 +14,7 @@ let package = Package(
         .executableTarget(name: "DragonCompanion", dependencies: ["DragonCore", "CharacterCore", "CharacterMemory", "CharacterUI"]),
         .testTarget(name: "DragonCoreTests", dependencies: ["DragonCore"]),
         .testTarget(name: "CharacterCoreTests", dependencies: ["CharacterCore", "CharacterUI"]),
-        .testTarget(name: "CharacterMemoryTests", dependencies: ["CharacterMemory", "CharacterCore"]),
+        .testTarget(name: "CharacterMemoryTests", dependencies: ["CharacterMemory", "CharacterCore", "CharacterUI"]),
         .testTarget(name: "DragonCompanionTests", dependencies: ["DragonCompanion", "DragonCore", "CharacterCore", "CharacterMemory"]),
     ]
 )

@@ -70,6 +70,21 @@ class RealAdapterTests(unittest.TestCase):
         value['workAnimations'] = [work, dict(work, id='work02'), dict(work, id='work03')]
         (assets / '素材清单.json').write_text(json.dumps(value))
 
+    def test_visible_bubbles_send_speech_cues_and_latest_message_wins(self):
+        window = self.start()
+        with patch.object(window.speech_cue, 'send_async') as send:
+            window.say('额度查询未完成')
+            window.bubble.flush_speech()
+            send.assert_called_once_with('额度查询未完成')
+            first_interval = window.bubble_timer.interval()
+            window.say('这是一条明显更长的气泡消息，用来确认气泡会按朗读时长延长显示。')
+            window.bubble.flush_speech()
+            self.assertGreater(window.bubble_timer.interval(), first_interval)
+            window.say('旧任务状态')
+            window.say('最新任务状态')
+            window.bubble.flush_speech()
+            self.assertEqual(send.call_args.args[0], '最新任务状态')
+
     def test_stop_deletes_independent_work_bubble_on_gui_thread(self):
         from dragon_tasks import apply_task_snapshot, TaskSnapshot
         from shiboken6 import isValid

@@ -28,6 +28,10 @@ final class Coordinator: NSObject, NSMenuDelegate {
     private var multiPet: PetInstanceRuntime?
     private var speechRuntime: SpeechRuntimeSupervisor?
     private var speechChatInProgress = false
+    private var speechCueInProgress = false
+    private var pendingSpeechCue: String?
+    private var speechCueRetryTimer: Timer?
+    private var speechMenuOpen = false
     private var speechSettingsWindow: SpeechSettingsWindow?
     private var modelManagerWindow: ModelManagerWindow?
     private var characterWindow: CharacterWindow?
@@ -336,9 +340,154 @@ final class Coordinator: NSObject, NSMenuDelegate {
             }
         case .quit:
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { NSApp.terminate(nil) }
+        case .speak:
+            speakInteractionCue(request.text)
         }
         rebuildMenu()
         return snapshot("\(request.command.rawValue) 已处理")
+    }
+
+    private func speakInteractionCue(_ text: String?) {
+        guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty, text.utf8.count <= 512,
+              !text.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              !stopping, !paused else {
+            diagnostics.record("speech.cue.rejected")
+            return
+        }
+        guard let speechRuntime else {
+            diagnostics.record("speech.cue.rejected reason=runtime-unavailable")
+            return
+        }
+        let settings: SpeechSettings
+        do { settings = try SpeechSettingsStore(stateDirectory: runtime.state).load() }
+        catch { diagnostics.record("speech.cue.rejected reason=settings-unavailable"); return }
+        guard settings.speakInteractiveBubbles,
+              let bookmark = settings.referenceAudioBookmark,
+              !settings.referenceAudioPath.isEmpty,
+              !settings.referenceTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            diagnostics.record("speech.cue.rejected reason=disabled-or-reference-unavailable")
+            return
+        }
+        guard !speechChatInProgress, !speechCueInProgress, !speechMenuOpen,
+              NSApp.modalWindow == nil else {
+            pendingSpeechCue = text
+            scheduleSpeechCueRetry()
+            diagnostics.record("speech.cue.deferred latest-wins")
+            return
+        }
+        pendingSpeechCue = nil
+        speechCueRetryTimer?.invalidate()
+        speechCueRetryTimer = nil
+        let repository = ProcessInfo.processInfo.environment["DRAGON_DEV_ROOT"].map {
+            URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath).standardizedFileURL
+        } ?? runtime.resources.deletingLastPathComponent()
+        let modelRoot = repository.appendingPathComponent(".local/voice-runtime/models")
+        let ttsModel = modelRoot.appendingPathComponent("Qwen3-TTS-12Hz-0.6B-Base-8bit")
+        guard FileManager.default.fileExists(atPath: ttsModel.path) else {
+            diagnostics.record("speech.cue.rejected reason=models-unavailable"); return
+        }
+        var stale = false
+        guard let referenceURL = resolveReferenceBookmark(bookmark, stale: &stale),
+              !stale, referenceURL.path == settings.referenceAudioPath else {
+            diagnostics.record("speech.cue.rejected reason=reference-unavailable"); return
+        }
+        let hasScopedAccess = referenceURL.startAccessingSecurityScopedResource()
+        var info = stat()
+        guard lstat(referenceURL.path, &info) == 0,
+              info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG), access(referenceURL.path, R_OK) == 0 else {
+            if hasScopedAccess { referenceURL.stopAccessingSecurityScopedResource() }
+            diagnostics.record("speech.cue.rejected reason=reference-unreadable"); return
+        }
+        let arguments = ["--tts-model", ttsModel.path,
+                         "--reference-audio", referenceURL.path,
+                         "--reference-text", settings.referenceTranscript, "--allow-speaker-output"]
+        speechCueInProgress = true
+        let wasRunning = speechRuntime.isRunning
+        var restartingForCue = false
+        var finished = false
+        func finish(_ reason: String) {
+            guard !finished else { return }
+            finished = true
+            speechCueInProgress = false
+            if hasScopedAccess { referenceURL.stopAccessingSecurityScopedResource() }
+            diagnostics.record("speech.cue.finished reason=\(reason)")
+            drainPendingSpeechCue()
+        }
+        speechRuntime.onEvent = { [weak speechRuntime] event in
+            guard !finished else { return }
+            if event.type == "ready" {
+                // A warm runtime has already emitted ready; the reuse path below
+                // submits exactly once. Only a newly launched child waits here.
+                if !wasRunning {
+                    do { try speechRuntime?.sendResponse(text: text, speak: true) }
+                    catch { finish("submit-failed") }
+                }
+                return
+            }
+            guard event.type == "session" else {
+                if event.type == "error" { finish("runtime-error") }
+                return
+            }
+            if event.state == "error" { finish("synthesis-failed") }
+            else if event.state == "idle" { finish("success") }
+        }
+        speechRuntime.onExit = { status in
+            if restartingForCue {
+                restartingForCue = false
+                do { try speechRuntime.start(appendingArguments: arguments) }
+                catch { finish("restart-failed") }
+                return
+            }
+            finish(status == 0 ? "runtime-exited" : "runtime-failed")
+        }
+        do {
+            if wasRunning {
+                if !speechRuntime.isRunning(withAdditionalArguments: arguments) {
+                    restartingForCue = true
+                    speechRuntime.shutdownGracefully()
+                    return
+                }
+                try speechRuntime.sendResponse(text: text, speak: true)
+            } else {
+                try speechRuntime.start(appendingArguments: arguments)
+            }
+        } catch {
+            finish("start-failed")
+        }
+    }
+
+    private func scheduleSpeechCueRetry() {
+        guard speechCueRetryTimer == nil, !stopping else { return }
+        let timer = Timer(timeInterval: 0.25, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.speechCueRetryTimer = nil
+                self.drainPendingSpeechCue()
+            }
+        }
+        speechCueRetryTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func drainPendingSpeechCue() {
+        guard let text = pendingSpeechCue, !stopping else { return }
+        guard !speechChatInProgress, !speechCueInProgress, !speechMenuOpen,
+              NSApp.modalWindow == nil else {
+            scheduleSpeechCueRetry()
+            return
+        }
+        pendingSpeechCue = nil
+        speakInteractionCue(text)
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        speechMenuOpen = true
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        speechMenuOpen = false
+        drainPendingSpeechCue()
     }
     func snapshot(_ message: String = AppCopy.runningMessage) -> CompanionStatus {
         CompanionStatus(message: message, phase: session.phase.rawValue, codexPID: session.pid, paused: paused,
@@ -348,6 +497,9 @@ final class Coordinator: NSObject, NSMenuDelegate {
     }
     func stop() {
         stopping = true
+        speechCueRetryTimer?.invalidate(); speechCueRetryTimer = nil
+        pendingSpeechCue = nil
+        speechMenuOpen = false
         speechRuntime?.shutdownGracefully()
         firstCloneInProgress = false
         taskLeaseTimer?.invalidate(); taskLeaseTimer = nil
@@ -477,6 +629,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
             let modelManager = NSMenuItem(title: "模型管理", action: #selector(openModelManager), keyEquivalent: "")
             modelManager.target = self
             menu.addItem(modelManager)
+            addInteractiveSpeechMenuItem(to: menu)
             let speechSettings = NSMenuItem(title: "直播语音设置", action: #selector(openSpeechSettings), keyEquivalent: "")
             speechSettings.target = self
             menu.addItem(speechSettings)
@@ -523,6 +676,25 @@ final class Coordinator: NSObject, NSMenuDelegate {
         menu.addItem(advancedItem)
         menu.addItem(.separator()); item(AppCopy.quitTitle, #selector(quit))
         statusItem?.menu = menu; self.menu = menu
+    }
+
+    private func addInteractiveSpeechMenuItem(to menu: NSMenu) {
+        let item: NSMenuItem
+        do {
+            let settings = try SpeechSettingsStore(stateDirectory: runtime.state).load()
+            item = NSMenuItem(
+                title: settings.speakInteractiveBubbles ? "互动气泡语音：已开启" : "互动气泡语音：已关闭",
+                action: #selector(toggleInteractiveSpeech),
+                keyEquivalent: ""
+            )
+            item.state = settings.speakInteractiveBubbles ? .on : .off
+            item.target = self
+        } catch {
+            item = NSMenuItem(title: "互动气泡语音：设置不可用", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            diagnostics.record("speech.menu.rejected reason=settings-unavailable")
+        }
+        menu.addItem(item)
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) { rebuildMenu() }
@@ -676,6 +848,21 @@ final class Coordinator: NSObject, NSMenuDelegate {
             modelManagerWindow?.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         } catch { showError(error.localizedDescription) }
+    }
+
+    @objc private func toggleInteractiveSpeech() {
+        guard !stopping else { return }
+        let store = SpeechSettingsStore(stateDirectory: runtime.state)
+        do {
+            let settings = try store.toggleInteractiveBubbleSpeech()
+            let enabled = settings.speakInteractiveBubbles
+            speechSettingsWindow?.setInteractiveBubbleSpeechEnabled(enabled)
+            diagnostics.record("speech.interactive-bubbles changed enabled=\(enabled)")
+            rebuildMenu()
+        } catch {
+            diagnostics.record("speech.interactive-bubbles rejected reason=save-failed")
+            showError(error.localizedDescription)
+        }
     }
 
     @objc private func openCharacterWindow() {
@@ -921,6 +1108,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
             guard !finished else { return }
             finished = true
             speechChatInProgress = false
+            drainPendingSpeechCue()
             switch result {
             case .success: diagnostics.record("speech.chat.finished result=success")
             case .failure: diagnostics.record("speech.chat.finished result=failure")
@@ -1118,6 +1306,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
         }
         catch {
             speechChatInProgress = false
+            drainPendingSpeechCue()
             try? FileManager.default.removeItem(at: inputURL)
             if hasScopedAccess { referenceURL?.stopAccessingSecurityScopedResource() }
             diagnostics.record("speech.runtime.start-failed")

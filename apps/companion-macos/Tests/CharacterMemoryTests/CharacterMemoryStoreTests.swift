@@ -1,8 +1,52 @@
 import CharacterCore
 import CharacterMemory
+@testable import CharacterUI
 import XCTest
 
 final class CharacterMemoryStoreTests: XCTestCase {
+    @MainActor
+    func testLongmeiRepositoryExamplesLoadThroughCharacterWorkspaceModel() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try CharacterMemoryStore(stateDirectory: root, petID: "white-dragon")
+        _ = try await store.loadIdentity(defaultName: "龙妹")
+
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../../../../", isDirectory: true)
+            .standardizedFileURL
+        let examples = repositoryRoot.appendingPathComponent("docs/examples/龙妹角色资料", isDirectory: true)
+        let characterRoot = root.appendingPathComponent("pets/white-dragon/character", isDirectory: true)
+        try FileManager.default.copyItem(at: examples.appendingPathComponent("identity.md"),
+                                         to: characterRoot.appendingPathComponent("identity.md"))
+        try FileManager.default.copyItem(
+            at: examples.appendingPathComponent("memories/示例-角色约定.md"),
+            to: characterRoot.appendingPathComponent("memories/a31ed427-88fc-4a49-b0bc-0b71a7311d2c.md")
+        )
+        try FileManager.default.copyItem(
+            at: examples.appendingPathComponent("plans/示例-建立可信赖的角色记忆.md"),
+            to: characterRoot.appendingPathComponent("plans/9f0ca44a-78bc-4bcf-bf7b-63cbcfd0ab16.md")
+        )
+
+        let model = CharacterWorkspaceModel(store: store, defaultName: "龙妹")
+        model.refreshGoals()
+        for _ in 0..<100 where !model.canSaveIdentity || model.memories.isEmpty || model.goals.isEmpty {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertTrue(model.canSaveIdentity)
+        XCTAssertEqual(model.identity.name, "龙妹")
+        XCTAssertFalse(model.identity.role.isEmpty)
+        XCTAssertFalse(model.identity.values.isEmpty)
+        XCTAssertEqual(model.memories.count, 1)
+        XCTAssertEqual(model.memories.first?.status, .candidate)
+        XCTAssertFalse(model.memories.first?.shareWithOnlineModel ?? true)
+        XCTAssertEqual(model.goals.count, 1)
+        XCTAssertEqual(model.goals.first?.status, .active)
+        XCTAssertEqual(model.goals.first?.steps.count, 4)
+        XCTAssertTrue(model.goals.first?.steps.allSatisfy { !$0.isComplete } == true)
+    }
+
     func testIdentityAndMemoryRoundTripAndConfirmation() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

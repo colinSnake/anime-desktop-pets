@@ -126,4 +126,23 @@ final class SpeechRuntimeSupervisorTests: XCTestCase {
         await fulfillment(of: [exited], timeout: 3)
         XCTAssertFalse(supervisor.isRunning)
     }
+
+    func testGracefulShutdownEscalatesWhenChildIgnoresTerminate() async throws {
+        let supervisor = SpeechRuntimeSupervisor(
+            executable: URL(fileURLWithPath: "/usr/bin/perl"),
+            arguments: ["-e", "$SIG{TERM} = 'IGNORE'; $| = 1; print qq({\"protocol_version\":1,\"type\":\"ready\"}\\n); sleep 30"]
+        )
+        let exited = expectation(description: "ignored terminate is escalated and waiter completes")
+        let ready = expectation(description: "child has installed its signal handler")
+        supervisor.onEvent = { event in
+            guard event.type == "ready" else { return }
+            ready.fulfill()
+            supervisor.shutdownGracefully(timeout: 0.01) { exited.fulfill() }
+        }
+
+        try supervisor.start()
+        await fulfillment(of: [ready], timeout: 3)
+        await fulfillment(of: [exited], timeout: 4)
+        XCTAssertFalse(supervisor.isRunning)
+    }
 }

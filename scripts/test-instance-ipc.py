@@ -67,6 +67,35 @@ def fixture_server(profile):
         speech_server.close(); server.close(); controller.shutdown(); store.close()
 
 
+def parent_watch_fixture(profile):
+    """Start a real helper, then exit so its owner-watch path must reap it."""
+    if os.environ.get('DRAGON_INSTANCE_IPC_FIXTURE') != '1' or os.environ.get('QT_QPA_PLATFORM') != 'offscreen':
+        return 2
+    profile = Path(profile)
+    profile.mkdir(parents=True, exist_ok=True, mode=0o700)
+    env = dict(os.environ, HOME=str(profile.parent), BAILONG_DATA_DIR=str(profile),
+               QT_QPA_PLATFORM='offscreen', PYTHONPATH=str(ROOT / 'apps/pet-runtime/pets'),
+               BAILONG_PARENT_PID=str(os.getpid()))
+    code = 'from dragon_pet_helper import main; raise SystemExit(main())'
+    child = subprocess.Popen([sys.executable, '-c', code, '--multi-profile', str(profile)], env=env)
+    (profile / 'parent-watch-child.pid').write_text(str(child.pid))
+    socket_path = profile / SOCKET_NAME
+    try:
+        for _ in range(300):
+            if socket_path.exists():
+                return 0
+            if child.poll() is not None:
+                return 1
+            time.sleep(.01)
+        return 1
+    finally:
+        # On the success path the fixture deliberately leaves the child for
+        # the parent-watch assertion; only clean up a failed startup.
+        if not socket_path.exists() and child.poll() is None:
+            child.terminate()
+            child.wait(timeout=3)
+
+
 def transport_fixture(profile, mode):
     if os.environ.get('DRAGON_INSTANCE_IPC_FIXTURE') != '1': return 2
     path = Path(profile) / SOCKET_NAME
@@ -452,6 +481,31 @@ class IPCChecks(unittest.TestCase):
         self.assertFalse(json.loads(result.stderr)['ok']); self.assertFalse(self.path.exists())
 
 
+class ParentOwnershipChecks(unittest.TestCase):
+    def test_helper_exits_when_owning_host_disappears(self):
+        with tempfile.TemporaryDirectory(prefix='dragon-parent-watch-', dir='/tmp') as tmp:
+            profile = Path(tmp) / 'profile'
+            env = dict(os.environ, HOME=tmp, QT_QPA_PLATFORM='offscreen',
+                       DRAGON_INSTANCE_IPC_FIXTURE='1')
+            fixture = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve()), '--parent-watch-fixture', str(profile)],
+                env=env, capture_output=True, text=True, timeout=5)
+            self.assertEqual(fixture.returncode, 0, fixture.stderr)
+            pid = int((profile / 'parent-watch-child.pid').read_text())
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                try:
+                    state = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='],
+                                           capture_output=True, text=True, check=False).stdout.strip()
+                    if not state or state.startswith('Z'):
+                        break
+                except OSError:
+                    break
+                time.sleep(.05)
+            else:
+                self.fail('helper survived after its owning host exited')
+
+
 class FirstRunBootstrapChecks(unittest.TestCase):
     def test_helper_initializes_missing_profile_and_leaves_copy_stopped(self):
         with tempfile.TemporaryDirectory(prefix='dragon-first-run-', dir='/tmp') as tmp:
@@ -509,4 +563,6 @@ if __name__ == '__main__':
         sys.exit(transport_fixture(sys.argv[2], sys.argv[3]))
     if len(sys.argv) == 3 and sys.argv[1] == '--fixture-server':
         sys.exit(fixture_server(sys.argv[2]))
+    if len(sys.argv) == 3 and sys.argv[1] == '--parent-watch-fixture':
+        sys.exit(parent_watch_fixture(sys.argv[2]))
     unittest.main(verbosity=2)

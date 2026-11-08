@@ -83,7 +83,7 @@ def stage(source, bundle_assets=False, local_test_font=None):
     pet_source.write_text(pet_text.replace(
         default_assets,
         "ASSETS=Path(os.environ.get('BAILONG_ASSETS_DIR', ROOT/'outputs/白龙桌宠素材')).expanduser().resolve()", 1))
-    for name in ('dragon_frames.py', 'dragon_ui.py', 'dragon_behavior.py', 'dragon_playback.py', 'dragon_tasks.py', 'dragon_quota.py', 'dragon_visibility.py'):
+    for name in ('dragon_frames.py', 'dragon_ui.py', 'dragon_behavior.py', 'dragon_playback.py', 'dragon_tasks.py', 'dragon_quota.py', 'dragon_visibility.py', 'dragon_speech.py'):
         shutil.copy2(RUNTIME_BAILONG / name, STAGE / 'app' / name)
     for name in ('dragon_instances.py', 'dragon_instance_ipc.py', 'dragon_pet_helper.py', 'pet_reference_lock.py', 'pet_library.py', 'pet_sources.py'):
         shutil.copy2(RUNTIME_PETS / name, STAGE / 'app' / name)

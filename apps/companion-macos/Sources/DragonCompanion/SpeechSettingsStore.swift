@@ -11,6 +11,7 @@ struct SpeechSettings: Codable, Equatable, Sendable {
     var microphoneUID: String?
     var displayReplies = true
     var speakReplies = false
+    var speakInteractiveBubbles = false
 
     init() {}
 
@@ -26,23 +27,25 @@ struct SpeechSettings: Codable, Equatable, Sendable {
         }
     }
 
-    enum StoreError: LocalizedError {
+    enum StoreError: LocalizedError, Equatable {
         case invalidSettings
         case unsafeFile
         case fileTooLarge
+        case missingInteractiveSpeechReference
 
         var errorDescription: String? {
             switch self {
             case .invalidSettings: "语音设置格式无效；未保存。"
             case .unsafeFile: "语音设置不是普通文件；为保护数据，拒绝读取。"
             case .fileTooLarge: "语音设置文件超过64KiB；为保护数据，拒绝读取。"
+            case .missingInteractiveSpeechReference: "请先选择参考音频并填写准确转写，才能开启互动气泡语音。"
             }
         }
     }
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion, platform, roomIdentifier, referenceAudioPath, referenceAudioBookmark
-        case referenceTranscript, microphoneUID, displayReplies, speakReplies
+        case referenceTranscript, microphoneUID, displayReplies, speakReplies, speakInteractiveBubbles
     }
 
     init(from decoder: Decoder) throws {
@@ -58,6 +61,9 @@ struct SpeechSettings: Codable, Equatable, Sendable {
         speakReplies = referenceAudioBookmark == nil
             ? false
             : (try values.decodeIfPresent(Bool.self, forKey: .speakReplies) ?? false)
+        speakInteractiveBubbles = referenceAudioBookmark == nil
+            ? false
+            : (try values.decodeIfPresent(Bool.self, forKey: .speakInteractiveBubbles) ?? false)
     }
 }
 
@@ -89,5 +95,18 @@ struct SpeechSettingsStore {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(settings).write(to: fileURL, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+    }
+
+    func toggleInteractiveBubbleSpeech() throws -> SpeechSettings {
+        var settings = try load()
+        let enabled = !settings.speakInteractiveBubbles
+        if enabled && (settings.referenceAudioBookmark == nil
+            || settings.referenceAudioPath.isEmpty
+            || settings.referenceTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+            throw SpeechSettings.StoreError.missingInteractiveSpeechReference
+        }
+        settings.speakInteractiveBubbles = enabled
+        try save(settings)
+        return settings
     }
 }

@@ -1,6 +1,6 @@
 --- a/app/pet.py
 +++ b/app/pet.py
-@@ -7,10 +7,15 @@
+@@ -7,10 +7,16 @@
  from PySide6.QtGui import QImage, QPixmap, QPainter, QRegion, QCursor, QIcon
  from PySide6.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QProgressBar, QMenu, QMessageBox, QProgressDialog, QPushButton, QSystemTrayIcon, QTextBrowser
  from PySide6.QtNetwork import QLocalServer, QLocalSocket
@@ -14,6 +14,7 @@
 +from dragon_behavior import AutonomousBehavior
 +from dragon_visibility import attach_visibility_control
 +from dragon_tasks import attach_task_follower, show_work_feedback
++from dragon_speech import SpeechCueClient
 +from dragon_playback import PresentationClock, pose_pixmap, pose_bridge, blend_pose, transition_profile, calibrate_flight_sizes, canvas_padding
  
  ROOT=resource_root()
@@ -27,7 +28,7 @@
      def __init__(self):
          super().__init__(None, FLAGS)
          self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-@@ -89,26 +93,33 @@
+@@ -89,26 +93,34 @@
          self.adjustSize();self.show()
  
  class Pet(QWidget):
@@ -51,7 +52,9 @@
 +        self.displayed_frame=None;self.displayed_item=None;self.waiting_first_frame=False
 +        self.presentation=None;self.bridge_source=None;self.pose_bridge=None;self.displayed_canvas=None
 +        self.pose_bridge_ready=False
-         self.bubble=Bubble();self.generation=0;self.worker=None;self.quota_inflight=False;self.dragging=False;self.last_click=None
++        self.speech_cue=SpeechCueClient()
+-        self.bubble=Bubble();self.generation=0;self.worker=None;self.quota_inflight=False;self.dragging=False;self.last_click=None
++        self.bubble=Bubble();self.bubble.speech_callback=self.speak_bubble;self.generation=0;self.worker=None;self.quota_inflight=False;self.dragging=False;self.last_click=None
 -        self.chat=None
          self.task_active=False
          self.manual_hidden=False;self.fullscreen_hidden=False;self.hidden_since=None
@@ -332,7 +335,7 @@
              view=self.bubble.result_view;bar=view.verticalScrollBar()
              bottom=bar.value()>=bar.maximum()-8;old=bar.value()
 -            self.bubble.result_title.setText(title);view.setPlainText(text)
-+            self.bubble.result_title.setText(title);view.setPlainText(text);self.bubble.finish()
++            self.bubble.result_title.setText(title);view.setPlainText(text);self.bubble.finish();self.bubble.announce(title+'。'+text)
              bar.setValue(bar.maximum() if bottom else min(old,bar.maximum()))
          else:
              self.bubble.task_result(title,text,details);self.bubble.is_task_progress=True
@@ -466,7 +469,7 @@
              self.press_pos=event.globalPosition().toPoint();self.origin=self.pos();self.dragging=False
      def mouseDoubleClickEvent(self,event):
          # Qt may emit this before mousePressEvent for the second physical press.
-@@ -502,24 +605,24 @@
+@@ -502,24 +605,25 @@
              if delta.manhattanLength()>8 and not self.dragging:
                  self.dragging=True;self.click_timer.stop();self.last_click=None;self.generation+=1
                  self.bubble_timer.stop();self.bubble.hide()
@@ -492,6 +495,7 @@
          if self.last_click is not None and now-self.last_click<=.25:self.quota()
          else:self.last_click=now;self.click_timer.start()
      def closeEvent(self,event):
++        self.speech_cue.close()
 -        if self.chat and not self.chat.shutdown():
 -            event.ignore();QTimer.singleShot(500,self.close);return
 +        self.behavior.close()

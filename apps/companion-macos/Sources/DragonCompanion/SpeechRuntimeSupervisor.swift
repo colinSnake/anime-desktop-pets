@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 struct SpeechRuntimeEvent: Decodable, Equatable {
@@ -112,7 +113,14 @@ final class SpeechRuntimeSupervisor {
         try? send(["type": "shutdown"])
         DispatchQueue.main.asyncAfter(deadline: .now() + max(0, timeout)) { [weak self, weak process] in
             guard let self, let process, process.isRunning else { return }
+            fputs("Dragon: speech runtime did not stop gracefully; sending terminate.\n", stderr)
             self.terminateImmediately()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self, weak process] in
+                guard let self, let process, process.isRunning,
+                      self.process === process else { return }
+                fputs("Dragon: speech runtime ignored terminate; forcing owned child to exit.\n", stderr)
+                _ = kill(process.processIdentifier, SIGKILL)
+            }
         }
     }
 
