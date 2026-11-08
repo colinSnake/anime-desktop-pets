@@ -293,4 +293,41 @@ final class CharacterCoreTests: XCTestCase {
         XCTAssertNil(CharacterGoalDraft(title: "有效标题", steps: Array(repeating: "步骤", count: 51)).normalized())
         XCTAssertNil(CharacterGoalDraft(title: "有效标题", steps: ["<!-- 注释载荷 -->"]).normalized())
     }
+    func testChatSessionKeepsOnlyBoundedRecentTurnsInMemory() {
+        var session = CharacterChatSession()
+        for index in 0..<20 {
+            session.append(role: index.isMultiple(of: 2) ? .user : .assistant,
+                           text: String(repeating: "字", count: 2_000))
+        }
+
+        XCTAssertLessThanOrEqual(session.turns.count, CharacterChatSession.maxTurns)
+        XCTAssertLessThanOrEqual(session.turns.reduce(0) { $0 + $1.text.count },
+                                  CharacterChatSession.maxCharacters)
+        XCTAssertEqual(session.turns.last?.text.count, CharacterChatSession.maxTextCharacters)
+    }
+
+    func testChatInputRejectsEmptyAndOverlongMessagesWithoutTruncating() {
+        XCTAssertNil(CharacterChatSession.validatedInput(" \n "))
+        XCTAssertEqual(CharacterChatSession.validatedInput("  你好  "), "你好")
+        XCTAssertEqual(CharacterChatSession.validatedInput(String(repeating: "字", count: 1_200))?.count, 1_200)
+        XCTAssertNil(CharacterChatSession.validatedInput(String(repeating: "字", count: 1_201)))
+    }
+
+    func testKnowledgeIsSeparatedFromUserMemoryInOnlineContext() {
+        let memories = [
+            CharacterMemory(kind: .knowledge, text: "龙妹喜欢把复杂事情拆成小步骤", source: "test",
+                            status: .confirmed, shareWithOnlineModel: true),
+            CharacterMemory(kind: .preference, text: "用户喜欢短句", source: "test",
+                            status: .confirmed, shareWithOnlineModel: true),
+        ]
+
+        let context = CharacterContextBuilder.make(identity: nil, memories: memories,
+                                                   query: "拆成小步骤，用户喜欢短句")
+
+        XCTAssertTrue(context?.contains("角色知识") == true)
+        XCTAssertTrue(context?.contains("龙妹喜欢把复杂事情拆成小步骤") == true)
+        XCTAssertTrue(context?.contains("用户记忆") == true)
+        XCTAssertTrue(context?.contains("用户喜欢短句") == true)
+    }
+
 }

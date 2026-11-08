@@ -16,14 +16,22 @@ public enum CharacterContextBuilder {
 
         var used = sections.joined(separator: "\n\n").count
         var memoryLines: [String] = []
+        var knowledgeLines: [String] = []
         for memory in relevantMemories {
-            let line = "- [\(memory.kind.rawValue)] \(memory.text)"
+            let line = "- \(memory.text)"
             guard used + line.count + 36 <= limit else { continue }
-            memoryLines.append(line)
+            if memory.kind == .knowledge {
+                knowledgeLines.append(line)
+            } else {
+                memoryLines.append("- [\(memory.kind.rawValue)] \(memory.text)")
+            }
             used += line.count + 1
         }
         if !memoryLines.isEmpty {
-            sections.append("与本轮问题相关且已获准分享的记忆：\n" + memoryLines.joined(separator: "\n"))
+            sections.append("与本轮问题相关且已获准分享的用户记忆：\n" + memoryLines.joined(separator: "\n"))
+        }
+        if !knowledgeLines.isEmpty {
+            sections.append("与本轮问题相关且已获准分享的角色知识：\n" + knowledgeLines.joined(separator: "\n"))
         }
 
         if !capabilities.isEmpty {

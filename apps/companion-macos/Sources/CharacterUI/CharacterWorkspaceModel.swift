@@ -8,18 +8,24 @@ public final class CharacterWorkspaceModel: ObservableObject {
     @Published public var identity: CharacterIdentity
     @Published public private(set) var memories: [CharacterMemory] = []
     @Published public private(set) var goals: [CharacterGoal] = []
+    @Published public private(set) var chatTurns: [CharacterChatTurn] = []
+    @Published public private(set) var isChatSending = false
+    @Published public private(set) var failedChatText: String?
     @Published public private(set) var status = ""
     @Published public private(set) var canSaveIdentity = false
 
     private let store: CharacterMemoryStore
     private let defaultName: String
     public let suggestGoal: ((String, String) async throws -> CharacterGoalDraft)?
+    public let chat: ((String, [CharacterChatTurn]) async throws -> String)?
 
     public init(store: CharacterMemoryStore, defaultName: String,
-                suggestGoal: ((String, String) async throws -> CharacterGoalDraft)? = nil) {
+                suggestGoal: ((String, String) async throws -> CharacterGoalDraft)? = nil,
+                chat: ((String, [CharacterChatTurn]) async throws -> String)? = nil) {
         self.store = store
         self.defaultName = defaultName
         self.suggestGoal = suggestGoal
+        self.chat = chat
         identity = .starter(name: defaultName)
         refresh()
     }
@@ -36,6 +42,56 @@ public final class CharacterWorkspaceModel: ObservableObject {
                 status = error.localizedDescription
             }
         }
+    }
+
+
+    public func sendChat(_ rawText: String) {
+        guard let chat, !isChatSending else { return }
+        guard let text = CharacterChatSession.validatedInput(rawText) else {
+            if rawText.trimmingCharacters(in: .whitespacesAndNewlines).count > CharacterChatSession.maxTextCharacters {
+                status = "单条消息最多 \(CharacterChatSession.maxTextCharacters) 个字符，请缩短后重试。"
+            }
+            return
+        }
+        let history = chatTurns
+        failedChatText = nil
+        appendChatTurn(role: .user, text: text)
+        isChatSending = true
+        status = "正在整理角色资料并回复…"
+        Task {
+            do {
+                let reply = try await chat(text, history)
+                let cleanReply = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !cleanReply.isEmpty {
+                    appendChatTurn(role: .assistant, text: cleanReply)
+                }
+                status = ""
+            } catch {
+                failedChatText = text
+                status = error.localizedDescription
+            }
+            isChatSending = false
+        }
+    }
+
+    public func retryFailedChat() {
+        guard let text = failedChatText, !isChatSending else { return }
+        if chatTurns.last?.role == .user, chatTurns.last?.text == text {
+            chatTurns.removeLast()
+        }
+        sendChat(text)
+    }
+
+    private func appendChatTurn(role: CharacterChatRole, text: String) {
+        var session = CharacterChatSession(turns: chatTurns)
+        session.append(role: role, text: text)
+        chatTurns = session.turns
+    }
+
+    public func clearChat() {
+        chatTurns.removeAll()
+        failedChatText = nil
+        status = "本轮聊天已清空；聊天内容不会写入长期记忆。"
     }
 
     public func refreshGoals() {

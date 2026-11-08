@@ -4,6 +4,7 @@ import SwiftUI
 
 public struct CharacterWorkspaceView: View {
     private enum Page: String, CaseIterable, Identifiable {
+        case chat = "聊天"
         case identity = "身份"
         case memories = "记忆"
         case capabilities = "能力"
@@ -17,9 +18,10 @@ public struct CharacterWorkspaceView: View {
 
     public init(store: CharacterMemoryStore, defaultName: String,
                 capabilities: [CharacterCapability],
-                suggestGoal: ((String, String) async throws -> CharacterGoalDraft)? = nil) {
+                suggestGoal: ((String, String) async throws -> CharacterGoalDraft)? = nil,
+                chat: ((String, [CharacterChatTurn]) async throws -> String)? = nil) {
         _model = StateObject(wrappedValue: CharacterWorkspaceModel(store: store, defaultName: defaultName,
-                                                                   suggestGoal: suggestGoal))
+                                                                   suggestGoal: suggestGoal, chat: chat))
         self.capabilities = capabilities
     }
 
@@ -34,6 +36,7 @@ public struct CharacterWorkspaceView: View {
             .padding(.top, 16)
             Group {
                 switch page {
+                case .chat: CharacterChatView(model: model)
                 case .identity: CharacterIdentityView(model: model)
                 case .memories: CharacterMemoryView(model: model)
                 case .capabilities: CharacterCapabilitiesView(capabilities: capabilities)

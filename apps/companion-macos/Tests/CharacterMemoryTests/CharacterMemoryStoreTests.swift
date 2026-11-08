@@ -5,6 +5,34 @@ import XCTest
 
 final class CharacterMemoryStoreTests: XCTestCase {
     @MainActor
+    func testFailedChatCanBeRetriedWithoutDuplicatingUserTurn() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try CharacterMemoryStore(stateDirectory: root, petID: "white-dragon")
+        var calls = 0
+        let model = CharacterWorkspaceModel(store: store, defaultName: "龙妹", chat: { _, _ in
+            calls += 1
+            if calls == 1 { throw NSError(domain: "test", code: 1) }
+            return "第二次回复"
+        })
+
+        model.sendChat("你好")
+        for _ in 0..<100 where model.failedChatText == nil {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(model.chatTurns.map(\.text), ["你好"])
+        XCTAssertEqual(model.failedChatText, "你好")
+
+        model.retryFailedChat()
+        for _ in 0..<100 where model.isChatSending || model.chatTurns.count < 2 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(calls, 2)
+        XCTAssertEqual(model.chatTurns.map(\.text), ["你好", "第二次回复"])
+        XCTAssertNil(model.failedChatText)
+    }
+
+    @MainActor
     func testLongmeiRepositoryExamplesLoadThroughCharacterWorkspaceModel() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

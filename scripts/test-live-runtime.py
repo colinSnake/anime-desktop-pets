@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "apps" / "live-runtime"))
 from bilibili_adapter import BilibiliEventAdapter, BilibiliEventError
 from live_announcer import LiveAnnouncer, summarize_for_speech
 from speech_bridge import serve as serve_speech_bridge, translate_event
+from source_session import SourceSession, SourceState
 from live_pipeline import LivePipeline
 from live_protocol import MAX_COMMAND_BYTES, LiveMessage, decode_command
 from stdio_service import serve
@@ -76,6 +77,73 @@ class ProtocolTests(unittest.TestCase):
         )
         self.assertIsNone(command)
         self.assertEqual(error, "invalid_text")
+
+    def test_source_disconnect_accepts_only_safe_error_codes(self):
+        command, error = decode_command(
+            '{"type":"source_disconnected","error":"network_error"}'
+        )
+        self.assertIsNone(error)
+        self.assertEqual(command["error"], "network_error")
+        for unsafe in ("token=secret", "cookie=private", "arbitrary platform exception", [], {}):
+            raw = json.dumps({"type": "source_disconnected", "error": unsafe})
+            command, error = decode_command(raw)
+            self.assertIsNone(command)
+            self.assertEqual(error, "invalid_command")
+
+
+class SourceSessionTests(unittest.TestCase):
+    def test_reconnects_with_bounded_exponential_backoff_then_fails_closed(self):
+        now = [0.0]
+        session = SourceSession(max_attempts=3, base_delay_seconds=2, max_delay_seconds=5, clock=lambda: now[0])
+        self.assertEqual(session.start().state, SourceState.CONNECTING)
+        self.assertEqual(session.connected().state, SourceState.CONNECTED)
+        self.assertEqual(session.disconnected("network_error").state, SourceState.RECONNECTING)
+        self.assertEqual(session.snapshot.last_error, "network_error")
+        self.assertEqual(session.snapshot.next_retry_at, 2.0)
+        self.assertFalse(session.retry_due())
+        before_due = session.snapshot
+        self.assertEqual(session.begin_retry(), before_due)
+        now[0] = 2.0
+        self.assertEqual(session.begin_retry().state, SourceState.CONNECTING)
+        self.assertEqual(session.disconnected("network_error").next_retry_at, 6.0)
+        now[0] = 6.0
+        session.begin_retry()
+        self.assertEqual(session.disconnected("network_error").state, SourceState.FAILED)
+        self.assertFalse(session.retry_due())
+
+    def test_stop_cancels_pending_retry_and_clears_error(self):
+        now = [0.0]
+        session = SourceSession(clock=lambda: now[0])
+        session.start()
+        session.disconnected("network_error")
+        snapshot = session.stop()
+        self.assertEqual(snapshot, SourceSession(clock=lambda: now[0]).snapshot)
+        self.assertEqual(session.start().state, SourceState.CONNECTING)
+        self.assertIsNone(session.snapshot.last_error)
+
+    def test_untrusted_exception_text_never_enters_source_status(self):
+        session = SourceSession()
+        session.start()
+        session.disconnected("token=secret cookie=private")
+        self.assertEqual(session.snapshot.last_error, "unknown")
+
+    def test_late_disconnect_and_connected_callbacks_cannot_extend_or_revive_session(self):
+        now = [0.0]
+        session = SourceSession(max_attempts=2, clock=lambda: now[0])
+        session.start()
+        session.disconnected("network_error")
+        first = session.snapshot
+        self.assertEqual(session.disconnected("rate_limited"), first)
+        now[0] = first.next_retry_at
+        session.begin_retry()
+        session.disconnected("network_error")
+        failed = session.snapshot
+        self.assertEqual(failed.state, SourceState.FAILED)
+        self.assertEqual(failed.attempts, 2)
+        self.assertEqual(session.disconnected("network_error"), failed)
+        self.assertEqual(session.connected(), failed)
+        self.assertEqual(session.start().state, SourceState.CONNECTING)
+
 
 
 class SpeechBridgeTests(unittest.TestCase):
@@ -200,6 +268,42 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual([event["type"] for event in events], ["accepted", "message", "state"])
         self.assertNotIn("display_name", events[0])
         self.assertEqual(events[1]["text"], "你好")
+
+    def test_source_commands_expose_lifecycle_without_network_side_effects(self):
+        stdin = io.StringIO("\n".join([
+            '{"type":"source_start"}',
+            '{"type":"source_connected"}',
+            '{"type":"source_disconnected","error":"network_error"}',
+            '{"type":"stop"}',
+            '{"type":"shutdown"}',
+        ]) + "\n")
+        stdout = io.StringIO()
+        serve(stdin, stdout, LivePipeline())
+        events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertEqual([event["type"] for event in events], ["source", "source", "source", "state", "state"])
+        self.assertEqual(events[0]["state"], "connecting")
+        self.assertEqual(events[1]["state"], "connected")
+        self.assertEqual(events[2]["state"], "reconnecting")
+        self.assertEqual(events[2]["attempts"], 1)
+
+    def test_status_and_ping_include_source_snapshot_for_polling(self):
+        stdin = io.StringIO("\n".join([
+            '{"type":"source_start"}',
+            '{"type":"source_connected"}',
+            '{"type":"status"}',
+            '{"type":"source_disconnected","error":"network_error"}',
+            '{"type":"ping"}',
+            '{"type":"shutdown"}',
+        ]) + "\n")
+        stdout = io.StringIO()
+        serve(stdin, stdout, LivePipeline())
+        events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        status = events[2]
+        pong = events[4]
+        self.assertEqual(status["source"]["state"], "connected")
+        self.assertEqual(status["source"]["attempts"], 0)
+        self.assertEqual(pong["source"]["state"], "reconnecting")
+        self.assertEqual(pong["source"]["last_error"], "network_error")
 
     def test_announce_mode_emits_speak_handoff_without_opening_audio(self):
         stdin = io.StringIO(

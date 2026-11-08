@@ -881,6 +881,10 @@ final class Coordinator: NSObject, NSMenuDelegate {
                         return try await ModelProviderClient().suggestGoalSteps(
                             settings: provider, apiKey: apiKey, title: title, details: details
                         )
+                    },
+                    chat: { [weak self] text, history in
+                        guard let self else { throw ModelProviderError.service("桌边小崽已关闭") }
+                        return try await self.replyToCharacterChat(text, history: history)
                     }
                 )
             }
@@ -888,6 +892,45 @@ final class Coordinator: NSObject, NSMenuDelegate {
             characterWindow?.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         } catch { showError(error.localizedDescription) }
+    }
+
+    private func replyToCharacterChat(_ text: String, history: [CharacterChatTurn]) async throws -> String {
+        let store = try CharacterMemoryStore(stateDirectory: runtime.state, petID: "white-dragon")
+        let identity = try await store.loadIdentity(defaultName: "龙妹")
+        let memories = try await store.listMemories()
+        let capabilities = CharacterCapabilitySnapshot.make(runtime: runtime,
+                                                              speechRuntimeAvailable: speechRuntime != nil)
+
+        if let rememberedText = CharacterCommand.rememberText(in: text) {
+            let candidate = CharacterMemory(kind: .fact, text: rememberedText, source: "用户在聊天中明确要求记住")
+            switch CharacterMemoryReview.automationDecision(for: candidate, against: memories) {
+            case .autoConfirm:
+                var confirmed = candidate
+                confirmed.status = .confirmed
+                try await store.saveMemory(confirmed)
+                return "我记下了，这条内容已保存在本机。"
+            case .alreadyExists:
+                return "这条内容我已经记下了，没有重复保存。"
+            case .requiresReview(let reason):
+                try await store.saveMemory(candidate)
+                return "这条内容需要你在角色与记忆里确认：\(reason)"
+            case .doNotStore:
+                return "为保护账号安全，我不会保存密码、密钥或验证码。"
+            }
+        }
+
+        if let localReply = CharacterLocalAnswer.answer(for: text, identity: identity,
+                                                         memories: memories, capabilities: capabilities) {
+            return localReply
+        }
+
+        let context = CharacterContextBuilder.make(identity: identity, memories: memories,
+                                                    capabilities: capabilities, query: text)
+        let (provider, apiKey) = try modelProviderCredentials()
+        return try await ModelProviderClient().complete(
+            settings: provider, apiKey: apiKey, userText: text,
+            characterContext: context, history: history
+        )
     }
 
     private func runSpeechDemo(_ settings: SpeechSettings,

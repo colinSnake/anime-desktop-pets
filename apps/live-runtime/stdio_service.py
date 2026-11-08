@@ -15,6 +15,26 @@ from typing import TextIO
 from live_announcer import LiveAnnouncer
 from live_pipeline import LivePipeline
 from live_protocol import LiveMessage, decode_command, encode_event
+from source_session import SourceSession
+
+
+def _source_fields(snapshot) -> dict[str, object]:
+    return {
+        "state": snapshot.state.value,
+        "attempts": snapshot.attempts,
+        "next_retry_at": snapshot.next_retry_at,
+        "last_error": snapshot.last_error,
+    }
+
+
+def _status_fields(pipeline: LivePipeline, announcer: LiveAnnouncer | None, source: SourceSession) -> dict[str, object]:
+    fields: dict[str, object] = {
+        "stats": asdict(pipeline.stats()),
+        "source": _source_fields(source.snapshot),
+    }
+    if announcer is not None:
+        fields["speech"] = announcer.stats()
+    return fields
 
 
 def _message_fields(message: LiveMessage) -> dict[str, object]:
@@ -35,6 +55,7 @@ def serve(
     announcer: LiveAnnouncer | None = None,
 ) -> None:
     pipeline = pipeline or LivePipeline()
+    source = SourceSession()
     for line in stdin:
         command, error = decode_command(line)
         if error:
@@ -43,25 +64,30 @@ def serve(
             continue
         kind = command["type"]
         if kind == "ping":
-            fields = {"stats": asdict(pipeline.stats())}
-            if announcer is not None:
-                fields["speech"] = announcer.stats()
-            stdout.write(encode_event("pong", **fields) + "\n")
+            stdout.write(encode_event("pong", **_status_fields(pipeline, announcer, source)) + "\n")
         elif kind == "status":
-            fields = {"stats": asdict(pipeline.stats())}
-            if announcer is not None:
-                fields["speech"] = announcer.stats()
-            stdout.write(encode_event("status", **fields) + "\n")
+            stdout.write(encode_event("status", **_status_fields(pipeline, announcer, source)) + "\n")
         elif kind == "start":
             pipeline.start()
             stdout.write(encode_event("state", state="running") + "\n")
+        elif kind == "source_start":
+            stdout.write(encode_event("source", **_source_fields(source.start())) + "\n")
+        elif kind == "source_connected":
+            stdout.write(encode_event("source", **_source_fields(source.connected())) + "\n")
+        elif kind == "source_disconnected":
+            stdout.write(encode_event("source", **_source_fields(source.disconnected(command["error"]))) + "\n")
+        elif kind == "source_retry":
+            snapshot = source.begin_retry()
+            stdout.write(encode_event("source", **_source_fields(snapshot)) + "\n")
         elif kind == "stop":
             pipeline.stop()
+            source.stop()
             if announcer is not None:
                 announcer.clear()
             stdout.write(encode_event("state", state="stopped") + "\n")
         elif kind == "shutdown":
             pipeline.stop()
+            source.stop()
             if announcer is not None:
                 announcer.clear()
             stdout.write(encode_event("state", state="stopped") + "\n")

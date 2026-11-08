@@ -15,6 +15,14 @@ MAX_MESSAGE_ID_LENGTH = 128
 MAX_DISPLAY_NAME_LENGTH = 64
 MAX_TEXT_LENGTH = 300
 SUPPORTED_PLATFORMS = frozenset({"fixture", "bilibili", "douyin"})
+SOURCE_ERROR_CODES = frozenset({
+    "network_error",
+    "auth_required",
+    "protocol_error",
+    "rate_limited",
+    "source_disconnected",
+    "unknown",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,8 +75,8 @@ def decode_command(line: str) -> tuple[dict[str, Any] | None, str | None]:
         return None, "invalid_command"
 
     kind = command["type"]
-    if kind in {"ping", "status", "drain", "flush", "start", "stop", "shutdown"}:
-        allowed = {"type"} if kind != "drain" else {"type", "limit"}
+    if kind in {"ping", "status", "drain", "flush", "source_start", "source_connected", "source_disconnected", "source_retry", "start", "stop", "shutdown"}:
+        allowed = {"type"} if kind not in {"drain", "source_disconnected"} else ({"type", "limit"} if kind == "drain" else {"type", "error"})
         if set(command) != allowed:
             return None, "invalid_command"
         if kind == "drain":
@@ -76,6 +84,11 @@ def decode_command(line: str) -> tuple[dict[str, Any] | None, str | None]:
             if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 32:
                 return None, "invalid_command"
             return {"type": kind, "limit": limit}, None
+        if kind == "source_disconnected":
+            error = command.get("error", "source_disconnected")
+            if not isinstance(error, str) or error not in SOURCE_ERROR_CODES:
+                return None, "invalid_command"
+            return {"type": kind, "error": error}, None
         return {"type": kind}, None
 
     if kind != "message":

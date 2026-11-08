@@ -185,4 +185,30 @@ final class ModelProviderClientTests: XCTestCase {
         return URLSession(configuration: configuration)
     }
 
+    func testCompletionCarriesOnlyBoundedInMemoryChatHistory() async throws {
+        let settings = ModelProviderSettings()
+        ModelProviderURLProtocolStub.handler = { request in
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: requestBody(request)) as? [String: Any])
+            let messages = try XCTUnwrap(object["messages"] as? [[String: Any]])
+            XCTAssertEqual(messages.map { $0["role"] as? String }, ["system", "user", "assistant", "user"])
+            XCTAssertEqual(messages[1]["content"] as? String, "上一轮问题")
+            XCTAssertEqual(messages[2]["content"] as? String, "上一轮回答")
+            XCTAssertEqual(messages[3]["content"] as? String, "继续聊")
+            let data = try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": ["content": "好的，我们继续。"]]]
+            ])
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
+        }
+
+        let result = try await ModelProviderClient(session: makeSession()).complete(
+            settings: settings, apiKey: "test-key", userText: "继续聊",
+            history: [
+                CharacterChatTurn(role: .user, text: "上一轮问题"),
+                CharacterChatTurn(role: .assistant, text: "上一轮回答")
+            ]
+        )
+
+        XCTAssertEqual(result, "好的，我们继续。")
+    }
+
 }
