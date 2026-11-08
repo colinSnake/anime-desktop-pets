@@ -56,8 +56,12 @@ public struct CharacterGoalDraft: Equatable, Sendable {
         let normalizedSteps = steps.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         guard !normalizedTitle.isEmpty, normalizedTitle.count <= 120,
+              !normalizedTitle.contains("\n"), !normalizedTitle.contains("\r"),
               normalizedDetails.count <= 2_000, normalizedSteps.count <= 50,
-              normalizedSteps.allSatisfy({ $0.count <= 500 && !$0.contains("\n") && !$0.contains("\r") }) else {
+              normalizedSteps.allSatisfy({
+                  $0.count <= 500 && !$0.contains("\n") && !$0.contains("\r") &&
+                      !$0.contains("<!--") && !$0.contains("-->")
+              }) else {
             return nil
         }
         return CharacterGoalDraft(title: normalizedTitle, details: normalizedDetails, steps: normalizedSteps)

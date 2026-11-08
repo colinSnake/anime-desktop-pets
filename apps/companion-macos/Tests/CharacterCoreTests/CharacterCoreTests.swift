@@ -282,4 +282,15 @@ final class CharacterCoreTests: XCTestCase {
             XCTAssertNil(issuer.issueAfterUserApproval(for: credential), "Credential access cannot be approved")
         }
     }
+
+    func testGoalDraftNormalizationTrimsAndRejectsInvalidLimits() {
+        let draft = CharacterGoalDraft(title: "  学习 Swift  ", details: "  每天练习  ",
+                                       steps: ["  看文档 ", "", "完成小项目"])
+        XCTAssertEqual(draft.normalized(), CharacterGoalDraft(title: "学习 Swift", details: "每天练习",
+                                                               steps: ["看文档", "完成小项目"]))
+        XCTAssertNil(CharacterGoalDraft(title: "\n", steps: ["步骤"]).normalized())
+        XCTAssertNil(CharacterGoalDraft(title: "有效标题", steps: [String(repeating: "a", count: 501)]).normalized())
+        XCTAssertNil(CharacterGoalDraft(title: "有效标题", steps: Array(repeating: "步骤", count: 51)).normalized())
+        XCTAssertNil(CharacterGoalDraft(title: "有效标题", steps: ["<!-- 注释载荷 -->"]).normalized())
+    }
 }

@@ -688,7 +688,8 @@ final class Coordinator: NSObject, NSMenuDelegate {
                 characterWindow = CharacterWindow(
                     store: store,
                     capabilities: capabilities,
-                    suggestGoal: { title, details in
+                    suggestGoal: { [weak self] title, details in
+                        guard let self else { throw ModelProviderError.service("桌边小崽已关闭") }
                         let (provider, apiKey) = try self.modelProviderCredentials()
                         return try await ModelProviderClient().suggestGoalSteps(
                             settings: provider, apiKey: apiKey, title: title, details: details

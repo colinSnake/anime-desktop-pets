@@ -41,7 +41,7 @@ struct CharacterGoalsView: View {
             CharacterGoalEditorView(onSave: model.addGoal, suggestGoal: model.suggestGoal)
         }
         .sheet(item: $editingGoal) { goal in
-            CharacterGoalEditorView(goal: goal, suggestGoal: model.suggestGoal) { updated in model.updateGoal(updated) }
+            CharacterGoalEditorView(goal: goal) { updated in model.updateGoal(updated) }
         }
     }
 }

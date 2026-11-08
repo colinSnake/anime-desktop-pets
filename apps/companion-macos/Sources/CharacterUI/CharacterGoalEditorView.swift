@@ -9,6 +9,7 @@ struct CharacterGoalEditorView: View {
     @State private var isSuggesting = false
     @State private var suggestionStatus = ""
     @State private var confirmsOnlineShare = false
+    @State private var suggestionTask: Task<Void, Never>?
     private let existingGoal: CharacterGoal?
     private let onCreate: ((String, String, String) -> Void)?
     private let onUpdate: ((CharacterGoal) -> Void)?
@@ -51,11 +52,16 @@ struct CharacterGoalEditorView: View {
             if suggestGoal != nil {
                 VStack(alignment: .leading, spacing: 6) {
                     Button {
-                        confirmsOnlineShare = true
+                        if isSuggesting {
+                            suggestionTask?.cancel()
+                        } else {
+                            confirmsOnlineShare = true
+                        }
                     } label: {
-                        Label(isSuggesting ? "正在生成草案…" : "让桌宠拟一个计划草案", systemImage: "wand.and.stars")
+                        Label(isSuggesting ? "停止生成" : "让桌宠拟一个计划草案",
+                              systemImage: isSuggesting ? "stop.circle" : "wand.and.stars")
                     }
-                    .disabled(isSuggesting || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(!isSuggesting && title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     Text("只会发送目标名称和说明；结果先填入这里，不会自动保存或执行。")
                         .font(.caption).foregroundStyle(.secondary)
                     if !suggestionStatus.isEmpty {
@@ -65,10 +71,10 @@ struct CharacterGoalEditorView: View {
             }
             HStack {
                 Spacer()
-                Button("取消", role: .cancel) { dismiss() }
+                Button("取消", role: .cancel) { suggestionTask?.cancel(); dismiss() }
                 Button("保存") { save() }
                     .buttonStyle(CharacterActionButtonStyle())
-                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(isSuggesting || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding(20)
@@ -82,6 +88,7 @@ struct CharacterGoalEditorView: View {
         } message: {
             Text("只发送当前目标名称和说明，不发送身份资料或记忆。请求可能产生费用。草案不会自动保存或执行。")
         }
+        .onDisappear { suggestionTask?.cancel() }
     }
 
     private func save() {
@@ -113,19 +120,27 @@ struct CharacterGoalEditorView: View {
         guard !requestedTitle.isEmpty else { return }
         isSuggesting = true
         suggestionStatus = ""
-        Task {
+        suggestionTask = Task {
             do {
                 guard let draft = try await suggest(requestedTitle, requestedDetails).normalized() else {
                     throw CharacterGoalSuggestionError.invalidDraft
+                }
+                guard !Task.isCancelled,
+                      title.trimmingCharacters(in: .whitespacesAndNewlines) == requestedTitle,
+                      details.trimmingCharacters(in: .whitespacesAndNewlines) == requestedDetails else {
+                    suggestionStatus = "目标内容已更改，已丢弃旧草案。"
+                    isSuggesting = false
+                    return
                 }
                 title = draft.title
                 details = draft.details
                 steps = draft.steps.joined(separator: "\n")
                 suggestionStatus = "草案已填入，请检查后再保存。"
             } catch {
-                suggestionStatus = "草案生成失败：\(error.localizedDescription)"
+                suggestionStatus = Task.isCancelled ? "草案已取消。" : "草案生成失败：\(error.localizedDescription)"
             }
             isSuggesting = false
+            suggestionTask = nil
         }
     }
 }

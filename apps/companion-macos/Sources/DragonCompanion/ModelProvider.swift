@@ -208,8 +208,7 @@ struct ModelProviderClient {
                 ["role": "system", "content": "你只为用户提供可编辑的目标步骤草案。不要执行任何操作。仅返回 JSON 对象，格式为 {\"steps\":[\"步骤1\",\"步骤2\"]}。步骤应具体、可检查，最多12步。"],
                 ["role": "user", "content": "目标名称：\(title)\n目标说明：\(details)"]
             ],
-            "max_tokens": 500,
-            "response_format": ["type": "json_object"]
+            "max_tokens": 500
         ]
         var request = URLRequest(url: url, timeoutInterval: 25)
         request.httpMethod = "POST"
@@ -217,16 +216,17 @@ struct ModelProviderClient {
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
         let (data, response) = try await session.data(for: request)
+        guard data.count <= 64 * 1024 else { throw ModelProviderError.invalidResponse }
         guard let http = response as? HTTPURLResponse else { throw ModelProviderError.invalidResponse }
         guard (200..<300).contains(http.statusCode) else {
             throw ModelProviderError.service("HTTP \(http.statusCode)")
         }
-        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let choices = object["choices"] as? [[String: Any]],
               let message = choices.first?["message"] as? [String: Any],
               let content = message["content"] as? String,
               let contentData = content.data(using: .utf8),
-              let draft = try JSONSerialization.jsonObject(with: contentData) as? [String: Any],
+              let draft = (try? JSONSerialization.jsonObject(with: contentData)) as? [String: Any],
               let steps = draft["steps"] as? [String], !steps.isEmpty, steps.count <= 12,
               steps.allSatisfy({ $0.count <= 500 && !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
             throw ModelProviderError.invalidResponse
