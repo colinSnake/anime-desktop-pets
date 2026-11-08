@@ -16,8 +16,10 @@ public struct CharacterWorkspaceView: View {
     @State private var page = Page.identity
 
     public init(store: CharacterMemoryStore, defaultName: String,
-                capabilities: [CharacterCapability]) {
-        _model = StateObject(wrappedValue: CharacterWorkspaceModel(store: store, defaultName: defaultName))
+                capabilities: [CharacterCapability],
+                suggestGoal: ((String, String) async throws -> CharacterGoalDraft)? = nil) {
+        _model = StateObject(wrappedValue: CharacterWorkspaceModel(store: store, defaultName: defaultName,
+                                                                   suggestGoal: suggestGoal))
         self.capabilities = capabilities
     }
 

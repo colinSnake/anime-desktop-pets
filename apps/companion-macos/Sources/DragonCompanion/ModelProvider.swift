@@ -1,6 +1,7 @@
 import Foundation
 import Darwin
 import Security
+import CharacterCore
 
 struct ModelProviderSettings: Codable, Equatable, Sendable {
     var provider = "openai"
@@ -192,6 +193,45 @@ struct ModelProviderClient {
             return String(result.prefix(100))
         }
         throw ModelProviderError.service("工具调用轮数已达上限")
+    }
+
+    func suggestGoalSteps(settings: ModelProviderSettings, apiKey: String,
+                          title: String, details: String) async throws -> CharacterGoalDraft {
+        try settings.validate()
+        guard !apiKey.isEmpty else { throw ModelProviderError.missingAPIKey }
+        guard title.count <= 120, details.count <= 2_000,
+              let url = settings.completionURL else { throw ModelProviderError.invalidSettings }
+
+        let payload: [String: Any] = [
+            "model": settings.model,
+            "messages": [
+                ["role": "system", "content": "你只为用户提供可编辑的目标步骤草案。不要执行任何操作。仅返回 JSON 对象，格式为 {\"steps\":[\"步骤1\",\"步骤2\"]}。步骤应具体、可检查，最多12步。"],
+                ["role": "user", "content": "目标名称：\(title)\n目标说明：\(details)"]
+            ],
+            "max_tokens": 500,
+            "response_format": ["type": "json_object"]
+        ]
+        var request = URLRequest(url: url, timeoutInterval: 25)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw ModelProviderError.invalidResponse }
+        guard (200..<300).contains(http.statusCode) else {
+            throw ModelProviderError.service("HTTP \(http.statusCode)")
+        }
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = object["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any],
+              let content = message["content"] as? String,
+              let contentData = content.data(using: .utf8),
+              let draft = try JSONSerialization.jsonObject(with: contentData) as? [String: Any],
+              let steps = draft["steps"] as? [String], !steps.isEmpty, steps.count <= 12,
+              steps.allSatisfy({ $0.count <= 500 && !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+            throw ModelProviderError.invalidResponse
+        }
+        return CharacterGoalDraft(title: title, details: details, steps: steps)
     }
 
     private func completeWithoutTools(settings: ModelProviderSettings, apiKey: String,

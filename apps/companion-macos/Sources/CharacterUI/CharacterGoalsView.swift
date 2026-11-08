@@ -38,10 +38,10 @@ struct CharacterGoalsView: View {
         }
         .padding(20)
         .sheet(isPresented: $showingNewGoal) {
-            CharacterGoalEditorView(onSave: model.addGoal)
+            CharacterGoalEditorView(onSave: model.addGoal, suggestGoal: model.suggestGoal)
         }
         .sheet(item: $editingGoal) { goal in
-            CharacterGoalEditorView(goal: goal) { updated in model.updateGoal(updated) }
+            CharacterGoalEditorView(goal: goal, suggestGoal: model.suggestGoal) { updated in model.updateGoal(updated) }
         }
     }
 }

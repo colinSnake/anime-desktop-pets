@@ -13,10 +13,13 @@ public final class CharacterWorkspaceModel: ObservableObject {
 
     private let store: CharacterMemoryStore
     private let defaultName: String
+    public let suggestGoal: ((String, String) async throws -> CharacterGoalDraft)?
 
-    public init(store: CharacterMemoryStore, defaultName: String) {
+    public init(store: CharacterMemoryStore, defaultName: String,
+                suggestGoal: ((String, String) async throws -> CharacterGoalDraft)? = nil) {
         self.store = store
         self.defaultName = defaultName
+        self.suggestGoal = suggestGoal
         identity = .starter(name: defaultName)
         refresh()
     }

@@ -685,7 +685,16 @@ final class Coordinator: NSObject, NSMenuDelegate {
                 let store = try CharacterMemoryStore(stateDirectory: runtime.state, petID: "white-dragon")
                 let capabilities = CharacterCapabilitySnapshot.make(runtime: runtime,
                                                                       speechRuntimeAvailable: speechRuntime != nil)
-                characterWindow = CharacterWindow(store: store, capabilities: capabilities)
+                characterWindow = CharacterWindow(
+                    store: store,
+                    capabilities: capabilities,
+                    suggestGoal: { title, details in
+                        let (provider, apiKey) = try self.modelProviderCredentials()
+                        return try await ModelProviderClient().suggestGoalSteps(
+                            settings: provider, apiKey: apiKey, title: title, details: details
+                        )
+                    }
+                )
             }
             characterWindow?.showWindow(nil)
             characterWindow?.window?.makeKeyAndOrderFront(nil)

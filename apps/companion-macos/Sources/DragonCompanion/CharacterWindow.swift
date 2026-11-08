@@ -6,8 +6,10 @@ import SwiftUI
 
 @MainActor
 final class CharacterWindow: NSWindowController {
-    init(store: CharacterMemoryStore, capabilities: [CharacterCapability]) {
-        let content = CharacterWorkspaceView(store: store, defaultName: "龙妹", capabilities: capabilities)
+    init(store: CharacterMemoryStore, capabilities: [CharacterCapability],
+         suggestGoal: @escaping (String, String) async throws -> CharacterGoalDraft) {
+        let content = CharacterWorkspaceView(store: store, defaultName: "龙妹", capabilities: capabilities,
+                                             suggestGoal: suggestGoal)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 600),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)

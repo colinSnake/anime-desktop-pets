@@ -39,6 +39,31 @@ public struct CharacterGoal: Codable, Equatable, Identifiable, Sendable {
     public var completedStepCount: Int { steps.filter(\.isComplete).count }
 }
 
+public struct CharacterGoalDraft: Equatable, Sendable {
+    public var title: String
+    public var details: String
+    public var steps: [String]
+
+    public init(title: String, details: String = "", steps: [String] = []) {
+        self.title = title
+        self.details = details
+        self.steps = steps
+    }
+
+    public func normalized() -> CharacterGoalDraft? {
+        let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedDetails = details.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedSteps = steps.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !normalizedTitle.isEmpty, normalizedTitle.count <= 120,
+              normalizedDetails.count <= 2_000, normalizedSteps.count <= 50,
+              normalizedSteps.allSatisfy({ $0.count <= 500 && !$0.contains("\n") && !$0.contains("\r") }) else {
+            return nil
+        }
+        return CharacterGoalDraft(title: normalizedTitle, details: normalizedDetails, steps: normalizedSteps)
+    }
+}
+
 public enum CharacterGoalValidation {
     public static func validate(_ goal: CharacterGoal) -> Bool {
         let title = goal.title.trimmingCharacters(in: .whitespacesAndNewlines)
