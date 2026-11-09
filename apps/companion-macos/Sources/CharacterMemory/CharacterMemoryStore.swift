@@ -67,7 +67,9 @@ public actor CharacterMemoryStore {
         try prepareDirectories()
         guard memory.id.range(of: "^[A-Fa-f0-9-]{16,64}$", options: .regularExpression) != nil,
               !memory.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              memory.text.count <= 1_000 else { throw CharacterMemoryStoreError.invalidRecord }
+              memory.text.count <= 1_000,
+              memory.source.count <= 200, memory.citation.count <= 500, memory.version.count <= 80,
+              ![memory.source, memory.citation, memory.version].contains(where: { $0.contains("\n") || $0.contains("\r") }) else { throw CharacterMemoryStoreError.invalidRecord }
         try write(CharacterMarkdownCodec.encode(memory: memory), to: memoryURL(memory.id))
     }
 

@@ -8,13 +8,22 @@ public enum CharacterMemoryRetriever {
     ]
 
     public static func relevant(to query: String, in memories: [CharacterMemory], limit: Int = 4,
-                                onlineAuthorizedOnly: Bool = false) -> [CharacterMemory] {
+                                onlineAuthorizedOnly: Bool = false,
+                                includeKnowledgeProvenance: Bool = false,
+                                excluding shouldExclude: (CharacterMemory) -> Bool = { _ in false }) -> [CharacterMemory] {
         guard limit > 0 else { return [] }
-        let queryTerms = terms(in: retrievalQuery(query))
+        let queryTerms = expandedTerms(in: retrievalQuery(query))
         return memories.compactMap { memory -> (CharacterMemory, Double)? in
             guard memory.status == .confirmed,
-                  !onlineAuthorizedOnly || memory.shareWithOnlineModel else { return nil }
-            let score = relevance(of: memory, queryTerms: queryTerms, query: query)
+                  !onlineAuthorizedOnly || memory.shareWithOnlineModel,
+                  !shouldExclude(memory) else { return nil }
+            let searchableText: String
+            if includeKnowledgeProvenance, memory.kind == .knowledge {
+                searchableText = [memory.text, memory.source, memory.citation, memory.version].joined(separator: " ")
+            } else {
+                searchableText = memory.text
+            }
+            let score = relevance(of: searchableText, queryTerms: queryTerms, query: query)
             return score > 0 ? (memory, score) : nil
         }
         .sorted { lhs, rhs in
@@ -37,12 +46,28 @@ public enum CharacterMemoryRetriever {
             .map { $0 }
     }
 
-    private static func relevance(of memory: CharacterMemory, queryTerms: Set<String>, query: String) -> Double {
+    private static func expandedTerms(in text: String) -> Set<String> {
+        var result = terms(in: text)
+        let normalized = normalize(text)
+        let aliases: [(String, String)] = [
+            ("偏好", "喜欢"),
+            ("喜好", "喜欢"),
+            ("爱好", "喜欢"),
+            ("宠物", "狗狗"),
+            ("伙伴", "朋友"),
+        ]
+        for (alias, canonical) in aliases where normalized.contains(alias) {
+            result.insert(canonical)
+        }
+        return result
+    }
+
+    private static func relevance(of text: String, queryTerms: Set<String>, query: String) -> Double {
         let normalizedQuery = normalize(query)
-        let normalizedContent = normalize(memory.text)
+        let normalizedContent = normalize(text)
         if normalizedQuery.count >= 2, normalizedContent.contains(normalizedQuery) { return 2 }
         guard !queryTerms.isEmpty else { return 0 }
-        let matches = queryTerms.intersection(terms(in: memory.text)).count
+        let matches = queryTerms.intersection(terms(in: text)).count
         guard matches > 0 else { return 0 }
         let coverage = Double(matches) / Double(queryTerms.count)
         return coverage >= 0.25 ? coverage : 0

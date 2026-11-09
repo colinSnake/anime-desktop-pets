@@ -159,8 +159,9 @@ public final class CharacterWorkspaceModel: ObservableObject {
         }
     }
 
-    public func addMemory(text: String, kind: CharacterMemoryKind) {
-        let item = CharacterMemory(kind: kind, text: text, source: "用户在角色与记忆窗口添加")
+    public func addMemory(text: String, kind: CharacterMemoryKind, source: String = "用户在角色与记忆窗口添加",
+                           citation: String = "", version: String = "") {
+        let item = CharacterMemory(kind: kind, text: text, source: source, citation: citation, version: version)
         Task {
             do {
                 try await store.saveMemory(item)

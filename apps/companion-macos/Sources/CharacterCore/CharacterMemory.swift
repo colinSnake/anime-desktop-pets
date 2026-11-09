@@ -18,17 +18,23 @@ public struct CharacterMemory: Codable, Equatable, Identifiable, Sendable {
     public var text: String
     public var createdAt: Date
     public var source: String
+    /// Optional provenance details used by character knowledge entries.
+    public var citation: String
+    public var version: String
     public var status: Status
     public var shareWithOnlineModel: Bool
 
     public init(id: String = UUID().uuidString.lowercased(), kind: CharacterMemoryKind,
                 text: String, createdAt: Date = .now, source: String,
+                citation: String = "", version: String = "",
                 status: Status = .candidate, shareWithOnlineModel: Bool = false) {
         self.id = id
         self.kind = kind
         self.text = text
         self.createdAt = createdAt
         self.source = source
+        self.citation = citation
+        self.version = version
         self.status = status
         self.shareWithOnlineModel = shareWithOnlineModel
     }
@@ -63,6 +69,16 @@ public enum CharacterLocalAnswer {
             if !personality.isEmpty { answer += "我的性格是\(personality.prefix(24))。" }
             return String(answer.prefix(100))
         }
+        if isKnowledgeRecallQuestion(text) {
+            let knowledge = locallyAnswerable(memories.filter { $0.kind == .knowledge }, against: memories)
+            let matches = isBroadKnowledgeRecall(text)
+                ? CharacterMemoryRetriever.recent(in: knowledge)
+                : CharacterMemoryRetriever.relevant(to: text, in: knowledge, limit: 3,
+                                                    includeKnowledgeProvenance: true)
+            guard !matches.isEmpty else { return "我还没有确认的角色知识。" }
+            let items = matches.map { "知识：\($0.text)" }
+            return String(("我目前确认的角色知识有：" + items.joined(separator: "；")).prefix(120))
+        }
         if text.contains("你会什么") || text.contains("有什么能力") || text.contains("能做什么") {
             let available = capabilities.filter { $0.status == .enabled }.map(\.name)
             let unavailable = capabilities.filter { $0.status != .enabled }.map { "\($0.name)（\($0.status.rawValue)）" }
@@ -72,18 +88,39 @@ public enum CharacterLocalAnswer {
         }
         if isMemoryRecallQuestion(text) {
             let matches: [CharacterMemory]
+            let answerable = locallyAnswerable(memories, against: memories)
             if text.contains("我的偏好") {
-                matches = CharacterMemoryRetriever.recent(in: memories.filter { $0.kind == .preference })
+                matches = CharacterMemoryRetriever.recent(in: answerable.filter { $0.kind == .preference })
             } else if isBroadRecall(text) {
-                matches = CharacterMemoryRetriever.recent(in: memories)
+                matches = CharacterMemoryRetriever.recent(in: answerable)
             } else {
-                matches = CharacterMemoryRetriever.relevant(to: text, in: memories, limit: 3)
+                matches = CharacterMemoryRetriever.relevant(to: text, in: answerable, limit: 3,
+                                                            includeKnowledgeProvenance: true)
             }
             guard !matches.isEmpty else { return "我没有找到与这个问题相关的已确认记忆。" }
             let items = matches.map { "\($0.kind.rawValue)：\($0.text)" }
             return String(("我记得：" + items.joined(separator: "；")).prefix(100))
         }
         return nil
+    }
+
+    private static func locallyAnswerable(_ memories: [CharacterMemory],
+                                          against allMemories: [CharacterMemory]) -> [CharacterMemory] {
+        memories.filter { memory in
+            let metadata = [memory.text, memory.source, memory.citation, memory.version].joined(separator: " ")
+            guard !CharacterMemoryReview.isCredentialLike(metadata) else { return false }
+            guard memory.kind == .knowledge else { return true }
+            return !CharacterMemoryReview.hasUnresolvedKnowledgeConflict(memory, against: allMemories)
+        }
+    }
+
+    private static func isKnowledgeRecallQuestion(_ text: String) -> Bool {
+        ["角色知识", "来源", "引用", "版本", "你知道哪些角色知识", "你知道什么角色知识", "你的角色知识",
+         "你了解这个角色什么", "你对自己知道什么"].contains(where: text.contains)
+    }
+
+    private static func isBroadKnowledgeRecall(_ text: String) -> Bool {
+        ["你知道哪些角色知识", "你知道什么角色知识", "你的角色知识"].contains(where: text.contains)
     }
 
     private static func isMemoryRecallQuestion(_ text: String) -> Bool {

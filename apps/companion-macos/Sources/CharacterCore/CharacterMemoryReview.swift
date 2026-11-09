@@ -4,11 +4,13 @@ public enum CharacterMemoryReview {
     public enum Finding: Equatable, Sendable {
         case possibleDuplicate(CharacterMemory)
         case possibleConflict(CharacterMemory)
+        case possibleKnowledgeConflict(CharacterMemory)
 
         public var title: String {
             switch self {
             case .possibleDuplicate: "可能重复"
             case .possibleConflict: "可能冲突"
+            case .possibleKnowledgeConflict: "知识依据冲突"
             }
         }
 
@@ -16,6 +18,7 @@ public enum CharacterMemoryReview {
             switch self {
             case .possibleDuplicate(let memory): "与已有记忆相同：\(memory.text)"
             case .possibleConflict(let memory): "与已有记忆可能相反：\(memory.text)"
+            case .possibleKnowledgeConflict(let memory): "同一来源、引用和版本下已有不同内容：\(memory.text)"
             }
         }
     }
@@ -52,6 +55,12 @@ public enum CharacterMemoryReview {
         }), case .possibleDuplicate(let existing) = duplicate {
             return .alreadyExists(existing)
         }
+        if let knowledgeConflict = findings.first(where: {
+            if case .possibleKnowledgeConflict = $0 { return true }
+            return false
+        }), case .possibleKnowledgeConflict(let existing) = knowledgeConflict {
+            return .requiresReview("发现知识依据冲突：与已有条目内容不同：\(existing.text)")
+        }
         if let finding = findings.first {
             return .requiresReview("发现\(finding.title)：\(finding.message)")
         }
@@ -76,11 +85,30 @@ public enum CharacterMemoryReview {
                 if normalize(existing.text) == candidateText {
                     return .possibleDuplicate(existing)
                 }
+                if candidate.kind == .knowledge, sameKnowledgeProvenance(candidate, existing) {
+                    return .possibleKnowledgeConflict(existing)
+                }
                 guard candidate.kind == .fact || candidate.kind == .preference,
                       hasOppositePolarity(candidate.text, existing.text),
                       sharedTopic(candidate.text, existing.text) else { return nil }
                 return .possibleConflict(existing)
             }
+    }
+
+    public static func hasUnresolvedKnowledgeConflict(_ memory: CharacterMemory,
+                                                       against memories: [CharacterMemory]) -> Bool {
+        findings(for: memory, against: memories).contains {
+            if case .possibleKnowledgeConflict = $0 { return true }
+            return false
+        }
+    }
+
+    private static func sameKnowledgeProvenance(_ lhs: CharacterMemory, _ rhs: CharacterMemory) -> Bool {
+        guard lhs.kind == .knowledge, rhs.kind == .knowledge,
+              !lhs.source.isEmpty, !lhs.citation.isEmpty else { return false }
+        return normalize(lhs.source) == normalize(rhs.source)
+            && normalize(lhs.citation) == normalize(rhs.citation)
+            && normalize(lhs.version) == normalize(rhs.version)
     }
 
     private static func hasOppositePolarity(_ lhs: String, _ rhs: String) -> Bool {

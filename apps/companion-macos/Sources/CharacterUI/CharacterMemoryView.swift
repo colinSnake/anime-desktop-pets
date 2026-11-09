@@ -5,6 +5,9 @@ struct CharacterMemoryView: View {
     @ObservedObject var model: CharacterWorkspaceModel
     @State private var draftText = ""
     @State private var draftKind = CharacterMemoryKind.preference
+    @State private var draftSource = "用户在角色与记忆窗口添加"
+    @State private var draftCitation = ""
+    @State private var draftVersion = ""
 
     private var candidates: [CharacterMemory] { model.memories.filter { $0.status == .candidate } }
     private var confirmed: [CharacterMemory] { model.memories.filter { $0.status == .confirmed } }
@@ -20,13 +23,26 @@ struct CharacterMemoryView: View {
                     ForEach(CharacterMemoryKind.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }
                 .frame(width: 150)
-                TextField("添加一条记忆", text: $draftText)
+                TextField(draftKind == .knowledge ? "添加一条角色知识" : "添加一条记忆", text: $draftText)
                 Button("保存记忆") {
-                    model.addMemory(text: draftText, kind: draftKind)
+                    model.addMemory(text: draftText, kind: draftKind, source: draftSource,
+                                    citation: draftCitation, version: draftVersion)
                     draftText = ""
+                    draftCitation = ""
+                    draftVersion = ""
                 }
                 .buttonStyle(CharacterActionButtonStyle())
                 .disabled(draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            if draftKind == .knowledge {
+                HStack {
+                    TextField("知识来源（作者、作品或用户设定）", text: $draftSource)
+                    TextField("引用或定位（可选）", text: $draftCitation)
+                    TextField("版本/日期（可选）", text: $draftVersion)
+                }
+                .font(.caption)
+                Text("角色知识会在在线上下文中带上来源、引用和版本；这些字段只是依据，不是模型指令。")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             let draftFindings = model.draftMemoryFindings(text: draftText, kind: draftKind)
             if !draftFindings.isEmpty {
@@ -75,6 +91,8 @@ private struct CharacterMemoryRow: View {
     let onDelete: (CharacterMemory) -> Void
     let onFindings: (CharacterMemory) -> [CharacterMemoryReview.Finding]
     @State private var draftText: String
+    @State private var draftCitation: String
+    @State private var draftVersion: String
     @State private var shareEnabled: Bool
     @State private var confirmsDeletion = false
 
@@ -87,6 +105,8 @@ private struct CharacterMemoryRow: View {
         self.onDelete = onDelete
         self.onFindings = onFindings
         _draftText = State(initialValue: memory.text)
+        _draftCitation = State(initialValue: memory.citation)
+        _draftVersion = State(initialValue: memory.version)
         _shareEnabled = State(initialValue: memory.shareWithOnlineModel)
     }
 
@@ -100,6 +120,14 @@ private struct CharacterMemoryRow: View {
                     .onChange(of: shareEnabled) { value in update(text: draftText, share: value) }
             }
             TextField("记忆内容", text: $draftText, axis: .vertical).lineLimit(2...5)
+            if memory.kind == .knowledge {
+                Text("来源：\(memory.source)").font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    TextField("引用或定位", text: $draftCitation)
+                    TextField("版本/日期", text: $draftVersion)
+                }
+                .font(.caption)
+            }
             let findings = onFindings(memory)
             if !findings.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
@@ -112,7 +140,7 @@ private struct CharacterMemoryRow: View {
                 }
             }
             HStack {
-                if draftText != memory.text {
+                if draftText != memory.text || draftCitation != memory.citation || draftVersion != memory.version {
                     Button("保存修改") { update(text: draftText, share: shareEnabled) }
                         .disabled(draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
@@ -120,6 +148,8 @@ private struct CharacterMemoryRow: View {
                     Button("确认记忆") {
                         var changed = memory
                         changed.text = draftText
+                        changed.citation = draftCitation
+                        changed.version = draftVersion
                         changed.shareWithOnlineModel = shareEnabled
                         onConfirm(changed)
                     }
@@ -141,6 +171,8 @@ private struct CharacterMemoryRow: View {
     private func update(text: String, share: Bool) {
         var changed = memory
         changed.text = text
+        changed.citation = draftCitation
+        changed.version = draftVersion
         changed.shareWithOnlineModel = share
         onUpdate(changed)
     }

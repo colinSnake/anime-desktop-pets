@@ -86,6 +86,69 @@ final class CharacterCoreTests: XCTestCase {
         XCTAssertNil(CharacterLocalAnswer.answer(for: "讲个故事", identity: identity, memories: [], capabilities: capabilities))
     }
 
+    func testKnowledgeQuestionsAreAnsweredLocallyAndExcludeUnconfirmedItems() {
+        let memories = [
+            CharacterMemory(kind: .knowledge, text: "龙妹喜欢把复杂事情拆成小步骤", source: "test",
+                            status: .confirmed),
+            CharacterMemory(kind: .knowledge, text: "未确认的角色传闻", source: "test",
+                            status: .candidate),
+        ]
+        let identity = CharacterIdentity(name: "龙妹")
+
+        let answer = CharacterLocalAnswer.answer(for: "你知道哪些角色知识？", identity: identity,
+                                                 memories: memories, capabilities: [])
+
+        XCTAssertTrue(answer?.contains("复杂事情拆成小步骤") == true)
+        XCTAssertFalse(answer?.contains("未确认的角色传闻") == true)
+    }
+
+    func testLocalKnowledgeRecallUsesCitationAndExcludesConflicts() {
+        let memories = [
+            CharacterMemory(kind: .knowledge, text: "角色喜欢短句", source: "角色手册",
+                            citation: "§2.1", version: "v1", status: .confirmed),
+            CharacterMemory(kind: .knowledge, text: "角色偏好长篇解释", source: "角色手册",
+                            citation: "§2.1", version: "v1", status: .confirmed),
+            CharacterMemory(kind: .knowledge, text: "角色会先核对依据", source: "角色手册",
+                            citation: "§3", version: "v1", status: .confirmed),
+        ]
+        let identity = CharacterIdentity(name: "龙妹")
+
+        let answer = CharacterLocalAnswer.answer(for: "角色知识 §3",
+                                                 identity: identity, memories: memories, capabilities: [])
+
+        XCTAssertTrue(answer?.contains("角色会先核对依据") == true)
+        XCTAssertFalse(answer?.contains("短句") == true)
+        XCTAssertFalse(answer?.contains("长篇解释") == true)
+    }
+
+    func testLocalMemoryRecallNeverRevealsCredentialLikeRecords() {
+        let memories = [
+            CharacterMemory(kind: .fact, text: "我的 API key 是 secret", source: "legacy",
+                            status: .confirmed),
+            CharacterMemory(kind: .preference, text: "我喜欢安静的咖啡馆", source: "test",
+                            status: .confirmed),
+        ]
+        let identity = CharacterIdentity(name: "龙妹")
+
+        let answer = CharacterLocalAnswer.answer(for: "你记得什么？", identity: identity,
+                                                 memories: memories, capabilities: [])
+
+        XCTAssertTrue(answer?.contains("安静的咖啡馆") == true)
+        XCTAssertFalse(answer?.contains("API key") == true)
+        XCTAssertFalse(answer?.contains("secret") == true)
+    }
+
+    func testMemoryRecallUnderstandsSmallSetOfChinesePreferenceAliases() {
+        let memories = [CharacterMemory(kind: .preference, text: "我喜欢安静的咖啡馆", source: "test",
+                                        status: .confirmed)]
+        let identity = CharacterIdentity(name: "龙妹")
+
+        let answer = CharacterLocalAnswer.answer(for: "你记得我的喜好吗？", identity: identity,
+                                                 memories: memories, capabilities: [])
+
+        XCTAssertTrue(answer?.contains("安静的咖啡馆") == true)
+    }
+
     func testLocalMemoryRecallRanksRelevantConfirmedMemoriesWithoutOnlineSharing() {
         let memories = [
             CharacterMemory(kind: .fact, text: "狗狗名字叫雪球", createdAt: Date(timeIntervalSince1970: 3),
@@ -142,6 +205,20 @@ final class CharacterCoreTests: XCTestCase {
         let decision = CharacterMemoryReview.automationDecision(for: candidate, against: [existing])
 
         XCTAssertEqual(decision, .alreadyExists(existing))
+    }
+
+    func testKnowledgeWithSameProvenanceRequiresReviewWhenContentDiffers() {
+        let existing = CharacterMemory(kind: .knowledge, text: "角色喜欢短句", source: "角色手册",
+                                       citation: "§2.1", version: "v1", status: .confirmed)
+        let candidate = CharacterMemory(kind: .knowledge, text: "角色偏好长篇解释", source: "角色手册",
+                                        citation: "§2.1", version: "v1")
+
+        guard case .requiresReview(let reason) = CharacterMemoryReview.automationDecision(
+            for: candidate, against: [existing]
+        ) else {
+            return XCTFail("Conflicting knowledge with identical provenance must require review")
+        }
+        XCTAssertTrue(reason.contains("知识依据冲突"))
     }
 
     func testMemoryAutonomyEscalatesConflictAndSensitiveDetails() {
@@ -311,6 +388,72 @@ final class CharacterCoreTests: XCTestCase {
         XCTAssertEqual(CharacterChatSession.validatedInput("  你好  "), "你好")
         XCTAssertEqual(CharacterChatSession.validatedInput(String(repeating: "字", count: 1_200))?.count, 1_200)
         XCTAssertNil(CharacterChatSession.validatedInput(String(repeating: "字", count: 1_201)))
+    }
+
+    func testKnowledgeContextCarriesProvenanceButTreatsItAsReference() {
+        let memory = CharacterMemory(kind: .knowledge, text: "龙妹喜欢把复杂事情拆成小步骤",
+                                     source: "用户确认的角色设定", citation: "角色手册 §2.1",
+                                     version: "2026-11-08", status: .confirmed,
+                                     shareWithOnlineModel: true)
+
+        let context = CharacterContextBuilder.make(identity: nil, memories: [memory],
+                                                   query: "复杂事情怎么处理")
+
+        XCTAssertTrue(context?.contains("来源：用户确认的角色设定") == true)
+        XCTAssertTrue(context?.contains("引用：角色手册 §2.1") == true)
+        XCTAssertTrue(context?.contains("版本：2026-11-08") == true)
+        XCTAssertTrue(context?.contains("龙妹喜欢把复杂事情拆成小步骤") == true)
+    }
+
+    func testKnowledgeCredentialInProvenanceIsExcludedFromOnlineContext() {
+        let memory = CharacterMemory(kind: .knowledge, text: "角色设定", source: "内部资料",
+                                     citation: "API key: do-not-send", status: .confirmed,
+                                     shareWithOnlineModel: true)
+
+        XCTAssertNil(CharacterContextBuilder.make(identity: nil, memories: [memory], query: "角色设定"))
+    }
+
+    func testKnowledgeCanBeRetrievedByCitationOrVersion() {
+        let memory = CharacterMemory(kind: .knowledge, text: "龙妹喜欢把复杂事情拆成小步骤",
+                                     source: "角色手册", citation: "第2章 §2.1", version: "2026-11",
+                                     status: .confirmed, shareWithOnlineModel: true)
+
+        let context = CharacterContextBuilder.make(identity: nil, memories: [memory], query: "角色手册第2章")
+
+        XCTAssertTrue(context?.contains("龙妹喜欢把复杂事情拆成小步骤") == true)
+        XCTAssertTrue(context?.contains("引用：第2章 §2.1") == true)
+    }
+
+    func testExcludedKnowledgeDoesNotConsumeOnlineMemoryLimit() {
+        let memories = [
+            CharacterMemory(kind: .knowledge, text: "第一条待审核知识", source: "手册",
+                            citation: "§1", status: .candidate, shareWithOnlineModel: true),
+            CharacterMemory(kind: .knowledge, text: "凭证相关知识", source: "手册",
+                            citation: "API key: do-not-send", status: .confirmed,
+                            shareWithOnlineModel: true),
+            CharacterMemory(kind: .knowledge, text: "可分享的安全知识", source: "手册",
+                            citation: "§3", status: .confirmed, shareWithOnlineModel: true),
+        ]
+
+        let context = CharacterContextBuilder.make(identity: nil, memories: memories,
+                                                   query: "手册知识", memoryLimit: 1)
+
+        XCTAssertTrue(context?.contains("可分享的安全知识") == true)
+        XCTAssertFalse(context?.contains("第一条待审核知识") == true)
+        XCTAssertFalse(context?.contains("凭证相关知识") == true)
+    }
+
+    func testConflictingKnowledgeIsExcludedFromOnlineContextUntilReviewed() {
+        let memories = [
+            CharacterMemory(kind: .knowledge, text: "角色喜欢短句", source: "角色手册",
+                            citation: "§2.1", version: "v1", status: .confirmed,
+                            shareWithOnlineModel: true),
+            CharacterMemory(kind: .knowledge, text: "角色偏好长篇解释", source: "角色手册",
+                            citation: "§2.1", version: "v1", status: .confirmed,
+                            shareWithOnlineModel: true),
+        ]
+
+        XCTAssertNil(CharacterContextBuilder.make(identity: nil, memories: memories, query: "角色表达方式"))
     }
 
     func testKnowledgeIsSeparatedFromUserMemoryInOnlineContext() {

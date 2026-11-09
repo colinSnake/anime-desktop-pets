@@ -13,6 +13,8 @@ enum CharacterMarkdownCodec {
         let kind: CharacterMemoryKind
         let createdAt: Date
         let source: String
+        let citation: String?
+        let version: String?
         let status: CharacterMemory.Status
         let shareWithOnlineModel: Bool
     }
@@ -91,8 +93,10 @@ enum CharacterMarkdownCodec {
     }
 
     static func encode(memory: CharacterMemory) throws -> Data {
-        let metadata = MemoryMetadata(schema: 1, id: memory.id, kind: memory.kind,
+        let metadata = MemoryMetadata(schema: 2, id: memory.id, kind: memory.kind,
                                       createdAt: memory.createdAt, source: memory.source,
+                                      citation: memory.citation.isEmpty ? nil : memory.citation,
+                                      version: memory.version.isEmpty ? nil : memory.version,
                                       status: memory.status, shareWithOnlineModel: memory.shareWithOnlineModel)
         let frontMatter = try encodeFrontMatter(metadata)
         return Data("---\n\(frontMatter)\n---\n\n\(memory.text)\n".utf8)
@@ -105,13 +109,14 @@ enum CharacterMarkdownCodec {
         decoder.dateDecodingStrategy = .iso8601
         let metadata = try decoder.decode(MemoryMetadata.self, from: metadataData)
         let text = body.trimmingCharacters(in: .newlines)
-        guard metadata.schema == 1, metadata.id == expectedID,
+        guard (metadata.schema == 1 || metadata.schema == 2), metadata.id == expectedID,
               metadata.id.range(of: "^[A-Fa-f0-9-]{16,64}$", options: .regularExpression) != nil,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.count <= 1_000 else {
             throw CharacterMemoryStoreError.invalidRecord
         }
         return CharacterMemory(id: metadata.id, kind: metadata.kind, text: text,
                                createdAt: metadata.createdAt, source: metadata.source,
+                               citation: metadata.citation ?? "", version: metadata.version ?? "",
                                status: metadata.status, shareWithOnlineModel: metadata.shareWithOnlineModel)
     }
 

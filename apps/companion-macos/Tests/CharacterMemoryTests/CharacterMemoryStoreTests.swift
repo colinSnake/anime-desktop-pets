@@ -107,6 +107,39 @@ final class CharacterMemoryStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.personality, "冷静但直率")
     }
 
+    func testKnowledgeProvenanceRoundTripsAndLegacyMemoryStillLoads() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try CharacterMemoryStore(stateDirectory: root, petID: "white-dragon")
+        _ = try await store.loadIdentity(defaultName: "龙妹")
+
+        let knowledge = CharacterMemory(id: "11111111-1111-1111-1111-111111111111", kind: .knowledge,
+                                        text: "复杂问题先拆成小步骤", source: "用户确认的角色设定",
+                                        citation: "角色手册 §2.1", version: "2026-11-08",
+                                        status: .confirmed, shareWithOnlineModel: true)
+        try await store.saveMemory(knowledge)
+        let loaded = try await store.listMemories()
+        XCTAssertEqual(loaded.first?.citation, "角色手册 §2.1")
+        XCTAssertEqual(loaded.first?.version, "2026-11-08")
+
+        let legacyID = "22222222-2222-2222-2222-222222222222"
+        let legacyURL = root.appendingPathComponent("pets/white-dragon/character/memories/\(legacyID).md")
+        let legacy = """
+        ---
+        {"schema":1,"id":"\(legacyID)","kind":"事实","createdAt":"2026-11-08T00:00:00Z","source":"legacy","status":"confirmed","shareWithOnlineModel":false}
+        ---
+
+        旧格式资料
+        """
+        try legacy.write(to: legacyURL, atomically: true, encoding: .utf8)
+
+        let all = try await store.listMemories()
+        let loadedLegacy = try XCTUnwrap(all.first { $0.id == legacyID })
+        XCTAssertEqual(loadedLegacy.text, "旧格式资料")
+        XCTAssertEqual(loadedLegacy.citation, "")
+        XCTAssertEqual(loadedLegacy.version, "")
+    }
+
     func testIdentityNameIsNormalizedBeforeWritingMarkdown() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

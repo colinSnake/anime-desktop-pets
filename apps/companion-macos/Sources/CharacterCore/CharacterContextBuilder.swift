@@ -11,19 +11,33 @@ public enum CharacterContextBuilder {
         }
 
         let relevantMemories = CharacterMemoryRetriever.relevant(
-            to: query, in: memories, limit: memoryLimit, onlineAuthorizedOnly: true
-        ).filter { !CharacterMemoryReview.isCredentialLike($0.text) }
+            to: query, in: memories, limit: memoryLimit, onlineAuthorizedOnly: true,
+            includeKnowledgeProvenance: true
+        ) {
+            CharacterMemoryReview.isCredentialLike([$0.text, $0.source, $0.citation, $0.version].joined(separator: " "))
+                || CharacterMemoryReview.hasUnresolvedKnowledgeConflict($0, against: memories)
+        }
 
         var used = sections.joined(separator: "\n\n").count
         var memoryLines: [String] = []
         var knowledgeLines: [String] = []
         for memory in relevantMemories {
-            let line = "- \(memory.text)"
+            let line: String
+            if memory.kind == .knowledge {
+                let provenance = [
+                    memory.source.isEmpty ? nil : "来源：\(memory.source)",
+                    memory.citation.isEmpty ? nil : "引用：\(memory.citation)",
+                    memory.version.isEmpty ? nil : "版本：\(memory.version)"
+                ].compactMap { $0 }.joined(separator: "；")
+                line = provenance.isEmpty ? "- \(memory.text)" : "- [\(provenance)] \(memory.text)"
+            } else {
+                line = "- [\(memory.kind.rawValue)] \(memory.text)"
+            }
             guard used + line.count + 36 <= limit else { continue }
             if memory.kind == .knowledge {
                 knowledgeLines.append(line)
             } else {
-                memoryLines.append("- [\(memory.kind.rawValue)] \(memory.text)")
+                memoryLines.append(line)
             }
             used += line.count + 1
         }
