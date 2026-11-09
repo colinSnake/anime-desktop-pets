@@ -392,6 +392,7 @@ class Bubble(QWidget):
         self.configure_width(316)
         self.clear()
         self.result_title = self.label(title, cap=42, title=True, line_height=125)
+        self.result_title.set_text_alignment(Qt.AlignmentFlag.AlignLeft)
         self.result_view = self.label(text, cap=168, line_height=130)
         button = QPushButton('详情', self)
         button.setAccessibleName('详情')

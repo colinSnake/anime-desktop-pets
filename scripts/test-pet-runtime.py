@@ -430,6 +430,19 @@ class UITests(unittest.TestCase):
         self.assertGreater(self.bubble.height(),first)
         self.bubble.findChildren(QPushButton)[0].click();self.assertTrue(called)
         self.assertGreater(self.bubble.result_view.verticalScrollBar().maximum(),0)
+    def test_multiline_result_title_stays_left_aligned_when_last_line_is_one_character(self):
+        from PySide6.QtCore import Qt
+        self.bubble.task_result('顶部标题','结果',lambda:None)
+        title=self.bubble.result_title
+        title.setText('这是换行标题\n单字\n字')
+        APP.processEvents()
+        block=title.document().begin()
+        alignments=[]
+        while block.isValid():
+            alignments.append(block.blockFormat().alignment())
+            block=block.next()
+        self.assertEqual(alignments,[Qt.AlignmentFlag.AlignLeft]*3)
+        self.assertEqual(title.text_alignment,Qt.AlignmentFlag.AlignLeft)
     def test_small_screen_constrains_result_and_keeps_it_scrollable(self):
         from PySide6.QtCore import QRect
         self.bubble.task_result('多行标题\n第二行','非常长的中文结果\n'*100,lambda:None)
