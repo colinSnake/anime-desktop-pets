@@ -499,7 +499,13 @@ class Bubble(QWidget):
         try:
             if is_balance:
                 window = next(w for w in windows if w.get('kind') == 'balance')
-                summary = f"{window['name']}余额 {window['remaining']:,.2f} {window['unit']}"
+                unit = str(window.get('unit', '')).strip()
+                spoken_unit = {
+                    'USD': '美元', 'CNY': '人民币', 'RMB': '人民币',
+                    'EUR': '欧元', 'JPY': '日元', 'GBP': '英镑',
+                    'CAD': '加元', 'AUD': '澳元',
+                }.get(unit.upper(), unit)
+                summary = f"中转账户余额 {window['remaining']:,.2f} {spoken_unit}".strip()
             else:
                 entries = [
                     f"{window['name']}剩余{window['remaining']:g}%"

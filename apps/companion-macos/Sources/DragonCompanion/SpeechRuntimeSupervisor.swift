@@ -27,11 +27,15 @@ final class SpeechRuntimeSupervisor {
     private var output: FileHandle?
     private var outputBuffer = Data()
     private var stoppingGracefully = false
+    private var terminationRequested = false
     private var generation = UUID()
     private var runningAdditionalArguments: [String]?
     private var terminationWaiters: [() -> Void] = []
 
     var isRunning: Bool { process?.isRunning == true }
+    var isStopping: Bool { stoppingGracefully || terminationRequested }
+    private(set) var isReady = false
+    var isTTSOnly: Bool { isRunning && runningAdditionalArguments?.contains("--tts-only") == true }
 
     func isRunning(withAdditionalArguments additionalArguments: [String]) -> Bool {
         isRunning && runningAdditionalArguments == additionalArguments
@@ -68,6 +72,8 @@ final class SpeechRuntimeSupervisor {
         }
 
         generation = token
+        isReady = false
+        terminationRequested = false
         try child.run()
         process = child
         runningAdditionalArguments = additionalArguments
@@ -124,9 +130,21 @@ final class SpeechRuntimeSupervisor {
         }
     }
 
-    func terminateImmediately() {
-        guard let process, process.isRunning else { return }
+    func terminateImmediately(completion: (() -> Void)? = nil) {
+        if let completion { terminationWaiters.append(completion) }
+        guard let process, process.isRunning else {
+            finishTerminationWaiters()
+            return
+        }
+        terminationRequested = true
         process.terminate()
+        let token = generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self, weak process] in
+            guard let self, let process, process.isRunning,
+                  self.process === process, self.generation == token else { return }
+            fputs("Dragon: speech runtime ignored immediate termination; forcing owned child to exit.\n", stderr)
+            _ = kill(process.processIdentifier, SIGKILL)
+        }
     }
 
     func restart() throws {
@@ -161,6 +179,7 @@ final class SpeechRuntimeSupervisor {
             outputBuffer.removeSubrange(...newline)
             guard let event = try? JSONDecoder().decode(SpeechRuntimeEvent.self, from: Data(line)),
                   event.protocolVersion == 1 else { continue }
+            if event.type == "ready" { isReady = true }
             onEvent?(event)
         }
     }
@@ -170,6 +189,8 @@ final class SpeechRuntimeSupervisor {
         input?.closeFile(); input = nil
         output?.readabilityHandler = nil; output?.closeFile(); output = nil
         process = nil
+        isReady = false
+        terminationRequested = false
         runningAdditionalArguments = nil
         outputBuffer.removeAll(keepingCapacity: false)
         stoppingGracefully = false

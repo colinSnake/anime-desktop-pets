@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "apps" / "speech-runtime"))
 
 from protocol import MAX_COMMAND_BYTES, decode_command
-from stdio_service import SilentPlayer, SoundDevicePlayer, serve
+from stdio_service import SilentPlayer, SoundDevicePlayer, parse_args, run, serve
 
 
 class FakeBackend:
@@ -208,6 +208,26 @@ class ServiceLoopTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(sum(event["type"] == "ready" for event in events), 1)
         self.assertEqual(sum(event["state"] == "reply" for event in events if event["type"] == "session"), 2)
+
+    async def test_tts_only_skips_asr_loading_without_synthesis_or_output(self):
+        from unittest.mock import AsyncMock
+        with patch.object(sys, "argv", ["stdio_service.py", "--tts-only", "--tts-model", "/synthetic/tts"]):
+            args = parse_args()
+        with patch("stdio_service.LocalMLXBackend.load", return_value=FakeBackend()) as load, \
+                patch("stdio_service.serve", new_callable=AsyncMock) as mocked_serve, \
+                patch("stdio_service.SoundDevicePlayer", side_effect=AssertionError("unexpected speaker")):
+            await run(args)
+        load.assert_called_once_with(Path("/synthetic/tts"), None)
+        self.assertIsInstance(mocked_serve.call_args.args[1], SilentPlayer)
+
+    async def test_default_runtime_still_loads_asr_for_voice_chat(self):
+        from unittest.mock import AsyncMock
+        with patch.object(sys, "argv", ["stdio_service.py", "--asr-model", "/synthetic/asr"]):
+            args = parse_args()
+        with patch("stdio_service.LocalMLXBackend.load", return_value=FakeBackend()) as load, \
+                patch("stdio_service.serve", new_callable=AsyncMock):
+            await run(args)
+        load.assert_called_once_with(None, Path("/synthetic/asr"))
 
     async def test_protocol_errors_do_not_echo_input(self):
         commands = '{"type":"chat","platform":"bilibili","text":"secret","cookie":"secret"}\n{"type":"shutdown"}\n'

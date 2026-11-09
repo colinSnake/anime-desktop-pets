@@ -6,6 +6,7 @@ final class SpeechSettingsWindow: NSWindowController, NSWindowDelegate {
     private let store: SpeechSettingsStore
     private var settings: SpeechSettings
     var onDemo: ((SpeechSettings, @escaping (Result<String, Error>) -> Void) -> Void)?
+    var onSettingsSaved: ((SpeechSettings) -> Void)?
     var onDiagnostic: ((String) -> Void)?
     var onVoiceChat: ((URL, SpeechSettings, @escaping (String) -> Void,
                        @escaping (Result<String, Error>) -> Void) -> Void)?
@@ -346,6 +347,7 @@ final class SpeechSettingsWindow: NSWindowController, NSWindowDelegate {
         readControls()
         do {
             try store.save(settings)
+            onSettingsSaved?(settings)
             status.stringValue = "设置已保存到本机；尚未启动推理或连接直播间。"
         } catch {
             status.stringValue = error.localizedDescription
@@ -361,6 +363,7 @@ final class SpeechSettingsWindow: NSWindowController, NSWindowDelegate {
         }
         do { try store.save(settings) }
         catch { status.stringValue = error.localizedDescription; return }
+        onSettingsSaved?(settings)
         guard let onDemo else {
             status.stringValue = "本机演示协调器不可用。"
             return
@@ -395,6 +398,7 @@ final class SpeechSettingsWindow: NSWindowController, NSWindowDelegate {
         readControls()
         do { try store.save(settings) }
         catch { status.stringValue = error.localizedDescription; return }
+        onSettingsSaved?(settings)
         voiceChatButton.isEnabled = false
         status.stringValue = "正在请求麦克风权限…"
         onDiagnostic?("speech.capture.permission-requested")

@@ -148,6 +148,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--asr-model", type=Path, default=root / ".local/voice-runtime/models/Qwen3-ASR-0.6B-8bit")
     parser.add_argument("--tts-model", type=Path)
+    parser.add_argument("--tts-only", action="store_true",
+                        help="Load TTS without ASR for pet-bubble speech.")
     parser.add_argument("--reference-audio", type=Path)
     parser.add_argument("--reference-text")
     parser.add_argument("--allow-speaker-output", action="store_true",
@@ -316,7 +318,7 @@ async def run(args):
     reference_audio = args.reference_audio.resolve() if args.reference_audio else None
     try:
         with redirect_stdout(sys.stderr):
-            backend = LocalMLXBackend.load(args.tts_model, args.asr_model)
+            backend = LocalMLXBackend.load(args.tts_model, None if args.tts_only else args.asr_model)
     except Exception:
         emit("error", reason="model_load_failed")
         raise

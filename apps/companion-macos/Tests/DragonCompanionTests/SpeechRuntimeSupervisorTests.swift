@@ -4,6 +4,34 @@ import XCTest
 
 @MainActor
 final class SpeechRuntimeSupervisorTests: XCTestCase {
+    func testReadyStateResetsAcrossShutdownAndRestart() async throws {
+        let supervisor = SpeechRuntimeSupervisor(executable: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", """
+        sleep 0.05
+        printf '%s\\n' '{"protocol_version":1,"type":"ready"}'
+        IFS= read -r command
+        """])
+        for _ in 0..<2 {
+            let ready = expectation(description: "child announces readiness")
+            supervisor.onEvent = { event in
+                if event.type == "ready" {
+                    XCTAssertTrue(supervisor.isReady)
+                    ready.fulfill()
+                }
+            }
+            XCTAssertFalse(supervisor.isReady)
+            try supervisor.start(appendingArguments: ["--tts-only"])
+            XCTAssertFalse(supervisor.isReady, "a running process can still be loading")
+            XCTAssertTrue(supervisor.isTTSOnly)
+            await fulfillment(of: [ready], timeout: 3)
+            let stopped = expectation(description: "owned child stops")
+            supervisor.shutdownGracefully { stopped.fulfill() }
+            await fulfillment(of: [stopped], timeout: 3)
+            XCTAssertFalse(supervisor.isRunning)
+            XCTAssertFalse(supervisor.isReady)
+            XCTAssertFalse(supervisor.isTTSOnly)
+        }
+    }
+
     func testRuntimeFailureReasonsRemainStageSpecificWithoutRawDiagnostics() {
         let cases: [(String, String)] = [
             ("empty_transcription", "没有识别到有效语音"),
@@ -95,12 +123,14 @@ final class SpeechRuntimeSupervisorTests: XCTestCase {
     func testForcedTerminationReportsExitAndReleasesProcess() async throws {
         let supervisor = SpeechRuntimeSupervisor(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["30"])
         let exited = expectation(description: "child process exits")
+        let terminationCompleted = expectation(description: "termination waiter completes after child exit")
         supervisor.onExit = { _ in exited.fulfill() }
 
         try supervisor.start()
         XCTAssertTrue(supervisor.isRunning)
-        supervisor.terminateImmediately()
+        supervisor.terminateImmediately { terminationCompleted.fulfill() }
         await fulfillment(of: [exited], timeout: 3)
+        await fulfillment(of: [terminationCompleted], timeout: 3)
         XCTAssertFalse(supervisor.isRunning)
     }
 

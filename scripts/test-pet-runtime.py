@@ -349,6 +349,12 @@ class UITests(unittest.TestCase):
         self.bubble.quota([])
         self.bubble.flush_speech()
         self.assertEqual(announced[-1],'额度查询完成。暂无额度数据')
+    def test_balance_bubble_uses_one_chinese_speech_cue_without_provider_acronyms(self):
+        announced=[]
+        self.bubble.speech_callback=announced.append
+        self.bubble.quota([{'name':'TiMi CC','kind':'balance','remaining':12.5,'unit':'USD'}])
+        self.bubble.flush_speech()
+        self.assertEqual(announced,['中转账户余额 12.50 美元'])
     def test_busy_popup_defers_and_new_bubble_replaces_pending_speech(self):
         from unittest.mock import patch
         announced=[]

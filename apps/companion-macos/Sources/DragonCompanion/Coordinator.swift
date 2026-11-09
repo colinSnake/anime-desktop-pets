@@ -32,6 +32,16 @@ final class Coordinator: NSObject, NSMenuDelegate {
     private var pendingSpeechCue: String?
     private var speechCueRetryTimer: Timer?
     private var speechMenuOpen = false
+    private var speechPrewarmAfterCue = false
+    private var speechWarmupInProgress = false
+    private var speechWarmupCompletion: (() -> Void)?
+    private var speechWarmupPetShow: (() -> Void)?
+    private var speechWarmupTimer: Timer?
+    private var speechWarmupReferenceURL: URL?
+    private var speechWarmupHasScopedAccess = false
+    private var speechWarmupStartedAt: TimeInterval?
+    private var speechWarmupAfterExitScheduled = false
+    private var speechWarmupAfterExitCompletions: [() -> Void] = []
     private var speechSettingsWindow: SpeechSettingsWindow?
     private var modelManagerWindow: ModelManagerWindow?
     private var characterWindow: CharacterWindow?
@@ -55,6 +65,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
     private var menu: NSMenu?
     private var lastMultiPetSnapshot: Data?
     private(set) var paused = false
+    var isSpeechRuntimeRunning: Bool { speechRuntime?.isRunning == true }
 
     init(runtime: Runtime, mode: Mode) {
         self.runtime = runtime; self.mode = mode
@@ -99,8 +110,23 @@ final class Coordinator: NSObject, NSMenuDelegate {
             return
         }
         createMenu()
-        if multiPet?.isConfigured == true, mode != .previewAnimation { multiPet?.start() }
-        if mode == .previewPet { showPetRuntime(near: nil); return }
+        if mode == .previewPet {
+            prewarmInteractiveSpeech { [weak self] in
+                guard let self, !self.stopping, !self.paused,
+                      !self.session.hidden, !self.session.dismissed,
+                      self.speechWarmupPetShow == nil else { return }
+                self.showPetRuntime(near: nil)
+            }
+            return
+        }
+        if mode == .launch || mode == .watch {
+            prewarmInteractiveSpeech { [weak self] in
+                guard let self, !self.stopping, !self.paused,
+                      !self.session.hidden, !self.session.dismissed,
+                      self.speechWarmupPetShow == nil else { return }
+                self.multiPet?.start()
+            }
+        } else if multiPet?.isConfigured == true, mode != .previewAnimation { multiPet?.start() }
         if mode == .previewAnimation {
             play(frame: nil); return
         }
@@ -300,6 +326,14 @@ final class Coordinator: NSObject, NSMenuDelegate {
     }
 
     private func showPetRuntime(near frame: NSRect?, startAllManaged: Bool = false) {
+        if speechWarmupInProgress {
+            speechWarmupPetShow = { [weak self] in
+                guard let self, !self.stopping, !self.paused,
+                      !self.session.hidden, !self.session.dismissed else { return }
+                self.showPetRuntime(near: frame, startAllManaged: startAllManaged)
+            }
+            return
+        }
         if let multiPet {
             if startAllManaged { multiPet.startEnabledInstances() }
             else { multiPet.restoreAutoStartedInstances() }
@@ -309,10 +343,12 @@ final class Coordinator: NSObject, NSMenuDelegate {
     }
 
     private func hidePetRuntime() {
+        speechWarmupPetShow = nil
         if let multiPet { multiPet.stopAllInstances() } else { pet.hide() }
     }
 
     private func dismissPetRuntime() {
+        speechWarmupPetShow = nil
         if let multiPet { multiPet.stop() } else { pet.dismiss(preserveIndependentExternal: true) }
     }
 
@@ -373,8 +409,13 @@ final class Coordinator: NSObject, NSMenuDelegate {
             diagnostics.record("speech.cue.rejected reason=disabled-or-reference-unavailable")
             return
         }
-        guard !speechChatInProgress, !speechCueInProgress, !speechMenuOpen,
-              NSApp.modalWindow == nil else {
+        guard !speechChatInProgress, !speechCueInProgress, !speechWarmupInProgress,
+              !speechMenuOpen, !speechWarmupAfterExitScheduled, !speechRuntime.isStopping else {
+            pendingSpeechCue = text
+            diagnostics.record("speech.cue.deferred latest-wins")
+            return
+        }
+        guard NSApp.modalWindow == nil else {
             pendingSpeechCue = text
             scheduleSpeechCueRetry()
             diagnostics.record("speech.cue.deferred latest-wins")
@@ -403,27 +444,44 @@ final class Coordinator: NSObject, NSMenuDelegate {
             if hasScopedAccess { referenceURL.stopAccessingSecurityScopedResource() }
             diagnostics.record("speech.cue.rejected reason=reference-unreadable"); return
         }
-        let arguments = ["--tts-model", ttsModel.path,
+        let arguments = ["--tts-only", "--tts-model", ttsModel.path,
                          "--reference-audio", referenceURL.path,
                          "--reference-text", settings.referenceTranscript, "--allow-speaker-output"]
         speechCueInProgress = true
         let wasRunning = speechRuntime.isRunning
+        var submitOnReady = !wasRunning || !speechRuntime.isReady
         var restartingForCue = false
         var finished = false
         func finish(_ reason: String) {
             guard !finished else { return }
             finished = true
             speechCueInProgress = false
+            // Completed handlers capture the cue, reference and coordinator. Drop
+            // them before draining another cue or handing off to a new process.
+            speechRuntime.onEvent = nil
+            speechRuntime.onExit = { [weak self] _ in self?.releaseSpeechWarmupReference() }
             if hasScopedAccess { referenceURL.stopAccessingSecurityScopedResource() }
             diagnostics.record("speech.cue.finished reason=\(reason)")
+            if speechPrewarmAfterCue {
+                speechPrewarmAfterCue = false
+                let settings = try? SpeechSettingsStore(stateDirectory: runtime.state).load()
+                if settings?.speakInteractiveBubbles == true {
+                    prewarmInteractiveSpeech(completion: {})
+                } else {
+                    stopInteractiveSpeechRuntimeIfDisabled()
+                }
+            } else {
+                stopInteractiveSpeechRuntimeIfDisabled()
+            }
             drainPendingSpeechCue()
         }
         speechRuntime.onEvent = { [weak speechRuntime] event in
-            guard !finished else { return }
+            guard !finished, !self.stopping else { return }
             if event.type == "ready" {
-                // A warm runtime has already emitted ready; the reuse path below
-                // submits exactly once. Only a newly launched child waits here.
-                if !wasRunning {
+                // A process can still be loading after the startup wait timed out.
+                // Submit once on ready, including after a configuration restart.
+                if submitOnReady {
+                    submitOnReady = false
                     do { try speechRuntime?.sendResponse(text: text, speak: true) }
                     catch { finish("submit-failed") }
                 }
@@ -437,7 +495,8 @@ final class Coordinator: NSObject, NSMenuDelegate {
             else if event.state == "idle" { finish("success") }
         }
         speechRuntime.onExit = { status in
-            if restartingForCue {
+            self.releaseSpeechWarmupReference()
+            if restartingForCue && !self.stopping {
                 restartingForCue = false
                 do { try speechRuntime.start(appendingArguments: arguments) }
                 catch { finish("restart-failed") }
@@ -449,10 +508,11 @@ final class Coordinator: NSObject, NSMenuDelegate {
             if wasRunning {
                 if !speechRuntime.isRunning(withAdditionalArguments: arguments) {
                     restartingForCue = true
+                    submitOnReady = true
                     speechRuntime.shutdownGracefully()
                     return
                 }
-                try speechRuntime.sendResponse(text: text, speak: true)
+                if !submitOnReady { try speechRuntime.sendResponse(text: text, speak: true) }
             } else {
                 try speechRuntime.start(appendingArguments: arguments)
             }
@@ -463,7 +523,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
 
     private func scheduleSpeechCueRetry() {
         guard speechCueRetryTimer == nil, !stopping else { return }
-        let timer = Timer(timeInterval: 0.25, repeats: false) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.5, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.speechCueRetryTimer = nil
@@ -474,10 +534,196 @@ final class Coordinator: NSObject, NSMenuDelegate {
         RunLoop.main.add(timer, forMode: .common)
     }
 
+    func prewarmInteractiveSpeech(timeout: TimeInterval = 12, completion: @escaping () -> Void) {
+        // Process.isRunning can become false before its termination handler runs.
+        // Keep requests joined until that handler has released the old resources.
+        if !stopping, speechWarmupAfterExitScheduled {
+            speechWarmupAfterExitCompletions.append(completion)
+            return
+        }
+        guard !stopping, !speechWarmupInProgress, !speechChatInProgress, !speechCueInProgress,
+              let speechRuntime,
+              let settings = try? SpeechSettingsStore(stateDirectory: runtime.state).load(),
+              settings.speakInteractiveBubbles,
+              let bookmark = settings.referenceAudioBookmark,
+              !settings.referenceAudioPath.isEmpty,
+              !settings.referenceTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            completion()
+            return
+        }
+        let repository = ProcessInfo.processInfo.environment["DRAGON_DEV_ROOT"].map {
+            URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath).standardizedFileURL
+        } ?? runtime.resources.deletingLastPathComponent()
+        let ttsModel = repository.appendingPathComponent(".local/voice-runtime/models/Qwen3-TTS-12Hz-0.6B-Base-8bit")
+        guard FileManager.default.fileExists(atPath: ttsModel.path) else {
+            diagnostics.record("speech.runtime.prewarm-skipped reason=models-unavailable")
+            completion()
+            return
+        }
+        var stale = false
+        guard let referenceURL = resolveReferenceBookmark(bookmark, stale: &stale),
+              !stale, referenceURL.path == settings.referenceAudioPath else {
+            diagnostics.record("speech.runtime.prewarm-skipped reason=reference-unavailable")
+            completion()
+            return
+        }
+        let hasScopedAccess = referenceURL.startAccessingSecurityScopedResource()
+        var info = stat()
+        guard lstat(referenceURL.path, &info) == 0,
+              info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG), access(referenceURL.path, R_OK) == 0 else {
+            if hasScopedAccess { referenceURL.stopAccessingSecurityScopedResource() }
+            diagnostics.record("speech.runtime.prewarm-skipped reason=reference-unreadable")
+            completion()
+            return
+        }
+        let arguments = ["--tts-only", "--tts-model", ttsModel.path,
+                         "--reference-audio", referenceURL.path,
+                         "--reference-text", settings.referenceTranscript, "--allow-speaker-output"]
+        var shouldStartProcess = true
+        if speechRuntime.isRunning {
+            if speechRuntime.isStopping {
+                if hasScopedAccess { referenceURL.stopAccessingSecurityScopedResource() }
+                restartSpeechWarmupAfterStopping(speechRuntime, timeout: timeout, completion: completion)
+                return
+            }
+            guard speechRuntime.isRunning(withAdditionalArguments: arguments) else {
+                if hasScopedAccess { referenceURL.stopAccessingSecurityScopedResource() }
+                if speechRuntime.isTTSOnly {
+                    restartSpeechWarmupAfterStopping(speechRuntime, timeout: timeout, completion: completion)
+                    return
+                }
+                completion()
+                return
+            }
+            if speechRuntime.isReady {
+                if hasScopedAccess { referenceURL.stopAccessingSecurityScopedResource() }
+                completion()
+                return
+            }
+            shouldStartProcess = false
+        }
+
+        speechWarmupInProgress = true
+        speechWarmupCompletion = completion
+        if speechWarmupHasScopedAccess { speechWarmupReferenceURL?.stopAccessingSecurityScopedResource() }
+        speechWarmupReferenceURL = referenceURL
+        speechWarmupHasScopedAccess = hasScopedAccess
+        speechWarmupStartedAt = ProcessInfo.processInfo.systemUptime
+        diagnostics.record("speech.runtime.prewarming")
+        speechRuntime.onEvent = { [weak self] event in
+            guard let self else { return }
+            if event.type == "ready" {
+                self.finishSpeechWarmup(ready: true)
+            } else if event.type == "error" {
+                self.finishSpeechWarmup(ready: false)
+            }
+        }
+        speechRuntime.onExit = { [weak self] _ in
+            self?.releaseSpeechWarmupReference()
+            self?.finishSpeechWarmup(ready: false)
+        }
+        let timer = Timer(timeInterval: max(0.01, timeout), repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.speechWarmupInProgress else { return }
+                self.diagnostics.record("speech.runtime.prewarm-timeout")
+                self.finishSpeechWarmup(ready: false)
+            }
+        }
+        speechWarmupTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        do {
+            if shouldStartProcess { try speechRuntime.start(appendingArguments: arguments) }
+        }
+        catch {
+            diagnostics.record("speech.runtime.prewarm-failed")
+            releaseSpeechWarmupReference()
+            finishSpeechWarmup(ready: false)
+        }
+    }
+
+    private func restartSpeechWarmupAfterStopping(_ speechRuntime: SpeechRuntimeSupervisor,
+                                                  timeout: TimeInterval,
+                                                  completion: @escaping () -> Void) {
+        speechWarmupAfterExitCompletions.append(completion)
+        guard !speechWarmupAfterExitScheduled else { return }
+        speechWarmupAfterExitScheduled = true
+        let resume: @MainActor () -> Void = { [weak self] in
+            guard let self else { return }
+            self.speechWarmupAfterExitScheduled = false
+            let completions = self.speechWarmupAfterExitCompletions
+            self.speechWarmupAfterExitCompletions.removeAll()
+            guard !self.stopping else { return }
+            self.prewarmInteractiveSpeech(timeout: timeout) {
+                completions.forEach { $0() }
+            }
+        }
+        if speechRuntime.isReady { speechRuntime.shutdownGracefully(completion: resume) }
+        else { speechRuntime.terminateImmediately(completion: resume) }
+    }
+
+    private func finishSpeechWarmup(ready: Bool) {
+        guard speechWarmupInProgress else { return }
+        speechWarmupInProgress = false
+        speechWarmupTimer?.invalidate(); speechWarmupTimer = nil
+        let elapsed = speechWarmupStartedAt.map {
+            Int((ProcessInfo.processInfo.systemUptime - $0) * 1_000)
+        }
+        speechWarmupStartedAt = nil
+        diagnostics.record("speech.runtime.prewarm-finished ready=\(ready) elapsed-ms=\(elapsed ?? 0)")
+        let completion = speechWarmupCompletion
+        speechWarmupCompletion = nil
+        completion?()
+        let showPet = speechWarmupPetShow
+        speechWarmupPetShow = nil
+        showPet?()
+        drainPendingSpeechCue()
+    }
+
+    private func releaseSpeechWarmupReference() {
+        if speechWarmupHasScopedAccess { speechWarmupReferenceURL?.stopAccessingSecurityScopedResource() }
+        speechWarmupReferenceURL = nil
+        speechWarmupHasScopedAccess = false
+    }
+
+    func interactiveSpeechSettingsDidChange(_ settings: SpeechSettings, completion: @escaping () -> Void = {}) {
+        guard settings.speakInteractiveBubbles else {
+            speechPrewarmAfterCue = false
+            pendingSpeechCue = nil
+            speechCueRetryTimer?.invalidate()
+            speechCueRetryTimer = nil
+            if speechWarmupInProgress { finishSpeechWarmup(ready: false) }
+            stopInteractiveSpeechRuntimeIfDisabled()
+            completion()
+            return
+        }
+        if speechCueInProgress {
+            speechPrewarmAfterCue = true
+            completion()
+            return
+        }
+        prewarmInteractiveSpeech(completion: completion)
+    }
+
+    private func stopInteractiveSpeechRuntimeIfDisabled() {
+        guard !stopping, !speechCueInProgress, !speechChatInProgress,
+              let speechRuntime, speechRuntime.isTTSOnly else { return }
+        let enabled = (try? SpeechSettingsStore(stateDirectory: runtime.state).load().speakInteractiveBubbles) ?? false
+        guard !enabled else { return }
+        diagnostics.record("speech.runtime.prewarm-releasing reason=interactive-disabled")
+        let stopped: @MainActor () -> Void = { [weak self] in
+            self?.releaseSpeechWarmupReference()
+        }
+        if !speechRuntime.isReady { speechRuntime.terminateImmediately(completion: stopped) }
+        else { speechRuntime.shutdownGracefully(completion: stopped) }
+    }
+
     private func drainPendingSpeechCue() {
         guard let text = pendingSpeechCue, !stopping else { return }
-        guard !speechChatInProgress, !speechCueInProgress, !speechMenuOpen,
-              NSApp.modalWindow == nil else {
+        guard !speechChatInProgress, !speechCueInProgress, !speechWarmupInProgress,
+              !speechWarmupAfterExitScheduled, !speechMenuOpen else {
+            return
+        }
+        guard NSApp.modalWindow == nil else {
             scheduleSpeechCueRetry()
             return
         }
@@ -501,8 +747,14 @@ final class Coordinator: NSObject, NSMenuDelegate {
     }
     func stop() {
         stopping = true
+        speechWarmupTimer?.invalidate(); speechWarmupTimer = nil
+        speechWarmupCompletion = nil
+        speechWarmupPetShow = nil
+        speechWarmupInProgress = false
+        speechWarmupAfterExitCompletions.removeAll()
         speechCueRetryTimer?.invalidate(); speechCueRetryTimer = nil
         pendingSpeechCue = nil
+        speechPrewarmAfterCue = false
         speechMenuOpen = false
         speechRuntime?.shutdownGracefully()
         firstCloneInProgress = false
@@ -520,6 +772,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
         var speechStopped = speechRuntime?.isRunning != true
         let finishIfStopped = {
             guard petStopped, speechStopped else { return }
+            self.releaseSpeechWarmupReference()
             completion()
         }
         if let multiPet {
@@ -822,6 +1075,9 @@ final class Coordinator: NSObject, NSMenuDelegate {
         do {
             if speechSettingsWindow == nil {
                 let window = try SpeechSettingsWindow(store: SpeechSettingsStore(stateDirectory: runtime.state))
+                window.onSettingsSaved = { [weak self] settings in
+                    self?.interactiveSpeechSettingsDidChange(settings)
+                }
                 window.onDemo = { [weak self] settings, completion in
                     self?.runSpeechDemo(settings, completion: completion)
                 }
@@ -862,6 +1118,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
             let enabled = settings.speakInteractiveBubbles
             speechSettingsWindow?.setInteractiveBubbleSpeechEnabled(enabled)
             diagnostics.record("speech.interactive-bubbles changed enabled=\(enabled)")
+            interactiveSpeechSettingsDidChange(settings)
             rebuildMenu()
         } catch {
             diagnostics.record("speech.interactive-bubbles rejected reason=save-failed")
@@ -960,8 +1217,43 @@ final class Coordinator: NSObject, NSMenuDelegate {
         )
     }
 
+    // Bubble speech loads no ASR. Release its idle process before a conversation
+    // takes ownership, without requiring the user to restart the application.
+    func prepareConversationSpeechRuntime(completion: @escaping (Result<Void, Error>) -> Void) {
+        guard !stopping, !speechChatInProgress, !speechCueInProgress else {
+            completion(.failure(SpeechRuntimeSupervisor.SupervisorError.stillStopping)); return
+        }
+        guard let speechRuntime else {
+            completion(.failure(SpeechRuntimeSupervisor.SupervisorError.executableUnavailable)); return
+        }
+        guard speechRuntime.isTTSOnly else { completion(.success(())); return }
+        speechChatInProgress = true
+        finishSpeechWarmup(ready: false)
+        let stopped: @MainActor () -> Void = { [weak self] in
+            guard let self else { return }
+            self.releaseSpeechWarmupReference()
+            self.speechChatInProgress = false
+            guard !self.stopping else {
+                completion(.failure(SpeechRuntimeSupervisor.SupervisorError.stillStopping)); return
+            }
+            completion(.success(()))
+        }
+        if !speechRuntime.isReady { speechRuntime.terminateImmediately(completion: stopped) }
+        else { speechRuntime.shutdownGracefully(completion: stopped) }
+    }
+
     private func runSpeechDemo(_ settings: SpeechSettings,
                                completion: @escaping (Result<String, Error>) -> Void) {
+        prepareConversationSpeechRuntime { result in
+            switch result {
+            case .success: self.runPreparedSpeechDemo(settings, completion: completion)
+            case .failure(let error): completion(.failure(error))
+            }
+        }
+    }
+
+    private func runPreparedSpeechDemo(_ settings: SpeechSettings,
+                                       completion: @escaping (Result<String, Error>) -> Void) {
         guard !stopping, let multiPet, multiPet.status?.instances.contains(where: {
             $0.id == "white-dragon" && $0.phase == .running
         }) == true else {
@@ -1069,6 +1361,21 @@ final class Coordinator: NSObject, NSMenuDelegate {
     private func runVoiceChat(_ inputURL: URL, settings: SpeechSettings,
                               onTranscript: @escaping (String) -> Void,
                               completion: @escaping (Result<String, Error>) -> Void) {
+        prepareConversationSpeechRuntime { result in
+            switch result {
+            case .success:
+                self.runPreparedVoiceChat(inputURL, settings: settings, onTranscript: onTranscript,
+                                          completion: completion)
+            case .failure(let error):
+                try? FileManager.default.removeItem(at: inputURL)
+                completion(.failure(error))
+            }
+        }
+    }
+
+    private func runPreparedVoiceChat(_ inputURL: URL, settings: SpeechSettings,
+                                      onTranscript: @escaping (String) -> Void,
+                                      completion: @escaping (Result<String, Error>) -> Void) {
         let diagnostics = self.diagnostics
         diagnostics.record("speech.chat.capture-delivered")
         guard !stopping else {

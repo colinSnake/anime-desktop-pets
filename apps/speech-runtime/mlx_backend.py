@@ -24,10 +24,13 @@ class LocalMLXBackend:
 
         import mlx.core as mx
         import numpy as np
-        from mlx_audio.stt import load as load_asr
         from mlx_audio.tts.utils import load_model
         tts_model = load_model(str(tts_path.resolve())) if tts_path is not None else None
-        asr_model = load_asr(str(asr_path.resolve())) if asr_path is not None else None
+        if asr_path is not None:
+            from mlx_audio.stt import load as load_asr
+            asr_model = load_asr(str(asr_path.resolve()))
+        else:
+            asr_model = None
         return cls(tts_model, asr_model, mx, np)
 
     async def transcribe(self, audio_path: Path):

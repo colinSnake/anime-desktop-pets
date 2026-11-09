@@ -67,7 +67,7 @@ private func writeAll(_ data: Data, to fd: Int32) throws {
         guard let base = raw.baseAddress else { return }
         var offset = 0
         while offset < raw.count {
-            let n = Darwin.write(fd, base.advanced(by: offset), raw.count - offset)
+            let n = Darwin.send(fd, base.advanced(by: offset), raw.count - offset, MSG_NOSIGNAL)
             if n < 0 && errno == EINTR { continue }
             guard n > 0 else { throw ConfigurationError("本机控制连接写入失败：\(String(cString: strerror(errno)))") }
             offset += n

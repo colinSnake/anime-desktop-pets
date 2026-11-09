@@ -44,6 +44,13 @@ with tempfile.TemporaryDirectory(prefix='dragon-control-', dir='/tmp') as direct
                 connection.settimeout(3); connection.connect(str(path)); connection.sendall(message)
                 try: connection.recv(1024)
                 except (ConnectionResetError,TimeoutError): pass
+        # Speech cues are fire-and-forget: the helper closes immediately after send.
+        # The host must tolerate failing to write the eventual acknowledgement.
+        for _ in range(5):
+            with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as connection:
+                connection.connect(str(path))
+                connection.sendall(b'{"command":"speak","text":"offline interaction cue"}\n')
+        time.sleep(.2)
         assert control('status')['ok']
         # A second instance cannot own or delete the first instance's socket.
         second = subprocess.run([str(BIN),'--control-test-server'],env=env,capture_output=True,text=True,timeout=6)
