@@ -33,7 +33,7 @@ public enum CharacterMemoryReview {
     public static func automationDecision(for candidate: CharacterMemory,
                                          against memories: [CharacterMemory]) -> AutomationDecision {
         let value = candidate.text.lowercased()
-        if isCredentialLike(candidate.text) { return .doNotStore }
+        if isCredentialLike(memoryContent(candidate)) { return .doNotStore }
 
         let reviewTerms = ["银行卡", "身份证", "账号", "支付", "转账", "病史", "诊断", "用药", "医疗"]
         if let term = reviewTerms.first(where: value.contains) {
@@ -73,6 +73,10 @@ public enum CharacterMemoryReview {
         let value = text.lowercased()
         let terms = ["密码", "密钥", "api key", "apikey", "验证码", "私钥", "助记词", "token", "cookie"]
         return terms.contains(where: value.contains)
+    }
+
+    public static func memoryContent(_ memory: CharacterMemory) -> String {
+        [memory.text, memory.source, memory.citation, memory.version].joined(separator: " ")
     }
 
     public static func findings(for candidate: CharacterMemory,

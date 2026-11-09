@@ -25,11 +25,12 @@ struct CharacterMemoryView: View {
                 .frame(width: 150)
                 TextField(draftKind == .knowledge ? "添加一条角色知识" : "添加一条记忆", text: $draftText)
                 Button("保存记忆") {
-                    model.addMemory(text: draftText, kind: draftKind, source: draftSource,
-                                    citation: draftCitation, version: draftVersion)
-                    draftText = ""
-                    draftCitation = ""
-                    draftVersion = ""
+                    if model.addMemory(text: draftText, kind: draftKind, source: draftSource,
+                                       citation: draftCitation, version: draftVersion) {
+                        draftText = ""
+                        draftCitation = ""
+                        draftVersion = ""
+                    }
                 }
                 .buttonStyle(CharacterActionButtonStyle())
                 .disabled(draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

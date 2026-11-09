@@ -5,6 +5,48 @@ import XCTest
 
 final class CharacterMemoryStoreTests: XCTestCase {
     @MainActor
+    func testWorkspaceRejectsCredentialMemorySynchronouslyAndKeepsVisibleReason() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try CharacterMemoryStore(stateDirectory: root, petID: "white-dragon")
+        let model = CharacterWorkspaceModel(store: store, defaultName: "龙妹")
+
+        let accepted = model.addMemory(text: "安全说明", kind: .knowledge,
+                                       source: "手册", citation: "API key: do-not-store")
+
+        XCTAssertFalse(accepted)
+        XCTAssertTrue(model.status.contains("未保存"))
+        let memories = try await store.listMemories()
+        XCTAssertTrue(memories.isEmpty)
+    }
+
+    @MainActor
+    func testWorkspaceCredentialEditShowsFailureAndKeepsPersistedMemoryUnchanged() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try CharacterMemoryStore(stateDirectory: root, petID: "white-dragon")
+        let original = CharacterMemory(kind: .knowledge, text: "安全说明", source: "用户确认",
+                                       citation: "手册 §1", status: .confirmed)
+        try await store.saveMemory(original)
+        let model = CharacterWorkspaceModel(store: store, defaultName: "龙妹")
+        for _ in 0..<100 where model.memories.isEmpty {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        var edited = try XCTUnwrap(model.memories.first)
+        edited.citation = "API key: do-not-store"
+
+        model.update(edited)
+        for _ in 0..<100 where !model.status.contains("未保存") {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertTrue(model.status.contains("未保存"))
+        let persisted = try await store.listMemories()
+        XCTAssertEqual(persisted.first?.citation, "手册 §1")
+        XCTAssertEqual(persisted.first?.text, "安全说明")
+    }
+
+    @MainActor
     func testFailedChatCanBeRetriedWithoutDuplicatingUserTurn() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -66,6 +108,7 @@ final class CharacterMemoryStoreTests: XCTestCase {
         XCTAssertEqual(model.identity.name, "龙妹")
         XCTAssertFalse(model.identity.role.isEmpty)
         XCTAssertFalse(model.identity.values.isEmpty)
+        XCTAssertEqual(model.identity, .starter(name: "龙妹"))
         XCTAssertEqual(model.memories.count, 1)
         XCTAssertEqual(model.memories.first?.status, .candidate)
         XCTAssertFalse(model.memories.first?.shareWithOnlineModel ?? true)
@@ -73,6 +116,25 @@ final class CharacterMemoryStoreTests: XCTestCase {
         XCTAssertEqual(model.goals.first?.status, .active)
         XCTAssertEqual(model.goals.first?.steps.count, 4)
         XCTAssertTrue(model.goals.first?.steps.allSatisfy { !$0.isComplete } == true)
+    }
+
+    func testNewPresetRoundTripsWithoutReplacingExistingIdentityOrSeedingUserMemories() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try CharacterMemoryStore(stateDirectory: root, petID: "white-dragon")
+        let preset = try await store.loadIdentity(defaultName: "龙妹")
+        XCTAssertEqual(preset, .starter(name: "龙妹"))
+        let memories = try await store.listMemories()
+        let goals = try await store.listGoals()
+        XCTAssertTrue(memories.isEmpty)
+        XCTAssertTrue(goals.isEmpty)
+        try await store.saveIdentity(preset)
+        let reloaded = try await store.loadIdentity(defaultName: "龙妹")
+        XCTAssertEqual(reloaded, preset)
+        let custom = CharacterIdentity(name: "龙妹", personality: "用户自己填写的性格")
+        try await store.saveIdentity(custom)
+        let preserved = try await store.loadIdentity(defaultName: "龙妹")
+        XCTAssertEqual(preserved, custom)
     }
 
     func testIdentityAndMemoryRoundTripAndConfirmation() async throws {
@@ -105,6 +167,32 @@ final class CharacterMemoryStoreTests: XCTestCase {
         try edited.write(to: root.appendingPathComponent("pets/white-dragon/character/identity.md"), atomically: true, encoding: .utf8)
         let reloaded = try await store.loadIdentity(defaultName: "其他")
         XCTAssertEqual(reloaded.personality, "冷静但直率")
+    }
+
+    func testCredentialLikeMemoryContentOrProvenanceIsRejectedBeforeWriting() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try CharacterMemoryStore(stateDirectory: root, petID: "white-dragon")
+        let candidates = [
+            CharacterMemory(kind: .fact, text: "API key: do-not-store", source: "manual"),
+            CharacterMemory(kind: .knowledge, text: "safe text", source: "token reference"),
+            CharacterMemory(kind: .knowledge, text: "safe text", source: "manual", citation: "cookie-secret"),
+            CharacterMemory(kind: .knowledge, text: "safe text", source: "manual", version: "私钥"),
+        ]
+
+        for candidate in candidates {
+            do {
+                try await store.saveMemory(candidate)
+                XCTFail("Expected credential-like memory to be rejected")
+            } catch CharacterMemoryStoreError.credentialLikeRecord {
+                let file = root.appendingPathComponent(
+                    "pets/white-dragon/character/memories/\(candidate.id).md"
+                )
+                XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+            }
+        }
+        let memories = try await store.listMemories()
+        XCTAssertTrue(memories.isEmpty)
     }
 
     func testKnowledgeProvenanceRoundTripsAndLegacyMemoryStillLoads() async throws {

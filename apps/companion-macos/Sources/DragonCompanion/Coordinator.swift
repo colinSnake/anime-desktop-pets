@@ -18,7 +18,7 @@ private final class PetMenuAction: NSObject {
 
 @MainActor
 final class Coordinator: NSObject, NSMenuDelegate {
-    enum Mode: Equatable { case launch, watch, previewAnimation, previewPet, controlTest }
+    enum Mode: Equatable { case launch, watch, previewAnimation, previewPet, previewCharacterWindow, controlTest }
     private let runtime: Runtime
     private let mode: Mode
     private let diagnostics: Diagnostics
@@ -105,6 +105,10 @@ final class Coordinator: NSObject, NSMenuDelegate {
             Task { @MainActor in self?.refreshTaskLease() }
         }
         let center = NSWorkspace.shared.notificationCenter
+        if mode == .previewCharacterWindow {
+            openCharacterWindow()
+            return
+        }
         workspaceObservers.append(center.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] n in
             guard let app = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             Task { @MainActor in self?.observed(app, alreadyRunning: false) }
@@ -625,7 +629,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
             managementItem.submenu = management
             menu.addItem(managementItem)
         }
-        if mode != .previewAnimation && mode != .controlTest {
+        if mode != .previewAnimation && mode != .previewCharacterWindow && mode != .controlTest {
             let modelManager = NSMenuItem(title: "模型管理", action: #selector(openModelManager), keyEquivalent: "")
             modelManager.target = self
             menu.addItem(modelManager)
@@ -870,19 +874,30 @@ final class Coordinator: NSObject, NSMenuDelegate {
         do {
             if characterWindow == nil {
                 let store = try CharacterMemoryStore(stateDirectory: runtime.state, petID: "white-dragon")
-                let capabilities = CharacterCapabilitySnapshot.make(runtime: runtime,
+                let capabilities: [CharacterCapability]
+                if mode == .previewCharacterWindow {
+                    capabilities = CharacterCapabilitySnapshot.offlinePreview
+                } else {
+                    capabilities = CharacterCapabilitySnapshot.make(runtime: runtime,
                                                                       speechRuntimeAvailable: speechRuntime != nil)
-                characterWindow = CharacterWindow(
-                    store: store,
-                    capabilities: capabilities,
-                    suggestGoal: { [weak self] title, details in
+                }
+                let suggestGoal: ((String, String) async throws -> CharacterGoalDraft)?
+                let chat: ((String, [CharacterChatTurn]) async throws -> String)?
+                if mode == .previewCharacterWindow {
+                    suggestGoal = nil
+                    chat = { [weak self] text, history in
+                        guard let self else { throw ModelProviderError.service("桌边小崽已关闭") }
+                        return try await self.replyToCharacterChat(text, history: history)
+                    }
+                } else {
+                    suggestGoal = { [weak self] title, details in
                         guard let self else { throw ModelProviderError.service("桌边小崽已关闭") }
                         let (provider, apiKey) = try self.modelProviderCredentials()
                         return try await ModelProviderClient().suggestGoalSteps(
                             settings: provider, apiKey: apiKey, title: title, details: details
                         )
-                    },
-                    chat: { [weak self] text, history in
+                    }
+                    chat = { [weak self] text, history in
                         guard let self else { throw ModelProviderError.service("桌边小崽已关闭") }
                         return try await self.replyToCharacterChat(text, history: history)
                     }
@@ -894,12 +909,13 @@ final class Coordinator: NSObject, NSMenuDelegate {
         } catch { showError(error.localizedDescription) }
     }
 
-    private func replyToCharacterChat(_ text: String, history: [CharacterChatTurn]) async throws -> String {
+    func replyToCharacterChat(_ text: String, history: [CharacterChatTurn]) async throws -> String {
         let store = try CharacterMemoryStore(stateDirectory: runtime.state, petID: "white-dragon")
         let identity = try await store.loadIdentity(defaultName: "龙妹")
         let memories = try await store.listMemories()
-        let capabilities = CharacterCapabilitySnapshot.make(runtime: runtime,
-                                                              speechRuntimeAvailable: speechRuntime != nil)
+        let capabilities = mode == .previewCharacterWindow
+            ? CharacterCapabilitySnapshot.offlinePreview
+            : CharacterCapabilitySnapshot.make(runtime: runtime, speechRuntimeAvailable: speechRuntime != nil)
 
         if let rememberedText = CharacterCommand.rememberText(in: text) {
             let candidate = CharacterMemory(kind: .fact, text: rememberedText, source: "用户在聊天中明确要求记住")
@@ -1143,6 +1159,13 @@ final class Coordinator: NSObject, NSMenuDelegate {
         func releaseInputResources() {
             guard !inputResourcesReleased else { return }
             inputResourcesReleased = true
+                }
+                characterWindow = CharacterWindow(
+                    store: store,
+                    capabilities: capabilities,
+                    suggestGoal: suggestGoal,
+                    chat: chat,
+                    offlinePreview: mode == .previewCharacterWindow
             try? FileManager.default.removeItem(at: inputURL)
             if hasScopedAccess { referenceURL?.stopAccessingSecurityScopedResource() }
         }
@@ -1181,6 +1204,10 @@ final class Coordinator: NSObject, NSMenuDelegate {
 
         func submitTranscription() {
             do {
+        guard mode != .previewCharacterWindow else {
+            throw ModelProviderError.service("离线预览只支持本机身份、能力和记忆问答；未连接在线服务。")
+        }
+
                 try speechRuntime.sendTranscription(audioURL: inputURL)
                 diagnostics.record("speech.asr.submitted")
             } catch {

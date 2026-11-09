@@ -31,7 +31,7 @@ final class ApplicationDelegate: NSObject, NSApplicationDelegate {
             exitStatus = 1; NSApp.terminate(nil)
         }
     }
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { mode == .previewCharacterWindow }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let coordinator else { return .terminateNow }
         guard !terminating else { return .terminateLater }
@@ -79,6 +79,7 @@ struct DragonCompanionMain {
             --watch                  监视后续 Codex 启动；已有 Codex 只显示桌宠
             --preview-animation      只预览本地动画，不启动或激活 Codex
             --preview-pet            只预览桌宠，不读取 Codex 任务
+            --preview-character-window 只打开角色、记忆与聊天窗口，不启动桌宠或在线服务
             --check                  静态检查配置、素材及客户端，不启动任何窗口/服务
             --status / --show / --hide / --dismiss / --pause / --resume / --quit
                                      通过本机 Socket 控制现有实例
@@ -87,9 +88,16 @@ struct DragonCompanionMain {
             """)
             return
         }
-        let commands = Set(["--launch", "--watch", "--preview-animation", "--preview-pet", "--check", "--control-test-server"] + ControlCommand.allCases.map { "--" + $0.rawValue })
+        let commands = Set(["--launch", "--watch", "--preview-animation", "--preview-pet", "--preview-character-window", "--check", "--control-test-server"] + ControlCommand.allCases.map { "--" + $0.rawValue })
         guard args.allSatisfy({ commands.contains($0) }), args.count <= 1 else {
             fputs("一次只能传入一个已知命令，使用 --help 查看用法。\n", stderr); exit(2)
+        }
+        // Validate before Runtime.load(), which can migrate the default user directory.
+        if args.contains("--preview-character-window"),
+           ProcessInfo.processInfo.environment["DRAGON_DATA_DIR"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            fputs("离线角色预览需要隔离目录；请使用 scripts/preview-character.sh。\n", stderr)
+            exit(2)
         }
         do {
             let runtime = try Runtime.load()
@@ -108,6 +116,7 @@ struct DragonCompanionMain {
             let mode: Coordinator.Mode = args.contains("--watch") ? .watch
                 : args.contains("--preview-animation") ? .previewAnimation
                 : args.contains("--preview-pet") ? .previewPet
+                : args.contains("--preview-character-window") ? .previewCharacterWindow
                 : args.contains("--control-test-server") ? .controlTest : .launch
             runApplication(runtime, mode: mode)
         } catch { fputs("Dragon: \(error.localizedDescription)\n", stderr); exit(1) }

@@ -6,8 +6,12 @@ public enum CharacterContextBuilder {
                             limit: Int = 2_000, memoryLimit: Int = 4) -> String? {
         guard limit > 0, memoryLimit > 0 else { return nil }
         var sections: [String] = []
-        if let identity, !identity.promptText.isEmpty {
-            sections.append("角色资料（用户确认）：\n\(identity.promptText.prefix(min(600, limit)))")
+        let identityHeader = "角色资料（用户确认）：\n"
+        if let identity, !CharacterMemoryReview.isCredentialLike(identity.promptText),
+           !identity.promptText.isEmpty, limit > identityHeader.count {
+            // The shipped persona fits in full; custom profiles remain bounded.
+            let budget = min(1_200, limit - identityHeader.count)
+            sections.append(identityHeader + identity.promptText.prefix(budget))
         }
 
         let relevantMemories = CharacterMemoryRetriever.relevant(

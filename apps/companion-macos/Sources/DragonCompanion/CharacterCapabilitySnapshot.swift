@@ -2,6 +2,14 @@ import CharacterCore
 import Foundation
 
 enum CharacterCapabilitySnapshot {
+    /// No provider configuration, model files or keychain inspection in offline previews.
+    static let offlinePreview = [
+        CharacterCapability(id: "chat", name: "在线对话", status: .unavailable,
+                            detail: "离线预览不会连接在线服务。"),
+        CharacterCapability(id: "memory", name: "本地记忆", status: .enabled,
+                            detail: "仅写入当前隔离预览目录。"),
+    ]
+
     static func make(runtime: Runtime, speechRuntimeAvailable: Bool) -> [CharacterCapability] {
         let repository = ProcessInfo.processInfo.environment["DRAGON_DEV_ROOT"].map {
             URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath).standardizedFileURL

@@ -134,6 +134,51 @@ final class ModelProviderClientTests: XCTestCase {
         XCTAssertEqual(result, "可以试试安静的咖啡馆。")
     }
 
+    func testAuthorizedDefaultPersonaReachesMockedPayloadIncludingFinalBoundaries() async throws {
+        var identity = CharacterIdentity.starter(name: "龙妹")
+        identity.shareWithOnlineModel = true
+        let context = CharacterContextBuilder.make(identity: identity, memories: [], query: "陪我聊聊")
+        ModelProviderURLProtocolStub.handler = { request in
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: requestBody(request)) as? [String: Any])
+            let messages = try XCTUnwrap(object["messages"] as? [[String: Any]])
+            let system = try XCTUnwrap(messages.first?["content"] as? String)
+            XCTAssertTrue(system.contains(identity.promptText))
+            let data = try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": ["content": "我在这里。"]]]]
+            )
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
+        }
+        _ = try await ModelProviderClient(session: makeSession()).complete(
+            settings: ModelProviderSettings(), apiKey: "synthetic-test-key", userText: "陪我聊聊", characterContext: context
+        )
+    }
+
+    func testCredentialLikeSharedIdentityIsAbsentFromMockedRequestPayload() async throws {
+        let settings = ModelProviderSettings()
+        let identity = CharacterIdentity(name: "龙妹", personality: "API key: identity-secret-sentinel",
+                                         values: "诚实", shareWithOnlineModel: true)
+        let context = CharacterContextBuilder.make(identity: identity, memories: [], query: "普通聊天")
+        XCTAssertNil(context)
+
+        ModelProviderURLProtocolStub.handler = { request in
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: requestBody(request)) as? [String: Any])
+            let messages = try XCTUnwrap(object["messages"] as? [[String: Any]])
+            let system = try XCTUnwrap(messages.first?["content"] as? String)
+            XCTAssertFalse(system.contains("identity-secret-sentinel"))
+            XCTAssertFalse(system.contains("核心价值观：诚实"))
+            let data = try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": ["content": "收到。"]]]
+            ])
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
+        }
+
+        let result = try await ModelProviderClient(session: makeSession()).complete(
+            settings: settings, apiKey: "test-key", userText: "普通聊天", characterContext: context
+        )
+
+        XCTAssertEqual(result, "收到。")
+    }
+
     func testWeatherToolUsesOpenMeteoThenReturnsResultToModel() async throws {
         let settings = ModelProviderSettings()
         var requestCount = 0

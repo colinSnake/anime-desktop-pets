@@ -159,9 +159,14 @@ public final class CharacterWorkspaceModel: ObservableObject {
         }
     }
 
+    @discardableResult
     public func addMemory(text: String, kind: CharacterMemoryKind, source: String = "用户在角色与记忆窗口添加",
-                           citation: String = "", version: String = "") {
+                          citation: String = "", version: String = "") -> Bool {
         let item = CharacterMemory(kind: kind, text: text, source: source, citation: citation, version: version)
+        guard !CharacterMemoryReview.isCredentialLike(CharacterMemoryReview.memoryContent(item)) else {
+            status = CharacterMemoryStoreError.credentialLikeRecord.localizedDescription
+            return false
+        }
         Task {
             do {
                 try await store.saveMemory(item)
@@ -174,6 +179,7 @@ public final class CharacterWorkspaceModel: ObservableObject {
                 status = error.localizedDescription
             }
         }
+        return true
     }
 
     public func memoryFindings(for memory: CharacterMemory) -> [CharacterMemoryReview.Finding] {

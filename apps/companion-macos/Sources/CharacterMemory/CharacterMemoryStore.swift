@@ -5,12 +5,14 @@ import Foundation
 public enum CharacterMemoryStoreError: LocalizedError {
     case invalidPetID
     case invalidRecord
+    case credentialLikeRecord
     case unsafePath
 
     public var errorDescription: String? {
         switch self {
         case .invalidPetID: "桌宠实例标识无效。"
         case .invalidRecord: "角色资料格式无效或版本不兼容。"
+        case .credentialLikeRecord: "记忆内容或依据包含疑似凭证信息，未保存。请移除密码、密钥、验证码、Token 或 Cookie 后重试。"
         case .unsafePath: "角色资料路径不是普通文件或目录，已停止操作以保护数据。"
         }
     }
@@ -64,12 +66,15 @@ public actor CharacterMemoryStore {
     }
 
     public func saveMemory(_ memory: CharacterMemory) throws {
-        try prepareDirectories()
         guard memory.id.range(of: "^[A-Fa-f0-9-]{16,64}$", options: .regularExpression) != nil,
               !memory.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               memory.text.count <= 1_000,
               memory.source.count <= 200, memory.citation.count <= 500, memory.version.count <= 80,
               ![memory.source, memory.citation, memory.version].contains(where: { $0.contains("\n") || $0.contains("\r") }) else { throw CharacterMemoryStoreError.invalidRecord }
+        guard !CharacterMemoryReview.isCredentialLike(CharacterMemoryReview.memoryContent(memory)) else {
+            throw CharacterMemoryStoreError.credentialLikeRecord
+        }
+        try prepareDirectories()
         try write(CharacterMarkdownCodec.encode(memory: memory), to: memoryURL(memory.id))
     }
 

@@ -3,6 +3,35 @@ import CharacterCore
 import XCTest
 
 final class CharacterCoreTests: XCTestCase {
+    func testLongmeiStarterHasCompletePrivateIdentityPreset() {
+        let identity = CharacterIdentity.starter(name: "龙妹")
+
+        XCTAssertFalse(identity.role.isEmpty)
+        XCTAssertFalse(identity.background.isEmpty)
+        XCTAssertFalse(identity.personality.isEmpty)
+        XCTAssertFalse(identity.values.isEmpty)
+        XCTAssertFalse(identity.motivations.isEmpty)
+        XCTAssertFalse(identity.relationship.isEmpty)
+        XCTAssertFalse(identity.speakingStyle.isEmpty)
+        XCTAssertFalse(identity.knowledgeScope.isEmpty)
+        XCTAssertFalse(identity.boundaries.isEmpty)
+        XCTAssertFalse(identity.shareWithOnlineModel)
+        XCTAssertTrue(identity.promptText.isEmpty)
+    }
+
+    func testSharedLongmeiPresetReachesContextInFullAndHonorsBudget() throws {
+        var identity = CharacterIdentity.starter(name: "龙妹")
+        identity.shareWithOnlineModel = true
+        let context = try XCTUnwrap(CharacterContextBuilder.make(identity: identity, memories: [], query: "你好"))
+        XCTAssertTrue(context.contains(identity.promptText))
+        XCTAssertTrue(context.contains("表达方式："))
+        XCTAssertTrue(context.contains("知识与擅长边界："))
+        XCTAssertTrue(context.contains("边界：" + identity.boundaries))
+        XCTAssertLessThanOrEqual(context.count, 2_000)
+        let limited = try XCTUnwrap(CharacterContextBuilder.make(identity: identity, memories: [], query: "你好", limit: 100))
+        XCTAssertLessThanOrEqual(limited.count, 100)
+    }
+
     func testLocalOnlyAndPendingMemoriesNeverEnterOnlineContext() {
         let memories = [
             CharacterMemory(kind: .fact, text: "local secret", source: "test", status: .confirmed),
@@ -28,6 +57,13 @@ final class CharacterCoreTests: XCTestCase {
         let context = CharacterContextBuilder.make(identity: sharedIdentity, memories: [], query: "随便聊聊")
         XCTAssertTrue(context?.contains("来自东方") == true)
         XCTAssertTrue(context?.contains("核心价值观：诚实") == true)
+    }
+
+    func testCredentialLikeSharedIdentityIsExcludedAsAWhole() {
+        let identity = CharacterIdentity(name: "龙妹", personality: "请记住 API key: do-not-send", values: "诚实",
+                                         shareWithOnlineModel: true)
+
+        XCTAssertNil(CharacterContextBuilder.make(identity: identity, memories: [], query: "随便聊聊"))
     }
 
     func testOnlyRelevantConfirmedAndAuthorizedMemoriesEnterContext() {
@@ -243,6 +279,17 @@ final class CharacterCoreTests: XCTestCase {
         let candidate = CharacterMemory(kind: .fact, text: "我的 API key 是 secret", source: "test")
 
         XCTAssertEqual(CharacterMemoryReview.automationDecision(for: candidate, against: [existing]), .doNotStore)
+    }
+
+    func testMemoryAutonomyRejectsCredentialsInKnowledgeProvenance() {
+        let candidates = [
+            CharacterMemory(kind: .knowledge, text: "安全正文", source: "API key 文档"),
+            CharacterMemory(kind: .knowledge, text: "安全正文", source: "manual", citation: "token: do-not-store"),
+            CharacterMemory(kind: .knowledge, text: "安全正文", source: "manual", version: "cookie-secret"),
+        ]
+        for candidate in candidates {
+            XCTAssertEqual(CharacterMemoryReview.automationDecision(for: candidate, against: []), .doNotStore)
+        }
     }
 
     func testMemoryAutonomyPrioritizesConflictOverDuplicate() {
