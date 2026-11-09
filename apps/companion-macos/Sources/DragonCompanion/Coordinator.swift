@@ -94,6 +94,10 @@ final class Coordinator: NSObject, NSMenuDelegate {
     func start() {
         diagnostics.record("controller.start mode=\(mode)")
         guard mode != .controlTest else { return }
+        if mode == .previewCharacterWindow {
+            openCharacterWindow()
+            return
+        }
         createMenu()
         if multiPet?.isConfigured == true, mode != .previewAnimation { multiPet?.start() }
         if mode == .previewPet { showPetRuntime(near: nil); return }
@@ -105,10 +109,6 @@ final class Coordinator: NSObject, NSMenuDelegate {
             Task { @MainActor in self?.refreshTaskLease() }
         }
         let center = NSWorkspace.shared.notificationCenter
-        if mode == .previewCharacterWindow {
-            openCharacterWindow()
-            return
-        }
         workspaceObservers.append(center.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] n in
             guard let app = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             Task { @MainActor in self?.observed(app, alreadyRunning: false) }
@@ -901,6 +901,13 @@ final class Coordinator: NSObject, NSMenuDelegate {
                         guard let self else { throw ModelProviderError.service("桌边小崽已关闭") }
                         return try await self.replyToCharacterChat(text, history: history)
                     }
+                }
+                characterWindow = CharacterWindow(
+                    store: store,
+                    capabilities: capabilities,
+                    suggestGoal: suggestGoal,
+                    chat: chat,
+                    offlinePreview: mode == .previewCharacterWindow
                 )
             }
             characterWindow?.showWindow(nil)
@@ -938,6 +945,10 @@ final class Coordinator: NSObject, NSMenuDelegate {
         if let localReply = CharacterLocalAnswer.answer(for: text, identity: identity,
                                                          memories: memories, capabilities: capabilities) {
             return localReply
+        }
+
+        guard mode != .previewCharacterWindow else {
+            throw ModelProviderError.service("离线预览只支持本机身份、能力和记忆问答；未连接在线服务。")
         }
 
         let context = CharacterContextBuilder.make(identity: identity, memories: memories,
@@ -1159,13 +1170,6 @@ final class Coordinator: NSObject, NSMenuDelegate {
         func releaseInputResources() {
             guard !inputResourcesReleased else { return }
             inputResourcesReleased = true
-                }
-                characterWindow = CharacterWindow(
-                    store: store,
-                    capabilities: capabilities,
-                    suggestGoal: suggestGoal,
-                    chat: chat,
-                    offlinePreview: mode == .previewCharacterWindow
             try? FileManager.default.removeItem(at: inputURL)
             if hasScopedAccess { referenceURL?.stopAccessingSecurityScopedResource() }
         }
@@ -1204,10 +1208,6 @@ final class Coordinator: NSObject, NSMenuDelegate {
 
         func submitTranscription() {
             do {
-        guard mode != .previewCharacterWindow else {
-            throw ModelProviderError.service("离线预览只支持本机身份、能力和记忆问答；未连接在线服务。")
-        }
-
                 try speechRuntime.sendTranscription(audioURL: inputURL)
                 diagnostics.record("speech.asr.submitted")
             } catch {
