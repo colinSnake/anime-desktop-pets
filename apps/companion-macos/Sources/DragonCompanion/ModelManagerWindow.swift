@@ -1,7 +1,7 @@
 import AppKit
 
 @MainActor
-final class ModelManagerWindow: NSWindowController, NSWindowDelegate {
+final class ModelManagerWindow: NSViewController {
     private let store: ModelProviderStore
     private let keyStore = ModelAPIKeyStore()
     private var settings: ModelProviderSettings
@@ -14,25 +14,28 @@ final class ModelManagerWindow: NSWindowController, NSWindowDelegate {
     private let testButton = NSButton(title: "测试连接（可能计费）", target: nil, action: nil)
     private let removeKeyButton = NSButton(title: "删除已保存 Key", target: nil, action: nil)
     private var hasSavedKey = false
+    private let offlinePreview: Bool
 
-    init(store: ModelProviderStore) throws {
+    init(store: ModelProviderStore, offlinePreview: Bool = false) throws {
         self.store = store
+        self.offlinePreview = offlinePreview
         settings = try store.load()
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 390),
-                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = "模型管理"
-        window.isReleasedWhenClosed = false
-        super.init(window: window)
-        window.delegate = self
+        super.init(nibName: nil, bundle: nil)
+        view = NSView()
         buildContent()
         apply(settings)
-        window.center()
+        if offlinePreview {
+            saveButton.isEnabled = false
+            testButton.isEnabled = false
+            removeKeyButton.isEnabled = false
+            status.stringValue = "离线预览：模型配置、钥匙串和网络操作已禁用。"
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
 
     private func buildContent() {
-        guard let content = window?.contentView else { return }
+        let content = view
         let title = NSTextField(labelWithString: "在线模型服务")
         title.font = .systemFont(ofSize: 17, weight: .semibold)
         let note = NSTextField(wrappingLabelWithString:
@@ -103,11 +106,16 @@ final class ModelManagerWindow: NSWindowController, NSWindowDelegate {
         provider.selectItem(at: index)
         baseURL.stringValue = value.baseURL
         model.stringValue = value.model
-        do {
-            hasSavedKey = try keyStore.read()?.isEmpty == false
-            apiKey.stringValue = ""
-            status.stringValue = hasSavedKey ? "API Key 已保存在 macOS 钥匙串。" : "尚未保存 API Key。"
-        } catch { status.stringValue = error.localizedDescription }
+        apiKey.stringValue = ""
+        if offlinePreview {
+            hasSavedKey = false
+            status.stringValue = "离线预览：模型配置、钥匙串和网络操作已禁用。"
+        } else {
+            do {
+                hasSavedKey = try keyStore.read()?.isEmpty == false
+                status.stringValue = hasSavedKey ? "API Key 已保存在 macOS 钥匙串。" : "尚未保存 API Key。"
+            } catch { status.stringValue = error.localizedDescription }
+        }
     }
 
     @objc private func providerChanged() {

@@ -51,6 +51,8 @@ final class VoiceInputRecorder {
     private let sampleQueue = DispatchQueue(label: "local.desktop-pets.microphone-samples",
                                             qos: .userInitiated)
     private var limitTimer: Timer?
+    private let requestAccess: (@escaping (Bool) -> Void) -> Void
+    private var pendingPermission: (id: UUID, completion: (Result<Void, Error>) -> Void)?
     private var lastCaptureSummary = AudioCaptureSummary.empty
     var onLimitReached: ((URL?) -> Void)?
     var onInputLevel: ((Float) -> Void)?
@@ -60,11 +62,24 @@ final class VoiceInputRecorder {
     private(set) var peakLevel: Float = 0
     var captureSummary: AudioCaptureSummary { statistics?.snapshot ?? lastCaptureSummary }
 
+    init(requestAccess: @escaping (@escaping (Bool) -> Void) -> Void = {
+        AVCaptureDevice.requestAccess(for: .audio, completionHandler: $0)
+    }) {
+        self.requestAccess = requestAccess
+    }
+
     func start(deviceUID: String?, duration: TimeInterval = 20,
                completion: @escaping (Result<Void, Error>) -> Void) {
-        AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+        guard pendingPermission == nil, !isRecording else {
+            completion(.failure(AudioRecorderError.couldNotStart)); return
+        }
+        let requestID = UUID()
+        pendingPermission = (requestID, completion)
+        requestAccess { [weak self] granted in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, let pending = self.pendingPermission, pending.id == requestID else { return }
+                self.pendingPermission = nil
+                let completion = pending.completion
                 guard granted else {
                     completion(.failure(AudioRecorderError.permissionDenied))
                     return
@@ -151,6 +166,10 @@ final class VoiceInputRecorder {
 
     @discardableResult
     private func stopCapture(deleteFile: Bool) -> URL? {
+        if let pending = pendingPermission {
+            pendingPermission = nil
+            pending.completion(.failure(AudioRecorderError.cancelled))
+        }
         limitTimer?.invalidate()
         limitTimer = nil
         guard let captureSession else { return nil }
@@ -440,6 +459,7 @@ private final class AudioCaptureDelegate: NSObject, AVCaptureAudioDataOutputSamp
 
 private enum AudioRecorderError: LocalizedError {
     case permissionDenied
+    case cancelled
     case devicesUnavailable
     case noInputDevice
     case deviceSelectionFailed
@@ -447,6 +467,7 @@ private enum AudioRecorderError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case .cancelled: "录音已取消，没有启动麦克风。"
         case .permissionDenied: "未获麦克风权限；可在系统设置的隐私与安全性中允许桌边小崽使用麦克风。"
         case .devicesUnavailable: "无法读取 macOS 音频设备列表。"
         case .noInputDevice: "没有找到可用的麦克风输入设备。"

@@ -21,13 +21,14 @@ public struct CharacterMemory: Codable, Equatable, Identifiable, Sendable {
     /// Optional provenance details used by character knowledge entries.
     public var citation: String
     public var version: String
+    public var expiresAt: Date?
     public var status: Status
     public var shareWithOnlineModel: Bool
 
     public init(id: String = UUID().uuidString.lowercased(), kind: CharacterMemoryKind,
                 text: String, createdAt: Date = .now, source: String,
                 citation: String = "", version: String = "",
-                status: Status = .candidate, shareWithOnlineModel: Bool = false) {
+                status: Status = .candidate, shareWithOnlineModel: Bool = false, expiresAt: Date? = nil) {
         self.id = id
         self.kind = kind
         self.text = text
@@ -35,9 +36,14 @@ public struct CharacterMemory: Codable, Equatable, Identifiable, Sendable {
         self.source = source
         self.citation = citation
         self.version = version
+        self.expiresAt = expiresAt
         self.status = status
         self.shareWithOnlineModel = shareWithOnlineModel
     }
+    public func isExpired(at date: Date = .now) -> Bool {
+        kind == .knowledge && expiresAt.map { $0 <= date } == true
+    }
+
 }
 
 public enum CharacterCommand {
@@ -57,8 +63,9 @@ public enum CharacterCommand {
 
 public enum CharacterLocalAnswer {
     public static func answer(for input: String, identity: CharacterIdentity, memories: [CharacterMemory],
-                              capabilities: [CharacterCapability]) -> String? {
+                              capabilities: [CharacterCapability], goals: [CharacterGoal] = [], now: Date = .now) -> String? {
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let answer = CharacterGoalContext.localAnswer(for: text, goals: goals) { return answer }
         if text.contains("你是谁") || text.contains("介绍一下自己") || text.contains("自我介绍") {
             let background = identity.background.trimmingCharacters(in: .whitespacesAndNewlines)
             let personality = identity.personality.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -70,32 +77,35 @@ public enum CharacterLocalAnswer {
             return String(answer.prefix(100))
         }
         if isKnowledgeRecallQuestion(text) {
-            let knowledge = locallyAnswerable(memories.filter { $0.kind == .knowledge }, against: memories)
+            let knowledge = locallyAnswerable(memories.filter { $0.kind == .knowledge }, against: memories, now: now)
             let matches = isBroadKnowledgeRecall(text)
-                ? CharacterMemoryRetriever.recent(in: knowledge)
+                ? CharacterMemoryRetriever.recent(in: knowledge, now: now)
                 : CharacterMemoryRetriever.relevant(to: text, in: knowledge, limit: 3,
-                                                    includeKnowledgeProvenance: true)
-            guard !matches.isEmpty else { return "我还没有确认的角色知识。" }
+                                                    includeKnowledgeProvenance: true, now: now)
+            guard !matches.isEmpty else { return "我还没有可用的已确认角色知识；待审核、已过期或存在冲突的条目不参与回答。" }
             let items = matches.map { "知识：\($0.text)" }
             return String(("我目前确认的角色知识有：" + items.joined(separator: "；")).prefix(120))
         }
         if text.contains("你会什么") || text.contains("有什么能力") || text.contains("能做什么") {
             let available = capabilities.filter { $0.status == .enabled }.map(\.name)
-            let unavailable = capabilities.filter { $0.status != .enabled }.map { "\($0.name)（\($0.status.rawValue)）" }
+            let unavailable = capabilities.filter { $0.status != .enabled && $0.status != .onDemand }
+                .map { "\($0.name)（\($0.status.rawValue)）" }
+            let onDemand = capabilities.contains { $0.status == .onDemand }
             let enabledText = available.isEmpty ? "暂时没有已启用能力" : "目前能\(available.joined(separator: "、"))"
             let unavailableText = unavailable.isEmpty ? "" : "；\(unavailable.joined(separator: "、"))尚未可用"
-            return String((enabledText + unavailableText + "。具体状态以角色与记忆里的能力页为准。").prefix(100))
+            let onDemandText = onDemand ? "；在线对话会在需要时检查配置" : ""
+            return String((enabledText + onDemandText + unavailableText + "。具体状态以角色与记忆里的能力页为准。").prefix(120))
         }
         if isMemoryRecallQuestion(text) {
             let matches: [CharacterMemory]
-            let answerable = locallyAnswerable(memories, against: memories)
+            let answerable = locallyAnswerable(memories, against: memories, now: now)
             if text.contains("我的偏好") {
-                matches = CharacterMemoryRetriever.recent(in: answerable.filter { $0.kind == .preference })
+                matches = CharacterMemoryRetriever.recent(in: answerable.filter { $0.kind == .preference }, now: now)
             } else if isBroadRecall(text) {
-                matches = CharacterMemoryRetriever.recent(in: answerable)
+                matches = CharacterMemoryRetriever.recent(in: answerable, now: now)
             } else {
                 matches = CharacterMemoryRetriever.relevant(to: text, in: answerable, limit: 3,
-                                                            includeKnowledgeProvenance: true)
+                                                            includeKnowledgeProvenance: true, now: now)
             }
             guard !matches.isEmpty else { return "我没有找到与这个问题相关的已确认记忆。" }
             let items = matches.map { "\($0.kind.rawValue)：\($0.text)" }
@@ -105,12 +115,12 @@ public enum CharacterLocalAnswer {
     }
 
     private static func locallyAnswerable(_ memories: [CharacterMemory],
-                                          against allMemories: [CharacterMemory]) -> [CharacterMemory] {
+                                          against allMemories: [CharacterMemory], now: Date) -> [CharacterMemory] {
         memories.filter { memory in
             let metadata = [memory.text, memory.source, memory.citation, memory.version].joined(separator: " ")
-            guard !CharacterMemoryReview.isCredentialLike(metadata) else { return false }
+            guard !memory.isExpired(at: now), !CharacterMemoryReview.isCredentialLike(metadata) else { return false }
             guard memory.kind == .knowledge else { return true }
-            return !CharacterMemoryReview.hasUnresolvedKnowledgeConflict(memory, against: allMemories)
+            return !CharacterMemoryReview.hasUnresolvedKnowledgeConflict(memory, against: allMemories, now: now)
         }
     }
 

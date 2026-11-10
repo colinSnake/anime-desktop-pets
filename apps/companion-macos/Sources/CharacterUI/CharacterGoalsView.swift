@@ -73,6 +73,14 @@ private struct CharacterGoalRow: View {
                 .menuStyle(.borderlessButton)
                 .help("目标操作")
             }
+            Toggle("允许在线聊天使用这个目标及步骤", isOn: Binding(
+                get: { goal.shareWithOnlineModel },
+                set: { value in
+                    var changed = goal
+                    changed.shareWithOnlineModel = value
+                    onUpdate(changed)
+                }
+            )).toggleStyle(.checkbox)
             if !goal.details.isEmpty { Text(goal.details).font(.callout).foregroundStyle(.secondary) }
             if !goal.steps.isEmpty {
                 ProgressView(value: Double(goal.completedStepCount), total: Double(goal.steps.count))

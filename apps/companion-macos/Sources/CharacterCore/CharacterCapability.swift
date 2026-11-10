@@ -6,6 +6,7 @@ public struct CharacterCapability: Codable, Equatable, Identifiable, Sendable {
         case needsSetup = "需要设置"
         case unavailable = "暂不可用"
         case planned = "尚未接入"
+        case onDemand = "按需检查"
     }
 
     public var id: String

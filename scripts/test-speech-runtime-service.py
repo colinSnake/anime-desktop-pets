@@ -96,6 +96,86 @@ class ProtocolTests(unittest.TestCase):
             player.write(b"\x00")
         player.close()
 
+    def _bounded_call(self, action):
+        result = []
+        def invoke():
+            try: result.append(action())
+            except BaseException as error: result.append(error)
+        worker = threading.Thread(target=invoke, daemon=True)
+        worker.start()
+        worker.join(timeout=1.5)
+        self.assertFalse(worker.is_alive(), "audio operation must not wait indefinitely")
+        return result[0]
+
+    def test_failed_audio_consumer_does_not_deadlock_a_full_queue_or_close(self):
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+        class Stream:
+            def start(self): pass
+            def write(self, _chunk):
+                entered.set()
+                release.wait(1)
+                raise OSError("synthetic disconnected output")
+            def stop(self): calls.append("stop")
+            def close(self): calls.append("close")
+        fake = type("SoundDevice", (), {
+            "check_output_settings": staticmethod(lambda **kwargs: None),
+            "RawOutputStream": staticmethod(lambda **kwargs: Stream()),
+        })
+        with patch.dict(sys.modules, {"sounddevice": fake}):
+            player = SoundDevicePlayer(24000)
+            player.write(b"\x10\x00")
+            self.assertTrue(entered.wait(1))
+            for _ in range(player._QUEUE_CAPACITY): player.write(b"\x20\x00")
+            release.set()
+            player._worker.join(timeout=1)
+            self.assertFalse(player._worker.is_alive())
+            self.assertIsInstance(self._bounded_call(player.finish_turn), RuntimeError)
+            self.assertIsNone(self._bounded_call(player.close))
+            self.assertEqual(player._chunks.unfinished_tasks, 0)
+        self.assertEqual(calls, ["stop", "close"])
+
+    def test_stalled_output_has_a_drain_deadline_and_abortable_close(self):
+        entered, aborted = threading.Event(), threading.Event()
+        calls = []
+        class Stream:
+            def start(self): pass
+            def write(self, _chunk): entered.set(); aborted.wait(2)
+            def abort(self): calls.append("abort"); aborted.set()
+            def stop(self): calls.append("stop")
+            def close(self): calls.append("close")
+        fake = type("SoundDevice", (), {
+            "check_output_settings": staticmethod(lambda **kwargs: None),
+            "RawOutputStream": staticmethod(lambda **kwargs: Stream()),
+        })
+        with patch.dict(sys.modules, {"sounddevice": fake}):
+            player = SoundDevicePlayer(24000)
+            player._DRAIN_TIMEOUT = 0.02
+            player.write(b"\x10\x00")
+            self.assertTrue(entered.wait(1))
+            error = self._bounded_call(player.finish_turn)
+            self.assertIsInstance(error, RuntimeError)
+            self.assertIn("timed out", str(error))
+            self.assertIsNone(self._bounded_call(player.close))
+            self.assertEqual(player._chunks.unfinished_tasks, 0)
+        self.assertEqual(calls, ["abort", "stop", "close"])
+
+    def test_output_start_failure_closes_stream_and_chunk_size_is_bounded(self):
+        calls = []
+        class Stream:
+            def start(self): raise OSError("synthetic start failure")
+            def close(self): calls.append("close")
+        fake = type("SoundDevice", (), {
+            "check_output_settings": staticmethod(lambda **kwargs: None),
+            "RawOutputStream": staticmethod(lambda **kwargs: Stream()),
+        })
+        with patch.dict(sys.modules, {"sounddevice": fake}):
+            player = SoundDevicePlayer(24000)
+            with self.assertRaises(ValueError): player.write(b"\x00\x00" * (24000 * 5 + 1))
+            with self.assertRaises(OSError): player.write(b"\x10\x00")
+            player.close()
+        self.assertEqual(calls, ["close"])
+
     def test_accepts_only_supported_command_shapes(self):
         command, error = decode_command('{"type":"chat","platform":"bilibili","text":"你好"}')
         self.assertIsNone(error)
@@ -208,6 +288,47 @@ class ServiceLoopTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(sum(event["type"] == "ready" for event in events), 1)
         self.assertEqual(sum(event["state"] == "reply" for event in events if event["type"] == "session"), 2)
+
+    async def test_direct_reply_reports_playback_and_drain_failures_without_success_idle(self):
+        for stage in ["write", "drain"]:
+            class FailingPlayer(FakePlayer):
+                def write(self, chunk):
+                    if stage == "write": raise OSError("synthetic output failure")
+                    super().write(chunk)
+                def finish_turn(self):
+                    if stage == "drain": raise OSError("synthetic output failure")
+                    super().finish_turn()
+            events = []
+            commands = '{"type":"respond","text":"合成正文","speak":true}\n{"type":"shutdown"}\n'
+            player = FailingPlayer()
+            await serve(FakeBackend(), player, Path("reference.wav"), "synthetic reference",
+                        stdin=io.StringIO(commands), stdout_emit=lambda kind, **fields: events.append({"type": kind, **fields}))
+            self.assertTrue(player.closed)
+            self.assertTrue(any(e.get("reason") == "playback_failed" for e in events), stage)
+            self.assertFalse(any(e.get("state") == "idle" for e in events), stage)
+            if stage == "write": self.assertFalse(any(e.get("state") == "audio_started" for e in events))
+
+    async def test_empty_pcm_is_not_reported_as_successful_audio(self):
+        class EmptyBackend(FakeBackend):
+            async def synthesize(self, *_args): yield b""
+        events = []
+        player = FakePlayer()
+        commands = '{"type":"respond","text":"合成正文","speak":true}\n{"type":"shutdown"}\n'
+        await serve(EmptyBackend(), player, Path("reference.wav"), "synthetic reference",
+                    stdin=io.StringIO(commands), stdout_emit=lambda kind, **fields: events.append({"type": kind, **fields}))
+        self.assertEqual(player.chunks, [])
+        self.assertTrue(any(e.get("reason") == "synthesis_failed" for e in events))
+        self.assertFalse(any(e.get("state") in {"audio_started", "idle"} for e in events))
+
+    async def test_warm_queued_turns_each_publish_audio_started_after_output_acceptance(self):
+        commands = "\n".join(json.dumps({"type": "chat", "platform": "voice", "message_id": str(i), "text": f"合成问题{i}"})
+                             for i in range(2)) + '\n{"type":"shutdown"}\n'
+        events = []
+        player = FakePlayer()
+        await serve(FakeBackend(), player, Path("reference.wav"), "synthetic reference", stdin=io.StringIO(commands),
+                    stdout_emit=lambda kind, **fields: events.append({"type": kind, **fields}))
+        self.assertEqual(len(player.chunks), 2)
+        self.assertEqual(sum(e.get("state") == "audio_started" for e in events), 2)
 
     async def test_tts_only_skips_asr_loading_without_synthesis_or_output(self):
         from unittest.mock import AsyncMock

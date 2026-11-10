@@ -58,17 +58,27 @@ class LocalMLXBackend:
         )
 
         while True:
-            result = await asyncio.to_thread(_next_or_end, iterator)
-            if result is _END:
+            pcm = await asyncio.to_thread(_next_pcm, iterator, self.mx, self.numpy)
+            if pcm is _END:
                 break
-            audio = result.audio
-            if int(audio.size) == 0:
-                continue
-            self.mx.eval(audio)
-            samples = self.numpy.asarray(audio, dtype=self.numpy.float32).reshape(-1)
-            pcm = self.numpy.rint(self.numpy.clip(samples, -1.0, 1.0) * 32767.0)
-            yield pcm.astype("<i2", copy=False).tobytes()
+            yield pcm
 
+
+def _next_pcm(iterator, mx, numpy):
+    # MLX evaluation and PCM conversion can block as well as generation. Keep
+    # the whole chunk off the asyncio loop and release temporary arrays before
+    # awaiting playback of the returned bytes.
+    while True:
+        result = _next_or_end(iterator)
+        if result is _END:
+            return _END
+        audio = result.audio
+        if int(audio.size) == 0:
+            continue
+        mx.eval(audio)
+        samples = numpy.asarray(audio, dtype=numpy.float32).reshape(-1)
+        pcm = numpy.rint(numpy.clip(samples, -1.0, 1.0) * 32767.0)
+        return pcm.astype("<i2", copy=False).tobytes()
 
 def _next_or_end(iterator):
     try:

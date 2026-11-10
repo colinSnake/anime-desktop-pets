@@ -47,7 +47,7 @@ public struct CharacterWorkspaceView: View {
         .frame(minWidth: 700, minHeight: 520)
         .onChange(of: page) { selected in
             switch selected {
-            case .memories: model.refresh()
+            case .memories: model.refreshMemories()
             case .goals: model.refreshGoals()
             default: break
             }

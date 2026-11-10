@@ -82,6 +82,7 @@ class SpeechSession:
                 if inspect.isawaitable(result):
                     await result
                 failure_reason = "synthesis_failed"
+            failure_reason = "playback_failed"
             await self._publish(SessionEvent("idle"))
         except asyncio.CancelledError:
             await self._publish(SessionEvent("idle", reason="cancelled"))

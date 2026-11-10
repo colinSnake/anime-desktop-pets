@@ -25,15 +25,32 @@ public struct CharacterGoal: Codable, Equatable, Identifiable, Sendable {
     public var createdAt: Date
     public var status: Status
     public var steps: [Step]
+    public var shareWithOnlineModel: Bool
 
     public init(id: String = UUID().uuidString.lowercased(), title: String, details: String = "",
-                createdAt: Date = .now, status: Status = .active, steps: [Step] = []) {
+                createdAt: Date = .now, status: Status = .active, steps: [Step] = [], shareWithOnlineModel: Bool = false) {
         self.id = id
         self.title = title
         self.details = details
         self.createdAt = createdAt
         self.status = status
         self.steps = steps
+        self.shareWithOnlineModel = shareWithOnlineModel
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, details, createdAt, status, steps, shareWithOnlineModel
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        title = try values.decode(String.self, forKey: .title)
+        details = try values.decode(String.self, forKey: .details)
+        createdAt = try values.decode(Date.self, forKey: .createdAt)
+        status = try values.decode(Status.self, forKey: .status)
+        steps = try values.decode([Step].self, forKey: .steps)
+        shareWithOnlineModel = try values.decodeIfPresent(Bool.self, forKey: .shareWithOnlineModel) ?? false
     }
 
     public var completedStepCount: Int { steps.filter(\.isComplete).count }

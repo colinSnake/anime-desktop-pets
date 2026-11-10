@@ -94,6 +94,15 @@ public final class CharacterWorkspaceModel: ObservableObject {
         status = "本轮聊天已清空；聊天内容不会写入长期记忆。"
     }
 
+    public func refreshMemories() {
+        Task {
+            do {
+                memories = try await store.listMemories()
+                status = ""
+            } catch { status = error.localizedDescription }
+        }
+    }
+
     public func refreshGoals() {
         Task {
             do {
@@ -147,11 +156,22 @@ public final class CharacterWorkspaceModel: ObservableObject {
         }
     }
 
+    public var identityCompletionFields: [CharacterIdentityCompletion.Field] {
+        CharacterIdentityCompletion.proposedFields(for: identity, defaultName: defaultName)
+    }
+
+    public func applyIdentityCompletion() {
+        guard canSaveIdentity else { return }
+        identity = CharacterIdentityCompletion.fillingBlanks(in: identity, defaultName: defaultName)
+        status = "已补齐空白字段，原有内容和分享设置保留。请检查后保存身份。"
+    }
+
     public func saveIdentity() {
         guard canSaveIdentity else { return }
+        let snapshot = identity
         Task {
             do {
-                try await store.saveIdentity(identity)
+                try await store.saveIdentity(snapshot)
                 status = "身份资料已保存。"
             } catch {
                 status = error.localizedDescription
@@ -182,6 +202,26 @@ public final class CharacterWorkspaceModel: ObservableObject {
         return true
     }
 
+    public func loadKnowledgeImportText(from url: URL) async throws -> String {
+        let access = url.startAccessingSecurityScopedResource()
+        defer { if access { url.stopAccessingSecurityScopedResource() } }
+        return try await store.loadKnowledgeImportText(from: url)
+    }
+
+    public func importKnowledge(text: String, source: String, citation: String, version: String,
+                                expiresAt: Date?) async -> Bool {
+        do {
+            let result = try await store.importKnowledge(text: text, source: source, citation: citation,
+                                                         version: version, expiresAt: expiresAt)
+            memories = try await store.listMemories()
+            status = "已导入 \(result.imported) 条待审核知识，跳过 \(result.skipped) 条相同知识；在线分享关闭。"
+            return true
+        } catch {
+            status = error.localizedDescription
+            return false
+        }
+    }
+
     public func memoryFindings(for memory: CharacterMemory) -> [CharacterMemoryReview.Finding] {
         CharacterMemoryReview.findings(for: memory, against: memories)
     }
@@ -196,7 +236,8 @@ public final class CharacterWorkspaceModel: ObservableObject {
             do {
                 try await store.confirmMemory(memory)
                 memories = try await store.listMemories()
-                status = "记忆已确认。"
+                status = memories.first(where: { $0.id == memory.id })?.status == .confirmed
+                    ? "记忆已确认。" : "知识内容或依据已变化，已转回待审核并关闭分享；请重新核对后确认。"
             } catch {
                 status = error.localizedDescription
             }
@@ -208,6 +249,10 @@ public final class CharacterWorkspaceModel: ObservableObject {
             do {
                 try await store.saveMemory(memory)
                 memories = try await store.listMemories()
+                let saved = memories.first { $0.id == memory.id }
+                status = memory.kind == .knowledge && saved?.status == .candidate && memory.status == .confirmed
+                    ? "知识内容或依据已变化，已转回待审核并关闭分享。"
+                    : "修改已保存。"
             } catch {
                 status = error.localizedDescription
             }

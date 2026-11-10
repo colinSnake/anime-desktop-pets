@@ -1,8 +1,10 @@
 import AppKit
 import CharacterCore
 import CharacterMemory
+import CharacterUI
 import ApplicationServices
 import DragonCore
+import SwiftUI
 
 private final class PetMenuAction: NSObject {
     let instanceID: String
@@ -21,6 +23,8 @@ final class Coordinator: NSObject, NSMenuDelegate {
     enum Mode: Equatable { case launch, watch, previewAnimation, previewPet, previewCharacterWindow, controlTest }
     private let runtime: Runtime
     private let mode: Mode
+    private let speechTurnTimeout: TimeInterval
+    private let characterChatProvider: CharacterChatProvider
     private let diagnostics: Diagnostics
     private var session = LaunchSession()
     private var target: NSRunningApplication?
@@ -28,9 +32,13 @@ final class Coordinator: NSObject, NSMenuDelegate {
     private var multiPet: PetInstanceRuntime?
     private var speechRuntime: SpeechRuntimeSupervisor?
     private var speechChatInProgress = false
+    private var speechReplyTask: Task<Void, Never>?
+    private var speechTurnTimer: Timer?
+    private var speechTurnCancellation: (() -> Void)?
     private var speechCueInProgress = false
     private var pendingSpeechCue: String?
     private var speechCueRetryTimer: Timer?
+    private var speechCueTimer: Timer?
     private var speechMenuOpen = false
     private var speechPrewarmAfterCue = false
     private var speechWarmupInProgress = false
@@ -42,9 +50,8 @@ final class Coordinator: NSObject, NSMenuDelegate {
     private var speechWarmupStartedAt: TimeInterval?
     private var speechWarmupAfterExitScheduled = false
     private var speechWarmupAfterExitCompletions: [() -> Void] = []
-    private var speechSettingsWindow: SpeechSettingsWindow?
-    private var modelManagerWindow: ModelManagerWindow?
-    private var characterWindow: CharacterWindow?
+    private var speechSettingsController: SpeechSettingsWindow?
+    private var companionWorkspaceWindow: CompanionWorkspaceWindow?
     private var petManagerWindow: PetManagerWindow?
     private var movie: BootPlayer?
     private var movieID: UUID?
@@ -67,8 +74,11 @@ final class Coordinator: NSObject, NSMenuDelegate {
     private(set) var paused = false
     var isSpeechRuntimeRunning: Bool { speechRuntime?.isRunning == true }
 
-    init(runtime: Runtime, mode: Mode) {
+    init(runtime: Runtime, mode: Mode, speechTurnTimeout: TimeInterval = 180,
+         characterChatProvider: CharacterChatProvider? = nil) {
         self.runtime = runtime; self.mode = mode
+        self.characterChatProvider = characterChatProvider ?? .live
+        self.speechTurnTimeout = max(0.01, speechTurnTimeout)
         diagnostics = Diagnostics(root: runtime.state); pet = PetController(runtime: runtime)
         multiPet = PetInstanceRuntime.hasValidRegistry(runtime: runtime)
             ? PetInstanceRuntime(runtime: runtime) : nil
@@ -106,7 +116,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
         diagnostics.record("controller.start mode=\(mode)")
         guard mode != .controlTest else { return }
         if mode == .previewCharacterWindow {
-            openCharacterWindow()
+            openWorkspace(.character)
             return
         }
         createMenu()
@@ -452,9 +462,11 @@ final class Coordinator: NSObject, NSMenuDelegate {
         var submitOnReady = !wasRunning || !speechRuntime.isReady
         var restartingForCue = false
         var finished = false
+        var failureReason: String?
         func finish(_ reason: String) {
             guard !finished else { return }
             finished = true
+            speechCueTimer?.invalidate(); speechCueTimer = nil
             speechCueInProgress = false
             // Completed handlers capture the cue, reference and coordinator. Drop
             // them before draining another cue or handing off to a new process.
@@ -475,27 +487,43 @@ final class Coordinator: NSObject, NSMenuDelegate {
             }
             drainPendingSpeechCue()
         }
+        func failCue(_ reason: String) {
+            guard !finished, failureReason == nil else { return }
+            failureReason = reason
+            speechCueTimer?.invalidate(); speechCueTimer = nil
+            speechRuntime.shutdownGracefully(timeout: 0.2) { finish(reason) }
+        }
+        let watchdog = Timer(timeInterval: speechTurnTimeout, repeats: false) { _ in
+            Task { @MainActor in
+                guard !finished, !self.stopping else { return }
+                self.diagnostics.record("speech.cue.timed-out")
+                failCue("timeout")
+            }
+        }
+        speechCueTimer = watchdog
+        RunLoop.main.add(watchdog, forMode: .common)
         speechRuntime.onEvent = { [weak speechRuntime] event in
-            guard !finished, !self.stopping else { return }
+            guard !finished, failureReason == nil, !self.stopping else { return }
             if event.type == "ready" {
                 // A process can still be loading after the startup wait timed out.
                 // Submit once on ready, including after a configuration restart.
                 if submitOnReady {
                     submitOnReady = false
                     do { try speechRuntime?.sendResponse(text: text, speak: true) }
-                    catch { finish("submit-failed") }
+                    catch { failCue("submit-failed") }
                 }
                 return
             }
             guard event.type == "session" else {
-                if event.type == "error" { finish("runtime-error") }
+                if event.type == "error" { failCue("runtime-error") }
                 return
             }
-            if event.state == "error" { finish("synthesis-failed") }
+            if event.state == "error" { failCue("synthesis-failed") }
             else if event.state == "idle" { finish("success") }
         }
         speechRuntime.onExit = { status in
             self.releaseSpeechWarmupReference()
+            if let failureReason { finish(failureReason); return }
             if restartingForCue && !self.stopping {
                 restartingForCue = false
                 do { try speechRuntime.start(appendingArguments: arguments) }
@@ -517,7 +545,8 @@ final class Coordinator: NSObject, NSMenuDelegate {
                 try speechRuntime.start(appendingArguments: arguments)
             }
         } catch {
-            finish("start-failed")
+            if speechRuntime.isRunning { failCue("submit-failed") }
+            else { finish("start-failed") }
         }
     }
 
@@ -747,6 +776,9 @@ final class Coordinator: NSObject, NSMenuDelegate {
     }
     func stop() {
         stopping = true
+        speechReplyTask?.cancel(); speechReplyTask = nil
+        speechTurnTimer?.invalidate(); speechTurnTimer = nil
+        speechCueTimer?.invalidate(); speechCueTimer = nil
         speechWarmupTimer?.invalidate(); speechWarmupTimer = nil
         speechWarmupCompletion = nil
         speechWarmupPetShow = nil
@@ -883,14 +915,14 @@ final class Coordinator: NSObject, NSMenuDelegate {
             menu.addItem(managementItem)
         }
         if mode != .previewAnimation && mode != .previewCharacterWindow && mode != .controlTest {
-            let modelManager = NSMenuItem(title: "模型管理", action: #selector(openModelManager), keyEquivalent: "")
+            let modelManager = NSMenuItem(title: "模型管理…", action: #selector(openModelManager), keyEquivalent: "")
             modelManager.target = self
             menu.addItem(modelManager)
             addInteractiveSpeechMenuItem(to: menu)
-            let speechSettings = NSMenuItem(title: "直播语音设置", action: #selector(openSpeechSettings), keyEquivalent: "")
+            let speechSettings = NSMenuItem(title: "直播语音…", action: #selector(openSpeechSettings), keyEquivalent: "")
             speechSettings.target = self
             menu.addItem(speechSettings)
-            let character = NSMenuItem(title: "角色与记忆", action: #selector(openCharacterWindow), keyEquivalent: "")
+            let character = NSMenuItem(title: "角色与记忆…", action: #selector(openCharacterWindow), keyEquivalent: "")
             character.target = self
             menu.addItem(character)
         }
@@ -1071,43 +1103,11 @@ final class Coordinator: NSObject, NSMenuDelegate {
     }
 
     @objc private func openSpeechSettings() {
-        guard !stopping else { return }
-        do {
-            if speechSettingsWindow == nil {
-                let window = try SpeechSettingsWindow(store: SpeechSettingsStore(stateDirectory: runtime.state))
-                window.onSettingsSaved = { [weak self] settings in
-                    self?.interactiveSpeechSettingsDidChange(settings)
-                }
-                window.onDemo = { [weak self] settings, completion in
-                    self?.runSpeechDemo(settings, completion: completion)
-                }
-                window.onDiagnostic = { [weak self] event in
-                    self?.diagnostics.record(event)
-                }
-                window.onVoiceChat = { [weak self] audioURL, settings, onTranscript, completion in
-                    self?.runVoiceChat(audioURL, settings: settings, onTranscript: onTranscript,
-                                       completion: completion)
-                }
-                speechSettingsWindow = window
-            }
-            speechSettingsWindow?.showWindow(nil)
-            speechSettingsWindow?.window?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-        } catch {
-            showError(error.localizedDescription)
-        }
+        openWorkspace(.speech)
     }
 
     @objc private func openModelManager() {
-        guard !stopping else { return }
-        do {
-            if modelManagerWindow == nil {
-                modelManagerWindow = try ModelManagerWindow(store: ModelProviderStore(stateDirectory: runtime.state))
-            }
-            modelManagerWindow?.showWindow(nil)
-            modelManagerWindow?.window?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-        } catch { showError(error.localizedDescription) }
+        openWorkspace(.models)
     }
 
     @objc private func toggleInteractiveSpeech() {
@@ -1116,7 +1116,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
         do {
             let settings = try store.toggleInteractiveBubbleSpeech()
             let enabled = settings.speakInteractiveBubbles
-            speechSettingsWindow?.setInteractiveBubbleSpeechEnabled(enabled)
+            speechSettingsController?.setInteractiveBubbleSpeechEnabled(enabled)
             diagnostics.record("speech.interactive-bubbles changed enabled=\(enabled)")
             interactiveSpeechSettingsDidChange(settings)
             rebuildMenu()
@@ -1127,62 +1127,78 @@ final class Coordinator: NSObject, NSMenuDelegate {
     }
 
     @objc private func openCharacterWindow() {
+        openWorkspace(.character)
+    }
+
+    private func openWorkspace(_ section: CompanionWorkspaceWindow.Section) {
         guard !stopping else { return }
         do {
-            if characterWindow == nil {
-                let store = try CharacterMemoryStore(stateDirectory: runtime.state, petID: "white-dragon")
-                let capabilities: [CharacterCapability]
-                if mode == .previewCharacterWindow {
-                    capabilities = CharacterCapabilitySnapshot.offlinePreview
-                } else {
-                    capabilities = CharacterCapabilitySnapshot.make(runtime: runtime,
-                                                                      speechRuntimeAvailable: speechRuntime != nil)
-                }
-                let suggestGoal: ((String, String) async throws -> CharacterGoalDraft)?
-                let chat: ((String, [CharacterChatTurn]) async throws -> String)?
-                if mode == .previewCharacterWindow {
-                    suggestGoal = nil
-                    chat = { [weak self] text, history in
-                        guard let self else { throw ModelProviderError.service("桌边小崽已关闭") }
-                        return try await self.replyToCharacterChat(text, history: history)
-                    }
-                } else {
-                    suggestGoal = { [weak self] title, details in
-                        guard let self else { throw ModelProviderError.service("桌边小崽已关闭") }
-                        let (provider, apiKey) = try self.modelProviderCredentials()
-                        return try await ModelProviderClient().suggestGoalSteps(
-                            settings: provider, apiKey: apiKey, title: title, details: details
-                        )
-                    }
-                    chat = { [weak self] text, history in
-                        guard let self else { throw ModelProviderError.service("桌边小崽已关闭") }
-                        return try await self.replyToCharacterChat(text, history: history)
-                    }
-                }
-                characterWindow = CharacterWindow(
-                    store: store,
-                    capabilities: capabilities,
-                    suggestGoal: suggestGoal,
-                    chat: chat,
-                    offlinePreview: mode == .previewCharacterWindow
-                )
+            if companionWorkspaceWindow == nil {
+                let offlinePreview = mode == .previewCharacterWindow
+                let models = try ModelManagerWindow(store: ModelProviderStore(stateDirectory: runtime.state),
+                                                    offlinePreview: offlinePreview)
+                let speech = try makeSpeechSettingsController()
+                let character = try makeCharacterController()
+                speechSettingsController = speech
+                companionWorkspaceWindow = CompanionWorkspaceWindow(models: models, speech: speech,
+                                                                      character: character)
             }
-            characterWindow?.showWindow(nil)
-            characterWindow?.window?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            companionWorkspaceWindow?.open(section)
         } catch { showError(error.localizedDescription) }
     }
 
-    func replyToCharacterChat(_ text: String, history: [CharacterChatTurn]) async throws -> String {
+    private func makeSpeechSettingsController() throws -> SpeechSettingsWindow {
+        let offlinePreview = mode == .previewCharacterWindow
+        let controller = try SpeechSettingsWindow(store: SpeechSettingsStore(stateDirectory: runtime.state),
+                                                  offlinePreview: offlinePreview)
+        controller.onSettingsSaved = offlinePreview ? nil : { [weak self] settings in
+            self?.interactiveSpeechSettingsDidChange(settings)
+        }
+        controller.onDemo = offlinePreview ? nil : { [weak self] settings, completion in
+            self?.runSpeechDemo(settings, completion: completion)
+        }
+        controller.onDiagnostic = { [weak self] event in self?.diagnostics.record(event) }
+        controller.onCancelVoice = { [weak self] in self?.cancelActiveSpeechTurn() }
+        controller.onVoiceChat = offlinePreview ? nil : { [weak self] audioURL, settings, onTranscript, completion in
+            self?.runVoiceChat(audioURL, settings: settings, onTranscript: onTranscript, completion: completion)
+        }
+        return controller
+    }
+
+    private func makeCharacterController() throws -> NSViewController {
+        let store = try CharacterMemoryStore(stateDirectory: runtime.state, petID: "white-dragon")
+        let capabilities = mode == .previewCharacterWindow
+            ? CharacterCapabilitySnapshot.offlinePreview
+            : CharacterCapabilitySnapshot.make(runtime: runtime, speechRuntimeAvailable: speechRuntime != nil)
+        let suggestGoal: ((String, String) async throws -> CharacterGoalDraft)? = mode == .previewCharacterWindow
+            ? nil
+            : { [weak self] title, details in
+                guard let self else { throw ModelProviderError.service("桌边小崽已关闭") }
+                let (provider, apiKey) = try self.modelProviderCredentials()
+                return try await ModelProviderClient().suggestGoalSteps(settings: provider, apiKey: apiKey,
+                                                                          title: title, details: details)
+            }
+        let chat: (String, [CharacterChatTurn]) async throws -> String = { [weak self] text, history in
+            guard let self else { throw ModelProviderError.service("桌边小崽已关闭") }
+            return try await self.replyToCharacterChat(text, history: history)
+        }
+        let content = CharacterWorkspaceView(store: store, defaultName: "龙妹", capabilities: capabilities,
+                                             suggestGoal: suggestGoal, chat: chat)
+        return NSHostingController(rootView: content)
+    }
+
+    func replyToCharacterChat(_ text: String, history: [CharacterChatTurn],
+                              memorySource: String = "用户在聊天中明确要求记住") async throws -> String {
         let store = try CharacterMemoryStore(stateDirectory: runtime.state, petID: "white-dragon")
         let identity = try await store.loadIdentity(defaultName: "龙妹")
         let memories = try await store.listMemories()
+        let goals = try await store.listGoals()
         let capabilities = mode == .previewCharacterWindow
             ? CharacterCapabilitySnapshot.offlinePreview
             : CharacterCapabilitySnapshot.make(runtime: runtime, speechRuntimeAvailable: speechRuntime != nil)
 
         if let rememberedText = CharacterCommand.rememberText(in: text) {
-            let candidate = CharacterMemory(kind: .fact, text: rememberedText, source: "用户在聊天中明确要求记住")
+            let candidate = CharacterMemory(kind: .fact, text: rememberedText, source: memorySource)
             switch CharacterMemoryReview.automationDecision(for: candidate, against: memories) {
             case .autoConfirm:
                 var confirmed = candidate
@@ -1200,33 +1216,40 @@ final class Coordinator: NSObject, NSMenuDelegate {
         }
 
         if let localReply = CharacterLocalAnswer.answer(for: text, identity: identity,
-                                                         memories: memories, capabilities: capabilities) {
+                                                         memories: memories, capabilities: capabilities, goals: goals) {
             return localReply
         }
 
         guard mode != .previewCharacterWindow else {
-            throw ModelProviderError.service("离线预览只支持本机身份、能力和记忆问答；未连接在线服务。")
+            throw ModelProviderError.service("离线预览只支持本机身份、能力、目标和记忆问答；未连接在线服务。")
         }
 
-        let context = CharacterContextBuilder.make(identity: identity, memories: memories,
-                                                    capabilities: capabilities, query: text)
-        let (provider, apiKey) = try modelProviderCredentials()
-        return try await ModelProviderClient().complete(
-            settings: provider, apiKey: apiKey, userText: text,
-            characterContext: context, history: history
+        try Task.checkCancellation()
+        let (provider, apiKey) = try characterChatProvider.credentials(runtime)
+        let onlineCapabilities = CharacterCapabilitySnapshot.make(
+            runtime: runtime, speechRuntimeAvailable: speechRuntime != nil, onlineChatReady: true
         )
+        let context = CharacterContextBuilder.make(identity: identity, memories: memories,
+                                                    capabilities: onlineCapabilities, goals: goals, query: text)
+        try Task.checkCancellation()
+        return try await characterChatProvider.complete(provider, apiKey, text, context, history)
     }
 
     // Bubble speech loads no ASR. Release its idle process before a conversation
     // takes ownership, without requiring the user to restart the application.
-    func prepareConversationSpeechRuntime(completion: @escaping (Result<Void, Error>) -> Void) {
+    func cancelActiveSpeechTurn() {
+        speechTurnCancellation?()
+    }
+
+    func prepareConversationSpeechRuntime(releaseAnyRuntime: Bool = false,
+                                          completion: @escaping (Result<Void, Error>) -> Void) {
         guard !stopping, !speechChatInProgress, !speechCueInProgress else {
             completion(.failure(SpeechRuntimeSupervisor.SupervisorError.stillStopping)); return
         }
         guard let speechRuntime else {
             completion(.failure(SpeechRuntimeSupervisor.SupervisorError.executableUnavailable)); return
         }
-        guard speechRuntime.isTTSOnly else { completion(.success(())); return }
+        guard speechRuntime.isTTSOnly || (releaseAnyRuntime && speechRuntime.isRunning) else { completion(.success(())); return }
         speechChatInProgress = true
         finishSpeechWarmup(ready: false)
         let stopped: @MainActor () -> Void = { [weak self] in
@@ -1244,7 +1267,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
 
     private func runSpeechDemo(_ settings: SpeechSettings,
                                completion: @escaping (Result<String, Error>) -> Void) {
-        prepareConversationSpeechRuntime { result in
+        prepareConversationSpeechRuntime(releaseAnyRuntime: true) { result in
             switch result {
             case .success: self.runPreparedSpeechDemo(settings, completion: completion)
             case .failure(let error): completion(.failure(error))
@@ -1299,63 +1322,105 @@ final class Coordinator: NSObject, NSMenuDelegate {
             completion(.failure(SpeechRuntimeSupervisor.SupervisorError.modelsUnavailable)); return
         }
 
-        var arguments: [String] = []
+        var arguments = ["--tts-only"]
         if settings.speakReplies { arguments += ["--tts-model", ttsModel.path, "--allow-speaker-output"] }
         if let audioURL {
             arguments += ["--reference-audio", audioURL.path,
                           "--reference-text", settings.referenceTranscript]
         }
         let stateDirectory = runtime.state
+        speechChatInProgress = true
         var finished = false
+        var pendingResult: Result<String, Error>?
+        var sessionIdle = false
+        var replyReceived = false
+        var presentationResolved = !settings.displayReplies
+        var presentationError: Error?
         func finish(_ result: Result<String, Error>) {
             guard !finished else { return }
             finished = true
+            speechTurnTimer?.invalidate(); speechTurnTimer = nil
+            speechTurnCancellation = nil
+            speechReplyTask?.cancel(); speechReplyTask = nil
+            speechRuntime.onEvent = nil
+            speechRuntime.onExit = nil
+            if hasScopedAccess { audioURL?.stopAccessingSecurityScopedResource() }
+            speechChatInProgress = false
+            drainPendingSpeechCue()
             completion(result)
         }
-
+        func stopWithResult(_ result: Result<String, Error>) {
+            guard !finished, pendingResult == nil else { return }
+            pendingResult = result
+            speechReplyTask?.cancel()
+            speechRuntime.shutdownGracefully(timeout: 0.2) { finish(result) }
+        }
+        func finishIfReady() {
+            guard sessionIdle, presentationResolved else { return }
+            if let presentationError { stopWithResult(.failure(presentationError)); return }
+            stopWithResult(.success(settings.displayReplies
+                ? "在线模型演示完成；回复已交给龙妹气泡。没有连接直播间。"
+                : "在线模型演示完成；按设置未显示回复。没有连接直播间。"))
+        }
+        speechTurnCancellation = { stopWithResult(.failure(SpeechRuntimeSupervisor.SupervisorError.cancelled)) }
+        let watchdog = Timer(timeInterval: speechTurnTimeout, repeats: false) { _ in
+            Task { @MainActor in
+                guard !finished, !self.stopping else { return }
+                stopWithResult(.failure(SpeechRuntimeSupervisor.SupervisorError.turnTimedOut))
+            }
+        }
+        speechTurnTimer = watchdog
+        RunLoop.main.add(watchdog, forMode: .common)
         speechRuntime.onEvent = { [weak speechRuntime] event in
-            guard !finished else { return }
+            guard !finished, !self.stopping, pendingResult == nil else { return }
             if event.type == "ready" {
-                Task {
+                self.speechReplyTask = Task {
                     do {
                         let reply = try await ModelProviderClient().complete(
                             settings: provider, apiKey: apiKey,
                             userText: "请给我一句自然的中文语音演示回复。"
                         )
-                        try speechRuntime?.sendResponse(text: reply, speak: settings.speakReplies)
-                    } catch { speechRuntime?.shutdownGracefully { finish(.failure(error)) } }
+                        try Task.checkCancellation()
+                        guard !finished, !self.stopping else { return }
+                        guard let spoken = SpeechReplyText.prepare(reply) else {
+                            throw SpeechRuntimeSupervisor.SupervisorError.replyGenerationFailed
+                        }
+                        try speechRuntime?.sendResponse(text: spoken, speak: settings.speakReplies)
+                    } catch is CancellationError { return }
+                    catch { stopWithResult(.failure(error)) }
                 }
                 return
             }
-            if event.type == "error" {
-                let error = SpeechRuntimeSupervisor.SupervisorError.runtimeFailure(reason: event.reason)
-                speechRuntime?.shutdownGracefully { finish(.failure(error)) }
+            if event.type == "error" || (event.type == "session" && event.state == "error") {
+                stopWithResult(.failure(SpeechRuntimeSupervisor.SupervisorError.runtimeFailure(reason: event.reason)))
                 return
             }
-            guard event.type == "session", let eventState = event.state else { return }
-            if eventState == "reply", let reply = event.reply, settings.displayReplies {
-                do { try SpeechPresentationClient.displayReply(reply, directory: stateDirectory) }
-                catch { speechRuntime?.shutdownGracefully { finish(.failure(error)) }; return }
-            }
-            if eventState == "error" {
-                speechRuntime?.shutdownGracefully { finish(.failure(SpeechRuntimeSupervisor.SupervisorError.runtimeFailure(reason: event.reason))) }
-            } else if eventState == "idle" {
-                speechRuntime?.shutdownGracefully {
-                    finish(.success(settings.displayReplies
-                        ? "在线模型演示完成；回复已交给龙妹气泡。没有连接直播间。"
-                        : "在线模型演示完成；按设置未显示回复。没有连接直播间。"))
+            guard event.type == "session" else { return }
+            if event.state == "reply", let reply = event.reply {
+                replyReceived = true
+                if settings.displayReplies {
+                    Task {
+                        do { try await SpeechPresentationClient.displayReplyAsync(reply, directory: stateDirectory) }
+                        catch { presentationError = error }
+                        guard !finished else { return }
+                        presentationResolved = true
+                        finishIfReady()
+                    }
                 }
+            }
+            if event.state == "idle" {
+                guard replyReceived else {
+                    stopWithResult(.failure(SpeechRuntimeSupervisor.SupervisorError.replyGenerationFailed)); return
+                }
+                sessionIdle = true
+                finishIfReady()
             }
         }
-        speechRuntime.onExit = { status in
-            if hasScopedAccess { audioURL?.stopAccessingSecurityScopedResource() }
-            if status != 0 { finish(.failure(SpeechRuntimeSupervisor.SupervisorError.inferenceFailed)) }
+        speechRuntime.onExit = { _ in
+            finish(pendingResult ?? .failure(SpeechRuntimeSupervisor.SupervisorError.unexpectedExit))
         }
         do { try speechRuntime.start(appendingArguments: arguments) }
-        catch {
-            if hasScopedAccess { audioURL?.stopAccessingSecurityScopedResource() }
-            completion(.failure(error))
-        }
+        catch { finish(.failure(error)) }
     }
 
     private func runVoiceChat(_ inputURL: URL, settings: SpeechSettings,
@@ -1474,6 +1539,8 @@ final class Coordinator: NSObject, NSMenuDelegate {
         var shutdownStarted = false
         var replyWasReceived = false
         var inputResourcesReleased = false
+        var pendingFailure: Error?
+        var restartingForTurn = false
         func releaseInputResources() {
             guard !inputResourcesReleased else { return }
             inputResourcesReleased = true
@@ -1484,6 +1551,12 @@ final class Coordinator: NSObject, NSMenuDelegate {
         func finish(_ result: Result<String, Error>) {
             guard !finished else { return }
             finished = true
+            speechTurnTimer?.invalidate(); speechTurnTimer = nil
+            speechTurnCancellation = nil
+            speechReplyTask?.cancel(); speechReplyTask = nil
+            speechRuntime.onEvent = nil
+            speechRuntime.onExit = nil
+            releaseInputResources()
             speechChatInProgress = false
             drainPendingSpeechCue()
             switch result {
@@ -1492,6 +1565,25 @@ final class Coordinator: NSObject, NSMenuDelegate {
             }
             completion(result)
         }
+
+        func fail(_ error: Error) {
+            guard !finished, pendingFailure == nil else { return }
+            pendingFailure = error
+            speechReplyTask?.cancel()
+            speechTurnTimer?.invalidate(); speechTurnTimer = nil
+            speechRuntime.shutdownGracefully(timeout: 0.2) { finish(.failure(error)) }
+        }
+
+        speechTurnCancellation = { fail(SpeechRuntimeSupervisor.SupervisorError.cancelled) }
+        let watchdog = Timer(timeInterval: speechTurnTimeout, repeats: false) { _ in
+            Task { @MainActor in
+                guard !finished, !self.stopping else { return }
+                self.diagnostics.record("speech.chat.timed-out")
+                fail(SpeechRuntimeSupervisor.SupervisorError.turnTimedOut)
+            }
+        }
+        speechTurnTimer = watchdog
+        RunLoop.main.add(watchdog, forMode: .common)
 
         func finishSessionIfReady() {
             guard sessionReachedIdle, presentationResolved, !shutdownStarted else { return }
@@ -1519,39 +1611,44 @@ final class Coordinator: NSObject, NSMenuDelegate {
                 diagnostics.record("speech.asr.submitted")
             } catch {
                 diagnostics.record("speech.asr.submit-failed")
-                speechRuntime.shutdownGracefully { finish(.failure(error)) }
+                fail(error)
             }
         }
 
         func presentReply(_ reply: String, attempt: Int = 0) {
-            guard !finished else { return }
-            do {
-                try SpeechPresentationClient.displayReply(reply, directory: stateDirectory)
-                diagnostics.record("speech.presentation.accepted characters=\(reply.count) attempt=\(attempt + 1)")
-                presentationResolved = true
-                finishSessionIfReady()
-            } catch let error as SpeechPresentationClient.ClientError {
-                if case .rejected("pet_busy") = error, attempt < 20 {
-                    diagnostics.record("speech.presentation.retry attempt=\(attempt + 1) reason=pet-busy")
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        presentReply(reply, attempt: attempt + 1)
+            guard !finished, !self.stopping else { return }
+            Task {
+                do {
+                    try await SpeechPresentationClient.displayReplyAsync(reply, directory: stateDirectory)
+                    guard !finished, !self.stopping else { return }
+                    diagnostics.record("speech.presentation.accepted characters=\(reply.count) attempt=\(attempt + 1)")
+                    presentationResolved = true
+                    finishSessionIfReady()
+                } catch let error as SpeechPresentationClient.ClientError {
+                    guard !finished, !self.stopping else { return }
+                    if case .rejected("pet_busy") = error, attempt < 20 {
+                        diagnostics.record("speech.presentation.retry attempt=\(attempt + 1) reason=pet-busy")
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            presentReply(reply, attempt: attempt + 1)
+                        }
+                        return
                     }
-                    return
+                    diagnostics.record("speech.presentation.rejected reason=\(error.localizedDescription)")
+                    presentationError = error
+                    presentationResolved = true
+                    finishSessionIfReady()
+                } catch {
+                    guard !finished, !self.stopping else { return }
+                    diagnostics.record("speech.presentation.failed")
+                    presentationError = error
+                    presentationResolved = true
+                    finishSessionIfReady()
                 }
-                diagnostics.record("speech.presentation.rejected reason=\(error.localizedDescription)")
-                presentationError = error
-                presentationResolved = true
-                finishSessionIfReady()
-            } catch {
-                diagnostics.record("speech.presentation.failed")
-                presentationError = error
-                presentationResolved = true
-                finishSessionIfReady()
             }
         }
 
         speechRuntime.onEvent = { [weak speechRuntime] event in
-            guard !finished else { return }
+            guard !finished, !self.stopping, pendingFailure == nil else { return }
             if event.type == "ready" {
                 diagnostics.record("speech.runtime.ready")
                 recordTiming("runtime-ready")
@@ -1563,72 +1660,22 @@ final class Coordinator: NSObject, NSMenuDelegate {
                 diagnostics.record("speech.asr.received characters=\(text.count)")
                 recordTiming("asr-finished")
                 onTranscript(text)
-                if let rememberedText = CharacterCommand.rememberText(in: text) {
-                    Task {
-                        do {
-                            let store = try CharacterMemoryStore(stateDirectory: self.runtime.state, petID: "white-dragon")
-                            let candidate = CharacterMemory(
-                                kind: .fact, text: rememberedText, source: "用户语音明确指令"
-                            )
-                            let existing = try await store.listMemories()
-                            switch CharacterMemoryReview.automationDecision(for: candidate, against: existing) {
-                            case .autoConfirm:
-                                var confirmed = candidate
-                                confirmed.status = .confirmed
-                                try await store.saveMemory(confirmed)
-                                try speechRuntime?.sendResponse(
-                                    text: "我记下了，这条内容已保存在本机。",
-                                    speak: settings.speakReplies
-                                )
-                            case .alreadyExists:
-                                try speechRuntime?.sendResponse(
-                                    text: "这条内容我已经记下了，没有重复保存。",
-                                    speak: settings.speakReplies
-                                )
-                            case .requiresReview(let reason):
-                                try await store.saveMemory(candidate)
-                                try speechRuntime?.sendResponse(
-                                    text: "这条内容需要你在角色与记忆里确认：\(reason)",
-                                    speak: settings.speakReplies
-                                )
-                            case .doNotStore:
-                                try speechRuntime?.sendResponse(
-                                    text: "为保护账号安全，我不会保存密码、密钥或验证码。",
-                                    speak: settings.speakReplies
-                                )
-                            }
-                        } catch {
-                            diagnostics.record("character.memory.candidate-failed")
-                            speechRuntime?.shutdownGracefully { finish(.failure(error)) }
-                        }
-                    }
-                    return
-                }
-                Task {
+                self.speechReplyTask = Task {
                     do {
-                        let store = try CharacterMemoryStore(stateDirectory: self.runtime.state, petID: "white-dragon")
-                        let identity = try await store.loadIdentity(defaultName: "龙妹")
-                        let memories = try await store.listMemories()
-                        let localCapabilities = CharacterCapabilitySnapshot.make(runtime: self.runtime,
-                                                                                  speechRuntimeAvailable: self.speechRuntime != nil)
-                        if let localReply = CharacterLocalAnswer.answer(for: text, identity: identity,
-                                                                         memories: memories,
-                                                                         capabilities: localCapabilities) {
-                            try speechRuntime?.sendResponse(text: localReply, speak: settings.speakReplies)
-                            diagnostics.record("character.local-answer")
-                            return
+                        let reply = try await self.replyToCharacterChat(text, history: [], memorySource: "用户语音明确指令")
+                        try Task.checkCancellation()
+                        guard !finished, !self.stopping else { return }
+                        guard let spoken = SpeechReplyText.prepare(reply) else {
+                            throw SpeechRuntimeSupervisor.SupervisorError.replyGenerationFailed
                         }
-                        let characterContext = await self.voiceCharacterContext(for: text)
-                        let (provider, apiKey) = try self.modelProviderCredentials()
-                        let reply = try await ModelProviderClient().complete(
-                            settings: provider, apiKey: apiKey, userText: text,
-                            characterContext: characterContext
-                        )
-                        try speechRuntime?.sendResponse(text: reply, speak: settings.speakReplies)
-                        diagnostics.record("speech.reply.requested provider=online")
+                        try speechRuntime?.sendResponse(text: spoken, speak: settings.speakReplies)
+                        diagnostics.record("speech.reply.submitted characters=\(spoken.count)")
+                    } catch is CancellationError {
+                        return
                     } catch {
+                        guard !finished, !self.stopping else { return }
                         diagnostics.record("speech.reply.submit-failed")
-                        speechRuntime?.shutdownGracefully { finish(.failure(error)) }
+                        fail(error)
                     }
                 }
                 return
@@ -1636,42 +1683,47 @@ final class Coordinator: NSObject, NSMenuDelegate {
             if event.type == "error" {
                 diagnostics.record("speech.runtime.error reason=\(event.reason ?? "unknown")")
                 let error = SpeechRuntimeSupervisor.SupervisorError.runtimeFailure(reason: event.reason)
-                speechRuntime?.shutdownGracefully {
-                    finish(.failure(error))
-                }
+                fail(error)
                 return
             }
             guard event.type == "session", let eventState = event.state else { return }
             diagnostics.record("speech.session state=\(eventState) reason=\(event.reason ?? "none")")
             if eventState == "audio_started" { recordTiming("first-audio-chunk") }
-            if eventState == "reply", let reply = event.reply, settings.displayReplies {
+            if eventState == "reply", let reply = event.reply {
                 diagnostics.record("speech.reply.received characters=\(reply.count)")
                 recordTiming("reply-generated")
                 replyWasReceived = true
-                presentReply(reply)
+                if settings.displayReplies { presentReply(reply) }
             }
             if eventState == "error" {
-                speechRuntime?.shutdownGracefully {
-                    finish(.failure(SpeechRuntimeSupervisor.SupervisorError.runtimeFailure(reason: event.reason)))
-                }
+                fail(SpeechRuntimeSupervisor.SupervisorError.runtimeFailure(reason: event.reason))
                 return
             }
             if eventState == "idle" {
                 recordTiming("turn-idle")
-                if !replyWasReceived { presentationResolved = true }
+                guard replyWasReceived else {
+                    fail(SpeechRuntimeSupervisor.SupervisorError.replyGenerationFailed); return
+                }
                 sessionReachedIdle = true
                 finishSessionIfReady()
             }
         }
         speechRuntime.onExit = { status in
-            releaseInputResources()
             diagnostics.record("speech.runtime.exited status=\(status)")
-            if status != 0 { finish(.failure(SpeechRuntimeSupervisor.SupervisorError.inferenceFailed)) }
+            if restartingForTurn && pendingFailure == nil && !self.stopping { return }
+            finish(.failure(pendingFailure ?? SpeechRuntimeSupervisor.SupervisorError.unexpectedExit))
         }
         do {
             if speechRuntime.isRunning {
                 guard speechRuntime.isRunning(withAdditionalArguments: arguments) else {
-                    throw SpeechRuntimeSupervisor.SupervisorError.configurationChanged
+                    restartingForTurn = true
+                    speechRuntime.shutdownGracefully {
+                        guard !finished, pendingFailure == nil, !self.stopping else { return }
+                        restartingForTurn = false
+                        do { try speechRuntime.start(appendingArguments: arguments) }
+                        catch { finish(.failure(error)) }
+                    }
+                    return
                 }
                 diagnostics.record("speech.runtime.reused")
                 recordTiming("warm-runtime")
@@ -1682,27 +1734,8 @@ final class Coordinator: NSObject, NSMenuDelegate {
             }
         }
         catch {
-            speechChatInProgress = false
-            drainPendingSpeechCue()
-            try? FileManager.default.removeItem(at: inputURL)
-            if hasScopedAccess { referenceURL?.stopAccessingSecurityScopedResource() }
             diagnostics.record("speech.runtime.start-failed")
-            completion(.failure(error))
-        }
-    }
-
-    private func voiceCharacterContext(for query: String) async -> String? {
-        do {
-            let store = try CharacterMemoryStore(stateDirectory: runtime.state, petID: "white-dragon")
-            let identity = try await store.loadIdentity(defaultName: "龙妹")
-            let memories = try await store.listMemories()
-            let capabilities = CharacterCapabilitySnapshot.make(runtime: runtime,
-                                                                  speechRuntimeAvailable: speechRuntime != nil)
-            return CharacterContextBuilder.make(identity: identity, memories: memories,
-                                                capabilities: capabilities, query: query)
-        } catch {
-            diagnostics.record("character.context.unavailable")
-            return nil
+            finish(.failure(error))
         }
     }
 

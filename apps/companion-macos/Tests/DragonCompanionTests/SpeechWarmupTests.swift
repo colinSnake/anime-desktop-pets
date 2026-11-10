@@ -108,6 +108,50 @@ final class SpeechWarmupTests: XCTestCase {
         try await body()
     }
 
+    func testRuntimeFailureReleasesCueAndNextClickStartsFreshProcess() async throws {
+        let f = try fixture(speaking: "printf '%s\\n' '{\"protocol_version\":1,\"type\":\"session\",\"state\":\"error\",\"reason\":\"playback_failed\"}'")
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        try await withRepository(f.root) {
+            let coordinator = Coordinator(runtime: f.runtime, mode: .controlTest)
+            _ = coordinator.handle(.init(.speak, text: "首次设备故障"))
+            try await waitUntil { f.commands.count == 1 && !coordinator.isSpeechRuntimeRunning }
+            _ = coordinator.handle(.init(.speak, text: "设备恢复后重试"))
+            try await waitUntil { f.commands.count == 2 && !coordinator.isSpeechRuntimeRunning }
+            XCTAssertEqual(f.starts, 2)
+            await stop(coordinator)
+        }
+    }
+
+    func testStalledCueDeadlineStopsOwnedProcessAndAllowsAnotherCue() async throws {
+        // Block on stdin without burning CPU. Only the first child stalls;
+        // it consumes shutdown but ignores TERM, exercising the owned-child kill.
+        let f = try fixture(loading: "", speaking: """
+        if [ ! -f "$record/stalled" ]; then
+            touch "$record/stalled"
+            trap '' TERM
+            while IFS= read -r ignored; do :; done
+        fi
+        """)
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        try await withRepository(f.root) {
+            let coordinator = Coordinator(runtime: f.runtime, mode: .controlTest, speechTurnTimeout: 0.08)
+            var ready = false
+            coordinator.prewarmInteractiveSpeech { ready = true }
+            try await waitUntil { ready }
+            _ = coordinator.handle(.init(.speak, text: "合成卡住的提示"))
+            try await waitUntil { f.commands.count == 1 && !coordinator.isSpeechRuntimeRunning }
+            XCTAssertEqual(f.completedCues, 0, "a timed-out cue cannot report successful playback")
+            ready = false
+            coordinator.prewarmInteractiveSpeech { ready = true }
+            try await waitUntil { ready }
+            _ = coordinator.handle(.init(.speak, text: "超时后下一条提示"))
+            try await waitUntil { f.commands.count == 2 && f.completedCues == 1 }
+            XCTAssertEqual(f.starts, 2)
+            XCTAssertTrue(coordinator.isSpeechRuntimeRunning, "the replacement child remains ready")
+            await stop(coordinator)
+        }
+    }
+
     func testWarmupLoadsBeforeCompletionAndFirstCueReusesProcessExactlyOnce() async throws {
         let f = try fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }

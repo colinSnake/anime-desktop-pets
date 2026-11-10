@@ -22,6 +22,12 @@ enum SpeechPresentationClient {
             info.st_mode & 0o777 == 0o600
     }
 
+    static func displayReplyAsync(_ text: String, directory: URL) async throws {
+        try await Task.detached(priority: .userInitiated) {
+            try displayReply(text, directory: directory)
+        }.value
+    }
+
     static func displayReply(_ text: String, directory: URL) throws {
         guard text.utf8.count <= 512, !text.isEmpty,
               let info = socketInfo(directory: directory),

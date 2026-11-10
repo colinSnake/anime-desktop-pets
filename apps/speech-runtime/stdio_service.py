@@ -9,6 +9,7 @@ import queue as thread_queue
 import stat
 import sys
 import threading
+import time
 
 from mlx_backend import LocalMLXBackend
 from protocol import MAX_COMMAND_BYTES, decode_command
@@ -27,7 +28,8 @@ class SoundDevicePlayer:
     """
 
     _QUEUE_CAPACITY = 24
-    _CLOSE_SENTINEL = object()
+    _DRAIN_TIMEOUT = 30.0
+    _CLOSE_TIMEOUT = 2.0
 
     def __init__(self, sample_rate):
         self._sample_rate = sample_rate
@@ -48,60 +50,80 @@ class SoundDevicePlayer:
 
         sd.check_output_settings(samplerate=self._sample_rate, channels=1, dtype="int16")
         stream = sd.RawOutputStream(
-            samplerate=self._sample_rate,
-            channels=1,
-            dtype="int16",
-            blocksize=0,
+            samplerate=self._sample_rate, channels=1, dtype="int16", blocksize=0,
         )
-        stream.start()
+        try:
+            stream.start()
+        except BaseException:
+            stream.close()
+            raise
         worker = threading.Thread(target=self._run, args=(stream,), name="speech-audio-output", daemon=True)
         with self._state_lock:
-            if self._stream is not None:
-                stream.stop()
-                stream.close()
-                return
-            self._stream = stream
-            self._worker = worker
-        worker.start()
+            discard = self._closed or self._stream is not None
+            if not discard:
+                self._stream = stream
+                self._worker = worker
+                # Publish and start together: close must never join an unstarted worker.
+                worker.start()
+        if discard:
+            stream.stop()
+            stream.close()
+            with self._state_lock:
+                if self._closed:
+                    raise RuntimeError("audio output is closed")
+
+    def _raise_if_failed(self):
+        with self._state_lock:
+            error = self._error
+        if error is not None:
+            raise RuntimeError("audio output failed") from error
 
     def _run(self, stream):
         try:
             while True:
-                chunk = self._chunks.get()
-                try:
-                    if chunk is self._CLOSE_SENTINEL:
+                with self._state_lock:
+                    if self._closed:
                         return
+                try:
+                    chunk = self._chunks.get(timeout=0.1)
+                except thread_queue.Empty:
+                    continue
+                try:
                     stream.write(chunk)
                 finally:
                     self._chunks.task_done()
         except BaseException as error:
             with self._state_lock:
                 self._error = error
+            # Queue.join cannot detect a dead consumer. Wake the bounded drain
+            # so a disconnected device reports failure instead of hanging forever.
+            with self._chunks.all_tasks_done:
+                self._chunks.all_tasks_done.notify_all()
 
     def write(self, pcm16):
-        if len(pcm16) % 2:
-            raise ValueError("PCM16 data must contain whole samples")
+        if len(pcm16) % 2 or len(pcm16) > self._sample_rate * 2 * 5:
+            raise ValueError("PCM16 chunk must contain whole samples and at most five seconds")
+        if not pcm16:
+            return
         self._ensure_stream()
-        with self._state_lock:
-            error = self._error
-        if error is not None:
-            raise RuntimeError("audio output failed") from error
+        self._raise_if_failed()
         try:
             self._chunks.put(pcm16, timeout=2.0)
         except thread_queue.Full as error:
             raise RuntimeError("audio output buffer stalled") from error
-        with self._state_lock:
-            error = self._error
-        if error is not None:
-            raise RuntimeError("audio output failed") from error
+        self._raise_if_failed()
 
     def finish_turn(self):
-        """Wait until all PCM already accepted for this turn has played."""
-        self._chunks.join()
-        with self._state_lock:
-            error = self._error
-        if error is not None:
-            raise RuntimeError("audio output failed") from error
+        """Drain this turn with a deadline, also noticing a failed consumer."""
+        deadline = time.monotonic() + self._DRAIN_TIMEOUT
+        with self._chunks.all_tasks_done:
+            while self._chunks.unfinished_tasks:
+                self._raise_if_failed()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("audio output drain timed out")
+                self._chunks.all_tasks_done.wait(timeout=min(0.1, remaining))
+        self._raise_if_failed()
 
     def close(self):
         with self._state_lock:
@@ -114,12 +136,23 @@ class SoundDevicePlayer:
             self._worker = None
         if stream is None or worker is None:
             return
-        self._chunks.put(self._CLOSE_SENTINEL)
-        worker.join(timeout=5.0)
-        if worker.is_alive():
-            raise RuntimeError("audio output worker did not stop")
-        stream.stop()
-        stream.close()
+        # Do not enqueue a sentinel into a full queue whose consumer may be dead.
+        worker.join(timeout=0.2)
+        try:
+            if worker.is_alive():
+                stream.abort()
+                worker.join(timeout=self._CLOSE_TIMEOUT)
+            if worker.is_alive():
+                raise RuntimeError("audio output worker did not stop")
+            stream.stop()
+        finally:
+            stream.close()
+            while True:
+                try:
+                    self._chunks.get_nowait()
+                    self._chunks.task_done()
+                except thread_queue.Empty:
+                    break
 
 
 class SilentPlayer:
@@ -164,7 +197,12 @@ async def serve(backend, player, reference_audio=None, reference_text=None, stdi
     wake = asyncio.Event()
     input_closed = asyncio.Event()
 
+    audio_started = False
+
     async def publish(event: SessionEvent):
+        nonlocal audio_started
+        if event.state == "speaking":
+            audio_started = False
         if event.state == "idle":
             await asyncio.to_thread(player.finish_turn)
         fields = {"state": event.state}
@@ -174,14 +212,14 @@ async def serve(backend, player, reference_audio=None, reference_text=None, stdi
             fields["reason"] = event.reason
         stdout_emit("session", **fields)
 
-    audio_started = False
-
     async def play_chunk(pcm16):
         nonlocal audio_started
+        if not pcm16:
+            return
+        await asyncio.to_thread(player.write, pcm16)
         if not audio_started:
             audio_started = True
             await publish(SessionEvent("audio_started"))
-        await asyncio.to_thread(player.write, pcm16)
 
     async def respond(text, should_speak):
         audio_started = False
@@ -190,18 +228,24 @@ async def serve(backend, player, reference_audio=None, reference_text=None, stdi
             await publish(SessionEvent("idle"))
             return
         await publish(SessionEvent("speaking"))
+        failure_reason = "synthesis_failed"
         try:
             async for chunk in backend.synthesize(text, reference_audio, reference_text):
+                if not chunk:
+                    continue
+                failure_reason = "playback_failed"
+                await asyncio.to_thread(player.write, chunk)
                 if not audio_started:
                     audio_started = True
                     await publish(SessionEvent("audio_started"))
-                await asyncio.to_thread(player.write, chunk)
+                failure_reason = "synthesis_failed"
             if not audio_started:
                 await publish(SessionEvent("error", reason="synthesis_failed"))
                 return
+            failure_reason = "playback_failed"
             await publish(SessionEvent("idle"))
         except Exception:
-            await publish(SessionEvent("error", reason="synthesis_failed"))
+            await publish(SessionEvent("error", reason=failure_reason))
 
     session = SpeechSession(
         queue,

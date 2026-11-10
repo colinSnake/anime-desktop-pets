@@ -2,12 +2,14 @@ import Foundation
 
 public enum CharacterMemoryReview {
     public enum Finding: Equatable, Sendable {
+        case expired
         case possibleDuplicate(CharacterMemory)
         case possibleConflict(CharacterMemory)
         case possibleKnowledgeConflict(CharacterMemory)
 
         public var title: String {
             switch self {
+            case .expired: "知识已过期"
             case .possibleDuplicate: "可能重复"
             case .possibleConflict: "可能冲突"
             case .possibleKnowledgeConflict: "知识依据冲突"
@@ -16,6 +18,7 @@ public enum CharacterMemoryReview {
 
         public var message: String {
             switch self {
+            case .expired: "请核对最新依据、更新有效期并重新确认；过期知识不参与回答。"
             case .possibleDuplicate(let memory): "与已有记忆相同：\(memory.text)"
             case .possibleConflict(let memory): "与已有记忆可能相反：\(memory.text)"
             case .possibleKnowledgeConflict(let memory): "同一来源、引用和版本下已有不同内容：\(memory.text)"
@@ -34,6 +37,7 @@ public enum CharacterMemoryReview {
                                          against memories: [CharacterMemory]) -> AutomationDecision {
         let value = candidate.text.lowercased()
         if isCredentialLike(memoryContent(candidate)) { return .doNotStore }
+        if candidate.isExpired() { return .requiresReview("知识已过期") }
 
         let reviewTerms = ["银行卡", "身份证", "账号", "支付", "转账", "病史", "诊断", "用药", "医疗"]
         if let term = reviewTerms.first(where: value.contains) {
@@ -80,11 +84,12 @@ public enum CharacterMemoryReview {
     }
 
     public static func findings(for candidate: CharacterMemory,
-                               against memories: [CharacterMemory]) -> [Finding] {
+                               against memories: [CharacterMemory], now: Date = .now) -> [Finding] {
         let candidateText = normalize(candidate.text)
         guard !candidateText.isEmpty else { return [] }
-        return memories
-            .filter { $0.id != candidate.id && $0.status == .confirmed && $0.kind == candidate.kind }
+        let expiry: [Finding] = candidate.isExpired(at: now) ? [.expired] : []
+        return expiry + memories
+            .filter { $0.id != candidate.id && !$0.isExpired(at: now) && $0.status == .confirmed && $0.kind == candidate.kind }
             .compactMap { existing in
                 if normalize(existing.text) == candidateText {
                     return .possibleDuplicate(existing)
@@ -100,8 +105,8 @@ public enum CharacterMemoryReview {
     }
 
     public static func hasUnresolvedKnowledgeConflict(_ memory: CharacterMemory,
-                                                       against memories: [CharacterMemory]) -> Bool {
-        findings(for: memory, against: memories).contains {
+                                                       against memories: [CharacterMemory], now: Date = .now) -> Bool {
+        findings(for: memory, against: memories, now: now).contains {
             if case .possibleKnowledgeConflict = $0 { return true }
             return false
         }

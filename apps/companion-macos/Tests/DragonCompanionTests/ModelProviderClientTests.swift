@@ -46,6 +46,33 @@ final class ModelProviderClientTests: XCTestCase {
         super.tearDown()
     }
 
+    func testPayloadContainsAuthorizedGoalsAndCurrentReviewedKnowledgeOnly() async throws {
+        let goals = [CharacterGoal(title: "书房整理", steps: [.init(text: "标签分类")], shareWithOnlineModel: true),
+                     CharacterGoal(title: "书房私密计划", steps: [.init(text: "私人步骤")]),
+                     CharacterGoal(title: "书房凭证", details: "密码：synthetic", shareWithOnlineModel: true)]
+        let memories = [CharacterMemory(kind: .knowledge, text: "书房当前知识", source: "合成手册", status: .confirmed, shareWithOnlineModel: true),
+                        CharacterMemory(kind: .knowledge, text: "书房过期知识", source: "旧手册", status: .confirmed, shareWithOnlineModel: true, expiresAt: .now.addingTimeInterval(-60)),
+                        CharacterMemory(kind: .knowledge, text: "书房待审知识", source: "草稿", shareWithOnlineModel: true)]
+        let context = CharacterContextBuilder.make(identity: nil, memories: memories, goals: goals, query: "书房整理")
+        var requests = 0
+        ModelProviderURLProtocolStub.handler = { request in
+            requests += 1
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: requestBody(request)) as? [String: Any])
+            let messages = try XCTUnwrap(object["messages"] as? [[String: Any]])
+            let system = try XCTUnwrap(messages.first?["content"] as? String)
+            XCTAssertTrue(system.contains("标签分类")); XCTAssertTrue(system.contains("书房当前知识"))
+            XCTAssertTrue(system.contains("不得声称已经执行、推进或修改计划"))
+            for excluded in ["私人步骤", "书房凭证", "synthetic", "书房过期知识", "书房待审知识"] {
+                XCTAssertFalse(system.contains(excluded), excluded)
+            }
+            let data = try JSONSerialization.data(withJSONObject: ["choices": [["message": ["content": "收到。"]]]])
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
+        }
+        _ = try await ModelProviderClient(session: makeSession()).complete(settings: ModelProviderSettings(), apiKey: "synthetic-test-key",
+                                                                          userText: "书房整理", characterContext: context)
+        XCTAssertEqual(requests, 1)
+    }
+
     func testCompletionUsesOpenAICompatibleChatEndpoint() async throws {
         var settings = ModelProviderSettings()
         settings.provider = "openai-compatible"

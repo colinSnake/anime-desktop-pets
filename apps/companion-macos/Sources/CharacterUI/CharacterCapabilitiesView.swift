@@ -35,6 +35,7 @@ struct CharacterCapabilitiesView: View {
         case .needsSetup: "slider.horizontal.3"
         case .unavailable: "exclamationmark.circle"
         case .planned: "minus.circle"
+        case .onDemand: "clock"
         }
     }
 
@@ -44,6 +45,7 @@ struct CharacterCapabilitiesView: View {
         case .needsSetup: .orange
         case .unavailable: .red
         case .planned: .secondary
+        case .onDemand: .secondary
         }
     }
 }

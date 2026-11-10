@@ -3,6 +3,8 @@
 
 from pathlib import Path
 import builtins
+import asyncio
+import threading
 from types import ModuleType
 import sys
 import tempfile
@@ -20,6 +22,40 @@ class LocalSpeechBackendTests(unittest.TestCase):
         backend = LocalMLXBackend(None, None, None, None)
         self.assertFalse(hasattr(backend, "generate_reply"))
         self.assertFalse(hasattr(backend, "_generate_reply"))
+
+    def test_pcm_evaluation_and_conversion_run_off_the_async_event_loop(self):
+        loop_thread = threading.get_ident()
+        worker_threads = []
+        def mark(): worker_threads.append(threading.get_ident())
+        class Audio: size = 1
+        class Result: audio = Audio()
+        class Samples:
+            def reshape(self, *_args): mark(); return self
+            def __mul__(self, _value): mark(); return self
+            def astype(self, *_args, **_kwargs): mark(); return self
+            def tobytes(self): mark(); return b"\x10\x00"
+        class TTS:
+            sample_rate = 24000
+            def generate(self, **_kwargs):
+                mark()
+                yield Result()
+        class MX:
+            @staticmethod
+            def eval(_audio): mark()
+        class NP:
+            float32 = "float32"
+            @staticmethod
+            def asarray(*_args, **_kwargs): mark(); return Samples()
+            @staticmethod
+            def clip(samples, *_args): mark(); return samples
+            @staticmethod
+            def rint(samples): mark(); return samples
+        async def synthesize():
+            backend = LocalMLXBackend(TTS(), None, MX(), NP())
+            return [chunk async for chunk in backend.synthesize("合成测试", Path("/synthetic/reference.wav"), "合成参考")]
+        self.assertEqual(asyncio.run(synthesize()), [b"\x10\x00"])
+        self.assertTrue(worker_threads)
+        self.assertTrue(all(thread != loop_thread for thread in worker_threads))
 
     def test_tts_only_load_does_not_import_asr_adapter(self):
         def package(name):

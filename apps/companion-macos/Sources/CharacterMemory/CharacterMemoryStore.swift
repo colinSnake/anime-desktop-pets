@@ -37,7 +37,7 @@ public actor CharacterMemoryStore {
         let url = characterDirectory.appendingPathComponent("identity.md")
         guard fileExists(url) else { return .starter(name: defaultName) }
         guard isRegularFile(url) else { throw CharacterMemoryStoreError.unsafePath }
-        return try CharacterMarkdownCodec.decodeIdentity(Data(contentsOf: url))
+        return try CharacterMarkdownCodec.decodeIdentity(readData(from: url, limit: 64 * 1024))
     }
 
     public func saveIdentity(_ identity: CharacterIdentity) throws {
@@ -74,18 +74,31 @@ public actor CharacterMemoryStore {
         guard !CharacterMemoryReview.isCredentialLike(CharacterMemoryReview.memoryContent(memory)) else {
             throw CharacterMemoryStoreError.credentialLikeRecord
         }
+        guard memory.kind == .knowledge || memory.expiresAt == nil else { throw CharacterMemoryStoreError.invalidRecord }
         try prepareDirectories()
-        try write(CharacterMarkdownCodec.encode(memory: memory), to: memoryURL(memory.id))
+        var normalized = memory
+        normalized.expiresAt = memory.expiresAt.map { Date(timeIntervalSince1970: floor($0.timeIntervalSince1970)) }
+        if memory.kind == .knowledge, fileExists(memoryURL(memory.id)) {
+            let previous = try readMemory(from: memoryURL(memory.id))
+            if previous.text != memory.text || previous.source != memory.source || previous.citation != memory.citation
+                || previous.version != memory.version || previous.expiresAt != normalized.expiresAt {
+                normalized.status = .candidate
+                normalized.shareWithOnlineModel = false
+            }
+        }
+        try write(CharacterMarkdownCodec.encode(memory: normalized), to: memoryURL(memory.id))
     }
 
     public func confirmMemory(id: String, shareWithOnlineModel: Bool? = nil) throws {
         var memory = try readMemory(from: existingMemoryURL(id))
+        guard !memory.isExpired() else { throw CharacterKnowledgeImportError.expired }
         memory.status = .confirmed
         if let shareWithOnlineModel { memory.shareWithOnlineModel = shareWithOnlineModel }
         try saveMemory(memory)
     }
 
     public func confirmMemory(_ memory: CharacterMemory) throws {
+        guard !memory.isExpired() else { throw CharacterKnowledgeImportError.expired }
         var confirmed = memory
         confirmed.status = .confirmed
         try saveMemory(confirmed)
@@ -95,6 +108,59 @@ public actor CharacterMemoryStore {
         let url = try existingMemoryURL(id)
         guard isRegularFile(url) else { throw CharacterMemoryStoreError.unsafePath }
         try fileManager.removeItem(at: url)
+    }
+
+    /// User-selected input only. A bounded regular-file read never follows symlinks or opens FIFOs.
+    public func loadKnowledgeImportText(from url: URL) throws -> String {
+        guard ["txt", "md"].contains(url.pathExtension.lowercased()) else {
+            throw CharacterKnowledgeImportError.invalidText
+        }
+        let data: Data
+        do { data = try readData(from: url, limit: CharacterKnowledgeImport.maxBytes) }
+        catch CharacterMemoryStoreError.invalidRecord { throw CharacterKnowledgeImportError.tooLarge }
+        guard let text = String(data: data, encoding: .utf8) else { throw CharacterKnowledgeImportError.invalidText }
+        return text
+    }
+
+    /// Validate the entire batch before writing, never replace existing records, and roll back newly created files on failure.
+    public func importKnowledge(text: String, source: String, citation: String = "", version: String = "",
+                                expiresAt: Date? = nil) throws -> (imported: Int, skipped: Int) {
+        let entries = try CharacterKnowledgeImport.preview(text: text, source: source, citation: citation,
+                                                           version: version, expiresAt: expiresAt)
+        let existing = try listMemories()
+        let pending = entries.filter { entry in
+            !existing.contains { $0.kind == .knowledge && $0.text == entry.text && $0.source == entry.source
+                && $0.citation == entry.citation && $0.version == entry.version && $0.expiresAt == entry.expiresAt }
+        }
+        var created: [URL] = []
+        do {
+            for entry in pending {
+                let url = memoryURL(entry.id)
+                guard !fileExists(url) else { throw CharacterMemoryStoreError.invalidRecord }
+                // Track the path before write: a permissions failure after an atomic write must also roll back.
+                created.append(url)
+                try saveMemory(entry)
+            }
+        } catch {
+            for url in created where isRegularFile(url) { try? fileManager.removeItem(at: url) }
+            throw error
+        }
+        return (pending.count, entries.count - pending.count)
+    }
+
+    private func readData(from url: URL, limit: Int) throws -> Data {
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        guard fd >= 0 else { throw CharacterMemoryStoreError.unsafePath }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
+            throw CharacterMemoryStoreError.unsafePath
+        }
+        guard info.st_size <= limit else { throw CharacterMemoryStoreError.invalidRecord }
+        let data = try handle.read(upToCount: limit + 1) ?? Data()
+        guard data.count <= limit else { throw CharacterMemoryStoreError.invalidRecord }
+        return data
     }
 
     private var characterDirectory: URL {
@@ -113,7 +179,7 @@ public actor CharacterMemoryStore {
         return try urls.filter { $0.pathExtension == "md" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
             .map { url in
                 guard isRegularFile(url) else { throw CharacterMemoryStoreError.unsafePath }
-                return try CharacterMarkdownCodec.decodeGoal(Data(contentsOf: url), expectedID: url.deletingPathExtension().lastPathComponent)
+                return try CharacterMarkdownCodec.decodeGoal(readData(from: url, limit: 64 * 1024), expectedID: url.deletingPathExtension().lastPathComponent)
             }
     }
 
@@ -167,7 +233,7 @@ public actor CharacterMemoryStore {
     private func readMemory(from url: URL) throws -> CharacterMemory {
         guard isRegularFile(url) else { throw CharacterMemoryStoreError.unsafePath }
         return try CharacterMarkdownCodec.decodeMemory(
-            Data(contentsOf: url), expectedID: url.deletingPathExtension().lastPathComponent
+            readData(from: url, limit: 64 * 1024), expectedID: url.deletingPathExtension().lastPathComponent
         )
     }
 

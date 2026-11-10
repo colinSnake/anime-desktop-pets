@@ -15,6 +15,7 @@ enum CharacterMarkdownCodec {
         let source: String
         let citation: String?
         let version: String?
+        let expiresAt: Date?
         let status: CharacterMemory.Status
         let shareWithOnlineModel: Bool
     }
@@ -29,6 +30,7 @@ enum CharacterMarkdownCodec {
         let id: String
         let createdAt: Date
         let status: CharacterGoal.Status
+        let shareWithOnlineModel: Bool?
     }
 
     static func encode(identity: CharacterIdentity) throws -> Data {
@@ -93,10 +95,10 @@ enum CharacterMarkdownCodec {
     }
 
     static func encode(memory: CharacterMemory) throws -> Data {
-        let metadata = MemoryMetadata(schema: 2, id: memory.id, kind: memory.kind,
+        let metadata = MemoryMetadata(schema: 3, id: memory.id, kind: memory.kind,
                                       createdAt: memory.createdAt, source: memory.source,
                                       citation: memory.citation.isEmpty ? nil : memory.citation,
-                                      version: memory.version.isEmpty ? nil : memory.version,
+                                      version: memory.version.isEmpty ? nil : memory.version, expiresAt: memory.expiresAt,
                                       status: memory.status, shareWithOnlineModel: memory.shareWithOnlineModel)
         let frontMatter = try encodeFrontMatter(metadata)
         return Data("---\n\(frontMatter)\n---\n\n\(memory.text)\n".utf8)
@@ -109,7 +111,7 @@ enum CharacterMarkdownCodec {
         decoder.dateDecodingStrategy = .iso8601
         let metadata = try decoder.decode(MemoryMetadata.self, from: metadataData)
         let text = body.trimmingCharacters(in: .newlines)
-        guard (metadata.schema == 1 || metadata.schema == 2), metadata.id == expectedID,
+        guard (1...3).contains(metadata.schema), metadata.id == expectedID,
               metadata.id.range(of: "^[A-Fa-f0-9-]{16,64}$", options: .regularExpression) != nil,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.count <= 1_000 else {
             throw CharacterMemoryStoreError.invalidRecord
@@ -117,11 +119,12 @@ enum CharacterMarkdownCodec {
         return CharacterMemory(id: metadata.id, kind: metadata.kind, text: text,
                                createdAt: metadata.createdAt, source: metadata.source,
                                citation: metadata.citation ?? "", version: metadata.version ?? "",
-                               status: metadata.status, shareWithOnlineModel: metadata.shareWithOnlineModel)
+                               status: metadata.status, shareWithOnlineModel: metadata.shareWithOnlineModel, expiresAt: metadata.expiresAt)
     }
 
     static func encode(goal: CharacterGoal) throws -> Data {
-        let metadata = GoalMetadata(schema: 1, id: goal.id, createdAt: goal.createdAt, status: goal.status)
+        let metadata = GoalMetadata(schema: 2, id: goal.id, createdAt: goal.createdAt, status: goal.status,
+                                        shareWithOnlineModel: goal.shareWithOnlineModel)
         let frontMatter = try encodeFrontMatter(metadata)
         let steps = goal.steps.enumerated().map { index, step in
             "- [\(step.isComplete ? "x" : " ")] \(index + 1). \(step.text) <!-- \(step.id) -->"
@@ -137,7 +140,7 @@ enum CharacterMarkdownCodec {
         decoder.dateDecodingStrategy = .iso8601
         let metadata = try decoder.decode(GoalMetadata.self, from: metadataData)
         let lines = body.components(separatedBy: .newlines)
-        guard metadata.schema == 1, metadata.id == expectedID,
+        guard (metadata.schema == 1 || metadata.schema == 2), metadata.id == expectedID,
               CharacterGoalValidation.isSafeIdentifier(metadata.id),
               let heading = lines.first(where: { $0.hasPrefix("# ") }) else {
             throw CharacterMemoryStoreError.invalidRecord
@@ -159,7 +162,7 @@ enum CharacterMarkdownCodec {
             return CharacterGoal.Step(id: id, text: text, isComplete: checked)
         }
         let goal = CharacterGoal(id: metadata.id, title: title, details: details, createdAt: metadata.createdAt,
-                                 status: metadata.status, steps: steps)
+                                 status: metadata.status, steps: steps, shareWithOnlineModel: metadata.shareWithOnlineModel ?? false)
         guard CharacterGoalValidation.validate(goal) else { throw CharacterMemoryStoreError.invalidRecord }
         return goal
     }

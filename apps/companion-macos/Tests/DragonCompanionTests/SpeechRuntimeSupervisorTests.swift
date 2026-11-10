@@ -4,6 +4,51 @@ import XCTest
 
 @MainActor
 final class SpeechRuntimeSupervisorTests: XCTestCase {
+    func testClosedChildInputReportsFailureWithoutTerminatingHost() async throws {
+        let supervisor = SpeechRuntimeSupervisor(executable: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", """
+        exec 0<&-
+        printf '%s\\n' '{"protocol_version":1,"type":"ready"}'
+        sleep 0.2
+        """])
+        let sent = expectation(description: "closed pipe becomes a Swift error")
+        let exited = expectation(description: "fixture exits")
+        supervisor.onEvent = { event in
+            if event.type == "ready" {
+                do { try supervisor.ping(); XCTFail("Closed stdin must reject the command") }
+                catch { XCTAssertFalse(error.localizedDescription.isEmpty) }
+                sent.fulfill()
+            }
+        }
+        supervisor.onExit = { _ in exited.fulfill() }
+        try supervisor.start()
+        await fulfillment(of: [sent, exited], timeout: 3)
+    }
+
+    func testOldExitDoesNotCompleteWaitersForReplacementRuntime() async throws {
+        let supervisor = SpeechRuntimeSupervisor(executable: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", """
+        sleep 0.1
+        IFS= read -r command
+        """])
+        let stopped = expectation(description: "replacement finishes only when its own process exits")
+        var exits = 0
+        supervisor.onExit = { _ in
+            exits += 1
+            if exits == 1 {
+                do {
+                    try supervisor.start()
+                    supervisor.shutdownGracefully {
+                        XCTAssertFalse(supervisor.isRunning)
+                        stopped.fulfill()
+                    }
+                } catch { XCTFail(error.localizedDescription) }
+            }
+        }
+        try supervisor.start()
+        supervisor.shutdownGracefully()
+        await fulfillment(of: [stopped], timeout: 3)
+        XCTAssertEqual(exits, 2)
+    }
+
     func testReadyStateResetsAcrossShutdownAndRestart() async throws {
         let supervisor = SpeechRuntimeSupervisor(executable: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", """
         sleep 0.05

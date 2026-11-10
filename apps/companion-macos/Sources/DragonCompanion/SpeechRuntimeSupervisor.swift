@@ -63,6 +63,11 @@ final class SpeechRuntimeSupervisor {
         let stderrPipe = Pipe()
         child.executableURL = executable
         child.arguments = arguments + additionalArguments
+        // A child may close stdin while still running. Report EPIPE to the
+        // caller instead of allowing SIGPIPE to terminate the desktop host.
+        guard fcntl(stdinPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == 0 else {
+            throw SupervisorError.notRunning
+        }
         child.standardInput = stdinPipe
         child.standardOutput = stdoutPipe
         child.standardError = stderrPipe
@@ -117,16 +122,13 @@ final class SpeechRuntimeSupervisor {
         guard !stoppingGracefully else { return }
         stoppingGracefully = true
         try? send(["type": "shutdown"])
+        let token = generation
         DispatchQueue.main.asyncAfter(deadline: .now() + max(0, timeout)) { [weak self, weak process] in
-            guard let self, let process, process.isRunning else { return }
+            guard let self, let process, process.isRunning,
+                  self.process === process, self.generation == token else { return }
             fputs("Dragon: speech runtime did not stop gracefully; sending terminate.\n", stderr)
+            // Immediate termination owns the single bounded SIGKILL fallback.
             self.terminateImmediately()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self, weak process] in
-                guard let self, let process, process.isRunning,
-                      self.process === process else { return }
-                fputs("Dragon: speech runtime ignored terminate; forcing owned child to exit.\n", stderr)
-                _ = kill(process.processIdentifier, SIGKILL)
-            }
         }
     }
 
@@ -194,8 +196,10 @@ final class SpeechRuntimeSupervisor {
         runningAdditionalArguments = nil
         outputBuffer.removeAll(keepingCapacity: false)
         stoppingGracefully = false
+        let waiters = terminationWaiters
+        terminationWaiters.removeAll()
         onExit?(status)
-        finishTerminationWaiters()
+        waiters.forEach { $0() }
     }
 
     private func finishTerminationWaiters() {
@@ -219,6 +223,9 @@ final class SpeechRuntimeSupervisor {
         case replyGenerationFailed
         case synthesisFailed
         case playbackFailed
+        case cancelled
+        case turnTimedOut
+        case unexpectedExit
 
         static func runtimeFailure(reason: String?) -> SupervisorError {
             switch reason {
@@ -246,6 +253,9 @@ final class SpeechRuntimeSupervisor {
             case .modelLoadFailed: "本地语音模型加载失败；请检查模型完整性和可用内存。"
             case .replyGenerationFailed: "语音已识别，但文字回复生成失败。"
             case .synthesisFailed: "文字回复已生成，但音色合成失败；请检查参考音频和准确转写。"
+            case .cancelled: "本轮语音已取消。"
+            case .turnTimedOut: "语音处理超过本轮时限，已停止本轮服务；请重试或检查本机模型和输出设备。"
+            case .unexpectedExit: "语音服务在回复完成前退出，本轮已结束；请重试。"
             case .playbackFailed: "扬声器初始化或播放失败；请检查系统声音输出设备，也可关闭朗读后重试。"
             case .inferenceFailed: "本地语音生成失败；请检查模型、转写和参考音频。"
             }

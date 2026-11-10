@@ -2,10 +2,11 @@ import AppKit
 import UniformTypeIdentifiers
 
 @MainActor
-final class SpeechSettingsWindow: NSWindowController, NSWindowDelegate {
+final class SpeechSettingsWindow: NSViewController {
     private let store: SpeechSettingsStore
     private var settings: SpeechSettings
     var onDemo: ((SpeechSettings, @escaping (Result<String, Error>) -> Void) -> Void)?
+    var onCancelVoice: (() -> Void)?
     var onSettingsSaved: ((SpeechSettings) -> Void)?
     var onDiagnostic: ((String) -> Void)?
     var onVoiceChat: ((URL, SpeechSettings, @escaping (String) -> Void,
@@ -29,25 +30,28 @@ final class SpeechSettingsWindow: NSWindowController, NSWindowDelegate {
     private let voiceChatButton = NSButton(title: "开始语音聊天", target: nil, action: nil)
     private let clearReference = NSButton(title: "移除", target: nil, action: nil)
 
-    init(store: SpeechSettingsStore) throws {
+    init(store: SpeechSettingsStore, offlinePreview: Bool = false) throws {
         self.store = store
         settings = try store.load()
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 660, height: 590),
-                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = "直播语音设置"
-        window.isReleasedWhenClosed = false
-        super.init(window: window)
-        window.delegate = self
+        super.init(nibName: nil, bundle: nil)
+        view = NSView()
         voiceRecorder.onDiagnostic = { [weak self] event in self?.onDiagnostic?(event) }
         buildContent()
         apply(settings)
-        window.center()
+        if offlinePreview {
+            microphoneTest.isEnabled = false
+            demoButton.isEnabled = false
+            voiceChatButton.isEnabled = false
+            saveButton.isEnabled = false
+            status.stringValue = "离线预览：麦克风、模型请求和设置保存已禁用。"
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
 
-    func windowWillClose(_ notification: Notification) {
+    func stopForWindowClose() {
         voiceRecorder.cancel()
+        onCancelVoice?()
         isTestingMicrophone = false
     }
 
@@ -57,7 +61,7 @@ final class SpeechSettingsWindow: NSWindowController, NSWindowDelegate {
     }
 
     private func buildContent() {
-        guard let content = window?.contentView else { return }
+        let content = view
         let title = NSTextField(labelWithString: "直播语音")
         title.font = .systemFont(ofSize: 17, weight: .semibold)
         let note = NSTextField(wrappingLabelWithString:

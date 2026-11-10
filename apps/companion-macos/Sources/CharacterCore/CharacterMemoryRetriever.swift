@@ -9,12 +9,12 @@ public enum CharacterMemoryRetriever {
 
     public static func relevant(to query: String, in memories: [CharacterMemory], limit: Int = 4,
                                 onlineAuthorizedOnly: Bool = false,
-                                includeKnowledgeProvenance: Bool = false,
+                                includeKnowledgeProvenance: Bool = false, now: Date = .now,
                                 excluding shouldExclude: (CharacterMemory) -> Bool = { _ in false }) -> [CharacterMemory] {
         guard limit > 0 else { return [] }
         let queryTerms = expandedTerms(in: retrievalQuery(query))
         return memories.compactMap { memory -> (CharacterMemory, Double)? in
-            guard memory.status == .confirmed,
+            guard memory.status == .confirmed, !memory.isExpired(at: now),
                   !onlineAuthorizedOnly || memory.shareWithOnlineModel,
                   !shouldExclude(memory) else { return nil }
             let searchableText: String
@@ -35,9 +35,9 @@ public enum CharacterMemoryRetriever {
         .map(\.0)
     }
 
-    public static func recent(in memories: [CharacterMemory], limit: Int = 3) -> [CharacterMemory] {
+    public static func recent(in memories: [CharacterMemory], limit: Int = 3, now: Date = .now) -> [CharacterMemory] {
         guard limit > 0 else { return [] }
-        return memories.filter { $0.status == .confirmed }
+        return memories.filter { $0.status == .confirmed && !$0.isExpired(at: now) }
             .sorted { lhs, rhs in
                 if lhs.createdAt != rhs.createdAt { return lhs.createdAt > rhs.createdAt }
                 return lhs.id < rhs.id
