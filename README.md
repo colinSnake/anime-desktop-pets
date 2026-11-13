@@ -103,7 +103,8 @@ For explicit storage recovery, preview with `python3 scripts/clean-builds.py --c
 then remove `--dry-run`. This adds allowlisted compiler/PyInstaller intermediates, an owned generated
 source staging tree and a redundant helper packaging directory; it preserves build products, source assets,
 environments, downloads and verification evidence. Busy paths are skipped; an active compiler or failed
-open-file check aborts cleanup.
+open-file check aborts cleanup. Candidates that become busy or disappear before deletion are skipped;
+replaced directories or mismatched app ownership still abort cleanup.
 Normal builds do not opt into cache removal; the next build recreates removed caches.
 
 ## Validation

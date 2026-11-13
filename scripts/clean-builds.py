@@ -6,6 +6,7 @@ import re
 import plistlib
 import shlex
 import shutil
+import stat
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,6 +51,16 @@ def safe_directory(path):
         return path.is_dir()
     except (OSError, ValueError):
         return False
+
+
+def directory_identity(path):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError('候选路径已变成非目录或符号链接，停止清理：' + str(path))
+    return info.st_dev, info.st_ino
 
 
 def self_contained_helper(path):
@@ -171,21 +182,47 @@ def main(argv=None):
         if args.caches:
             paths.extend(cache_candidates())
         busy = busy_paths(paths)
-        entries = [(path, allocated_kib(path)) for path in paths if path not in busy]
-        for path in sorted(busy):
-            print(f'跳过（仍被使用）: {path}')
-        for path, size in entries:
-            print(f'{"预览" if args.dry_run else "清理"}: {path} ({size / 1024:.1f} MiB)')
+        skipped = len(busy)
+        entries = []
+        for path in paths:
+            if path in busy:
+                print(f'跳过（仍被使用）: {path}')
+                continue
+            identity = directory_identity(path)
+            if identity is not None:
+                entries.append((path, allocated_kib(path), identity))
+            else:
+                print(f'跳过（候选已不存在）: {path}')
+                skipped += 1
+        removed = 0
+        total = 0
+        for path, size, identity in entries:
             if not args.dry_run:
                 # 复核路径/占用；不因符号链接替换或新打开文件而跨边界删除。
-                if (not safe_directory(path) or busy_paths([path])
-                        or (path.name == 'BailongPet' and not self_contained_helper(path.with_name('BailongPet.app')))):
-                    raise RuntimeError('候选路径已变化或被占用，停止后续清理：' + str(path))
+                current_identity = directory_identity(path)
+                if current_identity is None:
+                    print(f'跳过（候选已不存在）: {path}')
+                    skipped += 1
+                    continue
+                if (not safe_directory(path) or current_identity != identity
+                        or (path.name == 'BailongPet' and not self_contained_helper(path.with_name('BailongPet.app')))
+                        or (path.name.endswith('.app') and not owned_host(path))):
+                    raise RuntimeError('候选路径被替换或归属校验失败，停止后续清理：' + str(path))
+                if busy_paths([path]):
+                    print(f'跳过（清理前检测到正在使用）: {path}')
+                    skipped += 1
+                    continue
                 if args.caches and active_builds():
                     raise RuntimeError('清理期间出现构建进程，停止后续清理')
+                print(f'清理: {path} ({size / 1024:.1f} MiB)')
                 shutil.rmtree(path)
-        total = sum(size for _, size in entries)
-        print(f'{"预计释放" if args.dry_run else "已回收"}: {total / 1024:.1f} MiB；处理 {len(entries)} 个归档/缓存目录，跳过 {len(busy)} 个正在使用的目录。')
+                total += size
+                removed += 1
+            else:
+                print(f'预览: {path} ({size / 1024:.1f} MiB)')
+                total += size
+                removed += 1
+        print(f'{"预计释放" if args.dry_run else "已回收"}: {total / 1024:.1f} MiB；处理 {removed} 个归档/缓存目录，跳过 {skipped} 个正在使用或已变化的目录。')
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         parser.exit(1, f'{error}\n')
 

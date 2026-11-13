@@ -224,6 +224,31 @@ class CacheCleanupTests(unittest.TestCase):
             cleaner.main(['--caches'])
             self.assertFalse(cache.exists())
 
+    def test_archive_that_becomes_busy_during_cleanup_is_skipped(self):
+        build_dir = self.root / 'build'
+        build_dir.mkdir()
+        archive = bundle(build_dir / '桌边小崽.previous.20261110-120000-1.app')
+        bundle(build_dir / publisher.APP_NAME)
+        with patch.object(cleaner, 'ROOT', self.root), patch.object(cleaner, 'HOST_HISTORY', build_dir), \
+             patch.object(cleaner, 'busy_paths', side_effect=[set(), {archive}]), \
+             patch.object(cleaner, 'allocated_kib', return_value=128):
+            cleaner.main([])
+        self.assertTrue(archive.exists())
+
+    def test_archive_removed_by_another_cleaner_is_skipped(self):
+        build_dir = self.root / 'build'
+        build_dir.mkdir()
+        archive = bundle(build_dir / '桌边小崽.previous.20261110-120000-1.app')
+        bundle(build_dir / publisher.APP_NAME)
+        def remove_after_measurement(_):
+            shutil.rmtree(archive)
+            return 128
+        with patch.object(cleaner, 'ROOT', self.root), patch.object(cleaner, 'HOST_HISTORY', build_dir), \
+             patch.object(cleaner, 'busy_paths', return_value=set()), \
+             patch.object(cleaner, 'allocated_kib', side_effect=remove_after_measurement):
+            cleaner.main([])
+        self.assertFalse(archive.exists())
+
     def test_active_build_or_failed_open_file_scan_deletes_nothing(self):
         cache = self.directory('.build/out/ModuleCache.noindex')
         with patch.object(cleaner, 'active_builds', return_value=['123 swift']):
