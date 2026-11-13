@@ -54,6 +54,7 @@ public struct PetInstanceDefinition: Codable, Equatable, Sendable {
     public var enabled: Bool
     public var autoStartOnLaunch: Bool
     public var preferences: PetInstancePreferences
+    public var isClone: Bool { Self.isCloneID(id) }
     public init(id: String, package: PetPackageReference, enabled: Bool = true, autoStartOnLaunch: Bool = true,
                 preferences: PetInstancePreferences = .init(), displayName: String? = nil) throws {
         self.id = id; self.package = package; self.displayName = displayName; self.enabled = enabled
@@ -68,7 +69,7 @@ public struct PetInstanceDefinition: Codable, Equatable, Sendable {
         displayName = try values.decodeIfPresent(String.self, forKey: .displayName)
         enabled = try values.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         autoStartOnLaunch = try values.decodeIfPresent(Bool.self, forKey: .autoStartOnLaunch)
-            ?? !Self.isLegacyCloneID(id)
+            ?? !Self.isCloneID(id)
         preferences = try values.decodeIfPresent(PetInstancePreferences.self, forKey: .preferences) ?? .init()
         try validate(allowLegacySize: true)
     }
@@ -79,7 +80,7 @@ public struct PetInstanceDefinition: Codable, Equatable, Sendable {
         try values.encode(enabled, forKey: .enabled); try values.encode(autoStartOnLaunch, forKey: .autoStartOnLaunch)
         try values.encode(preferences, forKey: .preferences)
     }
-    private static func isLegacyCloneID(_ id: String) -> Bool {
+    public static func isCloneID(_ id: String) -> Bool {
         id.range(of: #"(?:-copy(?:-[0-9]+)?)+$"#, options: .regularExpression) != nil
     }
     public func validate() throws {

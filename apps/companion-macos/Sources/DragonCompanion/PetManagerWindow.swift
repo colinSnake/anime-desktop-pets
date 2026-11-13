@@ -1,122 +1,145 @@
 import AppKit
 import DragonCore
+import SwiftUI
 
 @MainActor
-final class PetManagerWindow: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
+final class PetManagerWindow: NSWindowController, NSWindowDelegate, ObservableObject {
     var addPackages: (([PetPackageReference], @escaping (Result<String, Error>) -> Void) -> Void)?
-    private let runtime: Runtime
-    private let tool: PetSourceTool
-    private let table = NSTableView()
-    private let status = NSTextField(wrappingLabelWithString: "正在读取本地桌宠…")
-    private let addButton = NSButton(title: "添加所选", target: nil, action: nil)
-    private var controls: [NSButton] = []
-    private var roots: [String] = []
-    private var sources: [LocalPetSource] = []
-    private var busy = false
-    private let foldersURL: URL
 
-    init(runtime: Runtime) throws {
+    private let runtime: Runtime
+    typealias CoverOperation = @Sendable (PetCoverSource) async -> CGImage?
+    private let loadCover: CoverOperation
+    private var coverTask: Task<Void, Never>?
+    private var scanID = UUID()
+    @Published private(set) var covers: [String: PetSourceCoverState] = [:]
+
+    typealias SourceOperation = @Sendable (String, [String]) async throws -> LocalPetToolReply
+    private let sourceOperation: SourceOperation
+    private let foldersURL: URL
+    private weak var presentingWindow: NSWindow?
+    private var outsideClickMonitor: Any?
+    private var roots: [String] = []
+    private var selectionAnchor: String?
+
+    @Published private(set) var sources: [LocalPetSource] = []
+    @Published private(set) var selectedPaths = Set<String>()
+    @Published private(set) var status = "正在读取本地桌宠…"
+    @Published private(set) var busy = false
+    @Published var query = ""
+
+    var filteredSources: [LocalPetSource] {
+        let value = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return sources }
+        return sources.filter {
+            $0.name.localizedCaseInsensitiveContains(value)
+                || $0.version.localizedCaseInsensitiveContains(value)
+                || $0.path.localizedCaseInsensitiveContains(value)
+        }
+    }
+
+    var selectedCount: Int { selectedPaths.count }
+    var canAdd: Bool { !busy && (1...16).contains(selectedCount) }
+
+    init(runtime: Runtime, sourceOperation: SourceOperation? = nil,
+         loadCover: @escaping CoverOperation = { await PetCoverLoader.shared.image(for: $0, refresh: true) }) throws {
         self.runtime = runtime
-        tool = try PetSourceTool(runtime: runtime)
+        self.loadCover = loadCover
+        if let sourceOperation {
+            self.sourceOperation = sourceOperation
+        } else {
+            let tool = try PetSourceTool(runtime: runtime)
+            self.sourceOperation = { operation, paths in try await tool.run(operation: operation, paths: paths) }
+        }
         foldersURL = runtime.state.appendingPathComponent("pet-search-folders.json")
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 470),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 420),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
-        window.title = "桌宠管理"
-        window.minSize = NSSize(width: 640, height: 380)
+        window.title = "添加桌宠"
+        window.minSize = NSSize(width: 580, height: 360)
+        window.maxSize = NSSize(width: 900, height: 620)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
-        buildContent()
+        window.contentViewController = NSHostingController(rootView: PetManagerPage(model: self))
         loadRoots()
-        window.center()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
+
+    deinit { coverTask?.cancel() }
 
     private func loadRoots() {
         let hints = runtime.resources.appendingPathComponent("pet-search-directories.json")
         for url in [foldersURL, hints] {
             if let data = try? Data(contentsOf: url), data.count <= 64 * 1024,
                let paths = try? JSONDecoder().decode([String].self, from: data) {
-                for path in paths where path != runtime.petLibraryURL.path && !roots.contains(path) && roots.count < 31 { roots.append(path) }
+                for path in paths where path != runtime.petLibraryURL.path && !roots.contains(path) && roots.count < 31 {
+                    roots.append(path)
+                }
             }
         }
         if !roots.contains(runtime.petLibraryURL.path) { roots.append(runtime.petLibraryURL.path) }
     }
 
-    private func buildContent() {
-        guard let content = window?.contentView else { return }
-        let title = NSTextField(labelWithString: "选择要添加的桌宠")
-        title.font = .systemFont(ofSize: 17, weight: .semibold)
-        let note = NSTextField(wrappingLabelWithString: "从本地目录发现桌宠；支持多选。添加后在“实例管理”中启动。")
-        note.textColor = .secondaryLabelColor
-        let folders = NSButton(title: "选择目录或桌宠包…", target: self, action: #selector(chooseRoots))
-        let refresh = NSButton(title: "刷新", target: self, action: #selector(rescan))
-        let select = NSButton(title: "全选", target: self, action: #selector(selectAllRows))
-        controls = [folders, refresh, select]
-        let toolbar = NSStackView(views: controls)
-        toolbar.orientation = .horizontal; toolbar.spacing = 8
-
-        for (identifier, title, width) in [("name", "桌宠", 160.0), ("version", "版本", 130.0), ("source", "所在目录", 430.0)] {
-            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(identifier))
-            column.title = title; column.width = width; column.minWidth = identifier == "source" ? 180 : 90
-            table.addTableColumn(column)
+    func open(parentWindow: NSWindow? = nil) {
+        if let parentWindow, let window {
+            presentingWindow = parentWindow
+            window.appearance = parentWindow.appearance
+            if window.sheetParent == nil { parentWindow.beginSheet(window) }
+            else { window.makeKeyAndOrderFront(nil) }
+            installOutsideClickMonitor()
+        } else {
+            presentingWindow = nil
+            window?.center()
+            showWindow(nil)
+            window?.makeKeyAndOrderFront(nil)
         }
-        table.allowsMultipleSelection = true
-        table.rowHeight = 30
-        table.usesAlternatingRowBackgroundColors = true
-        table.dataSource = self; table.delegate = self
-        let scroll = NSScrollView()
-        scroll.documentView = table
-        scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true
-        scroll.borderType = .bezelBorder
-        addButton.target = self; addButton.action = #selector(addSelected)
-        addButton.bezelStyle = .rounded; addButton.isEnabled = false
-        addButton.keyEquivalent = "\r"
-        let footer = NSStackView(views: [status, addButton])
-        footer.orientation = .horizontal; footer.spacing = 12
-        status.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        addButton.setContentHuggingPriority(.required, for: .horizontal)
-        let stack = NSStackView(views: [title, note, toolbar, scroll, footer])
-        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 12
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
-            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
-            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
-            scroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 170),
-            note.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            footer.widthAnchor.constraint(equalTo: stack.widthAnchor)
-        ])
-        scroll.setContentHuggingPriority(.defaultLow, for: .vertical)
-        scroll.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
-    }
-
-    func open() {
-        showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         if !busy { rescan() }
     }
 
-    @objc private func chooseRoots() {
+    private func installOutsideClickMonitor() {
+        guard outsideClickMonitor == nil else { return }
+        outsideClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            guard let self, let parent = self.presentingWindow,
+                  let sheet = self.window, parent.isVisible,
+                  event.window === parent || event.window === sheet else { return event }
+            let point = event.window?.convertPoint(toScreen: event.locationInWindow) ?? NSEvent.mouseLocation
+            guard parent.frame.contains(point), !sheet.frame.contains(point) else { return event }
+            self.dismissManager()
+            return nil
+        }
+    }
+
+    private func removeOutsideClickMonitor() {
+        guard let outsideClickMonitor else { return }
+        NSEvent.removeMonitor(outsideClickMonitor)
+        self.outsideClickMonitor = nil
+    }
+
+    func dismissManager() {
+        guard let window else { return }
+        removeOutsideClickMonitor()
+        if let parent = window.sheetParent { parent.endSheet(window, returnCode: .cancel) }
+        else { window.close() }
+    }
+
+    func chooseRoots() {
         guard !busy, let window else { return }
         let panel = NSOpenPanel()
         panel.title = "选择桌宠所在目录或 .petpack 文件"
         panel.prompt = "读取桌宠"
         panel.message = "可同时选择多个目录。支持含 manifest.json 的桌宠目录和 .petpack；普通应用或图片目录不会作为可运行桌宠添加。"
-        panel.canChooseDirectories = true; panel.canChooseFiles = true
-        panel.allowsMultipleSelection = true; panel.treatsFilePackagesAsDirectories = false
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = true
+        panel.treatsFilePackagesAsDirectories = false
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let self else { return }
             var updated = self.roots
             for url in panel.urls where !updated.contains(url.path) { updated.append(url.path) }
             guard updated.count <= 32 else {
-                self.status.stringValue = "最多保留32个扫描目录；请减少本次选择。"
+                self.status = "最多保留32个扫描目录；请减少本次选择。"
                 return
             }
             self.roots = updated
@@ -124,108 +147,229 @@ final class PetManagerWindow: NSWindowController, NSTableViewDataSource, NSTable
                 try JSONEncoder().encode(updated).write(to: self.foldersURL, options: .atomic)
                 try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: self.foldersURL.path)
             } catch {
-                self.status.stringValue = "无法保存目录选择：\(error.localizedDescription)"
+                self.status = "无法保存目录选择：\(error.localizedDescription)"
                 return
             }
             self.rescan()
         }
     }
 
-    private func setBusy(_ value: Bool) {
-        busy = value
-        for control in controls { control.isEnabled = !value }
-        table.isEnabled = !value
-        addButton.isEnabled = !value && (1...16).contains(table.selectedRowIndexes.count)
-    }
-
-    @objc private func rescan() {
+    func rescan() {
         guard !busy else { return }
-        setBusy(true)
-        status.stringValue = "正在扫描本地目录…"
-        let tool = tool, paths = roots
+        coverTask?.cancel()
+        scanID = UUID()
+        setBusy(true, message: "正在扫描本地目录…")
+        let sourceOperation = sourceOperation
+        let paths = roots
         Task { @MainActor [weak self] in
             do {
-                let result = try await tool.run(operation: "scan", paths: paths)
+                let result = try await sourceOperation("scan", paths)
                 guard let self else { return }
                 self.sources = result.pets ?? []
-                self.table.reloadData()
-                self.table.deselectAll(nil)
+                self.prepareCovers(self.sources)
+                self.selectedPaths.removeAll()
+                self.selectionAnchor = nil
                 let warnings = (result.warnings ?? []).joined(separator: "；")
-                self.status.stringValue = self.sources.isEmpty
+                self.status = self.sources.isEmpty
                     ? "未发现兼容桌宠；请选择其它目录。\(warnings)"
                     : "发现\(self.sources.count)只桌宠，按 ⌘ 或 ⇧ 可多选。\(warnings)"
-                self.setBusy(false)
+                self.busy = false
             } catch {
-                self?.status.stringValue = error.localizedDescription
-                self?.setBusy(false)
+                guard let self else { return }
+                self.status = error.localizedDescription
+                self.busy = false
+                self.covers = self.covers.mapValues { state in
+                    if case .loading = state { return .unavailable }
+                    return state
+                }
             }
         }
     }
 
-    @objc private func selectAllRows() { table.selectAll(nil) }
+    /// Scanning/addition remains usable while one background decoder prepares bounded thumbnails.
+    private func prepareCovers(_ sources: [LocalPetSource]) {
+        covers = Dictionary(sources.map { ($0.path, .loading) }, uniquingKeysWith: { first, _ in first })
+        let generation = scanID
+        let loadCover = loadCover
+        coverTask = Task { @MainActor [weak self] in
+            for source in sources {
+                guard !Task.isCancelled else { return }
+                let request = PetCoverSource(directory: URL(fileURLWithPath: source.path),
+                                             isPackage: !source.builtin, fallback: nil, maximumPixelSize: 256)
+                let image = await loadCover(request)
+                guard !Task.isCancelled, let self, self.scanID == generation else { return }
+                self.covers[source.path] = image.map(PetSourceCoverState.ready) ?? .unavailable
+            }
+        }
+    }
 
-    @objc private func addSelected() {
-        let selected = table.selectedRowIndexes.compactMap { sources.indices.contains($0) ? sources[$0] : nil }
-        guard !busy, (1...16).contains(selected.count) else { return }
-        setBusy(true)
-        status.stringValue = "正在校验并添加\(selected.count)只桌宠；大动画可能需要一些时间…"
-        let tool = tool
+    func selectSource(_ path: String, modifiers: NSEvent.ModifierFlags = NSEvent.modifierFlags) {
+        guard !busy, let index = filteredSources.firstIndex(where: { $0.path == path }) else { return }
+        let visible = filteredSources.map(\.path)
+        if modifiers.contains(.shift), let anchor = selectionAnchor,
+           let anchorIndex = visible.firstIndex(of: anchor) {
+            let range = min(index, anchorIndex)...max(index, anchorIndex)
+            selectedPaths.formUnion(range.map { visible[$0] })
+        } else if modifiers.contains(.command) || modifiers.contains(.control) {
+            if !selectedPaths.insert(path).inserted { selectedPaths.remove(path) }
+            selectionAnchor = path
+        } else {
+            selectedPaths = [path]
+            selectionAnchor = path
+        }
+        updateSelectionStatus()
+    }
+
+    func selectAllVisible() {
+        guard !busy else { return }
+        selectedPaths.formUnion(filteredSources.map(\.path))
+        updateSelectionStatus()
+    }
+
+    func queryChanged() {
+        updateSelectionStatus()
+    }
+
+    private func updateSelectionStatus() {
+        if selectedCount > 16 {
+            status = "一次最多添加16只，请减少选择。"
+        } else if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && filteredSources.isEmpty {
+            status = selectedCount == 0 ? "没有匹配的桌宠。" : "没有匹配项；仍保留已选\(selectedCount)只。"
+        } else if sources.isEmpty {
+            status = "未发现兼容桌宠；请选择其它目录。"
+        } else {
+            status = "已选择\(selectedCount)只；新桌宠添加后保持停止。"
+        }
+    }
+
+    func addSelected() {
+        let selected = sources.filter { selectedPaths.contains($0.path) }
+        guard canAdd else { return }
+        setBusy(true, message: "正在校验并添加\(selected.count)只桌宠；大动画可能需要一些时间…")
+        let sourceOperation = sourceOperation
         Task { @MainActor [weak self] in
             do {
-                let result = try await tool.run(operation: "prepare", paths: selected.map(\.path))
+                let result = try await sourceOperation("prepare", selected.map(\.path))
                 guard let self else { return }
                 let failures = (result.failures ?? []).joined(separator: "；")
                 guard let packages = result.packages, !packages.isEmpty else {
-                    self.status.stringValue = "未添加桌宠。\(failures)"
-                    self.setBusy(false)
+                    self.setBusy(false, message: "未添加桌宠。\(failures)")
                     return
                 }
                 guard let add = self.addPackages else {
-                    self.status.stringValue = "实例控制器不可用；素材已校验，但未登记桌宠。"
-                    self.setBusy(false)
+                    self.setBusy(false, message: "实例控制器不可用；素材已校验，但未登记桌宠。")
                     return
                 }
                 add(packages) { [weak self] outcome in
                     guard let self else { return }
                     switch outcome {
-                    case .success(let message): self.status.stringValue = message + (failures.isEmpty ? "" : "；部分未添加：" + failures)
-                    case .failure(let error): self.status.stringValue = error.localizedDescription + (failures.isEmpty ? "" : "；" + failures)
+                    case .success(let message): self.setBusy(false, message: message + (failures.isEmpty ? "" : "；部分未添加：" + failures))
+                    case .failure(let error): self.setBusy(false, message: error.localizedDescription + (failures.isEmpty ? "" : "；" + failures))
                     }
-                    self.setBusy(false)
                 }
             } catch {
-                self?.status.stringValue = error.localizedDescription
-                self?.setBusy(false)
+                self?.setBusy(false, message: error.localizedDescription)
             }
         }
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { sources.count }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard sources.indices.contains(row) else { return nil }
-        let source = sources[row]
-        let text: String
-        switch tableColumn?.identifier.rawValue {
-        case "name": text = source.name
-        case "version": text = source.builtin ? "当前内置" : source.version
-        default: text = source.path
+    func revealSourceDirectory(_ path: String) {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else {
+            status = "桌宠目录已不存在，请刷新列表。"
+            return
         }
-        let label = NSTextField(labelWithString: text)
-        label.lineBreakMode = .byTruncatingMiddle
-        label.toolTip = source.path
-        return label
+        let url = URL(fileURLWithPath: path)
+        if isDirectory.boolValue { NSWorkspace.shared.open(url) }
+        else { NSWorkspace.shared.activateFileViewerSelecting([url]) }
     }
 
-    func tableViewSelectionDidChange(_ notification: Notification) {
-        guard !busy else { return }
-        let count = table.selectedRowIndexes.count
-        addButton.isEnabled = (1...16).contains(count)
-        status.stringValue = count > 16 ? "一次最多添加16只，请减少选择。" : "已选择\(count)只；新桌宠添加后保持停止。"
+    private func setBusy(_ value: Bool, message: String) {
+        busy = value
+        status = message
     }
 
-    func windowShouldClose(_ sender: NSWindow) -> Bool {
-        if busy { status.stringValue = "正在处理桌宠，请完成后再关闭。" }
-        return !busy
+    func windowShouldClose(_ sender: NSWindow) -> Bool { true }
+
+    func windowWillClose(_ notification: Notification) {
+        removeOutsideClickMonitor()
+        presentingWindow = nil
+    }
+}
+
+private struct PetManagerPage: View {
+    @ObservedObject var model: PetManagerWindow
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top) {
+                WorkspacePageHeading(title: "添加桌宠", subtitle: "")
+                Spacer()
+                Button(action: model.dismissManager) {
+                    Image(systemName: "xmark").font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary).frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain).help("关闭").accessibilityLabel("关闭添加桌宠")
+            }
+            HStack(spacing: 7) {
+                Button(action: model.chooseRoots) { Text("选择素材目录") }
+                    .disabled(model.busy)
+                Button(action: model.rescan) { Text("刷新") }
+                    .disabled(model.busy)
+                Button(action: model.selectAllVisible) { Text("全选") }
+                    .disabled(model.busy || model.filteredSources.isEmpty)
+                TextField("搜索名称、版本或路径", text: $model.query)
+                    .textFieldStyle(.roundedBorder).frame(minWidth: 130)
+                    .disabled(model.busy)
+                Button(action: model.addSelected) { Text("添加") }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(WorkspaceActionButtonStyle(prominent: true, compact: true))
+                    .disabled(!model.canAdd)
+            }
+            .controlSize(.small)
+            .buttonStyle(WorkspaceActionButtonStyle(compact: true))
+
+            ScrollView {
+                VStack(spacing: 8) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: PetManagerSourceCard.width, maximum: PetManagerSourceCard.width), spacing: 12)],
+                              alignment: .leading, spacing: 12) {
+                        ForEach(model.filteredSources, id: \.path) { source in
+                            PetManagerSourceCard(source: source,
+                                                 cover: model.covers[source.path] ?? .loading,
+                                                 selected: model.selectedPaths.contains(source.path),
+                                                 busy: model.busy,
+                                                 select: { model.selectSource(source.path) },
+                                                 reveal: { model.revealSourceDirectory(source.path) })
+                        }
+                    }
+                    if model.filteredSources.isEmpty && !model.busy {
+                        VStack(spacing: 8) {
+                            Image(systemName: model.sources.isEmpty ? "pawprint" : "magnifyingglass")
+                                .font(.system(size: 22)).foregroundStyle(.secondary)
+                            Text(model.sources.isEmpty ? "没有发现兼容桌宠" : "没有匹配的桌宠")
+                                .font(.system(size: 13, weight: .medium))
+                            Text("可添加素材目录后重新扫描。")
+                                .font(.system(size: 12)).foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 150)
+                    }
+                }
+                // Keep edge cards clear of the scroll viewport's clipping boundary.
+                .padding(2)
+            }
+            .overlay {
+                if model.busy && model.sources.isEmpty {
+                    ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            Text(model.status)
+                .font(.system(size: 11)).foregroundStyle(model.selectedCount > 16 ? Color.red : Color.secondary)
+                .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("pet-manager-status")
+        }
+        .padding(16)
+        .frame(minWidth: 548, minHeight: 328)
+        .tint(Color(nsColor: WorkspacePalette.accent))
+        .onChange(of: model.query) { _ in model.queryChanged() }
     }
 }

@@ -26,6 +26,8 @@ final class PetInstanceTests: XCTestCase {
         XCTAssertTrue(value.instances[0].autoStartOnLaunch)
         XCTAssertFalse(value.instances[1].autoStartOnLaunch)
         XCTAssertTrue(value.instances[2].autoStartOnLaunch)
+        XCTAssertTrue(value.instances[1].isClone)
+        XCTAssertFalse(value.instances[2].isClone)
     }
     func testInvalidPackageIdentity() {
         for id in ["../outside", "", "UPPER", "/absolute", "local.a\n"] {
@@ -69,6 +71,16 @@ final class PetInstanceTests: XCTestCase {
         XCTAssertTrue(model.ready(a)); XCTAssertTrue(model.ready(b))
         XCTAssertEqual(model.states["first"]?.phase, .running)
         XCTAssertEqual(model.states["second"]?.phase, .running)
+    }
+    func testDefaultConcurrentLimitCountsTheOriginalInstance() throws {
+        let rows = try ["white-dragon", "white-dragon-copy", "pet-four", "pet-five"].map { try definition($0) }
+        var model = try PetInstanceLifecycle(registry: .init(instances: rows))
+        XCTAssertEqual(model.maximumRunning, 3)
+        for id in ["white-dragon", "white-dragon-copy", "pet-four"] {
+            let ticket = try XCTUnwrap(model.start(id))
+            XCTAssertTrue(model.ready(ticket))
+        }
+        XCTAssertThrowsError(try model.start("pet-five"))
     }
     func testStopBeforeReadyInvalidatesOldStart() throws {
         var model = try lifecycle()

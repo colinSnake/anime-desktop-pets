@@ -98,7 +98,10 @@ final class Coordinator: NSObject, NSMenuDelegate {
         pet.taskFollowingAllowed = mode == .watch || mode == .launch
         multiPet?.taskFollowingAllowed = mode == .watch || mode == .launch
         pet.onError = { [weak self] message in self?.diagnostics.record("pet.error \(message)") }
-        pet.onChanged = { [weak self] in self?.rebuildMenu() }
+        pet.onChanged = { [weak self] in
+            self?.rebuildMenu()
+            self?.companionWorkspaceWindow?.refreshPetControls()
+        }
         pet.onHide = { [weak self] in _ = self?.handle(.init(.hide)) }
         multiPet?.onChanged = { [weak self] in
             guard let self, let multiPet = self.multiPet else { return }
@@ -108,6 +111,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
             self.lastMultiPetSnapshot = snapshot
             self.diagnostics.record("multi-pet.changed state=\(multiPet.state)")
             self.rebuildMenu()
+            self.companionWorkspaceWindow?.refreshPetControls()
         }
         multiPet?.onDiagnostic = { [weak self] event in self?.diagnostics.record(event) }
     }
@@ -120,6 +124,8 @@ final class Coordinator: NSObject, NSMenuDelegate {
             return
         }
         createMenu()
+        // Keep normal startup clear for the boot animation and Codex handoff.
+        // The management workspace opens on an explicit menu-bar click.
         if mode == .previewPet {
             prewarmInteractiveSpeech { [weak self] in
                 guard let self, !self.stopping, !self.paused,
@@ -843,6 +849,9 @@ final class Coordinator: NSObject, NSMenuDelegate {
         let icon = makeStatusItemImage()
         statusItem?.button?.image = icon
         statusItem?.button?.toolTip = "\(AppCopy.name) · \(AppCopy.tagline)"
+        statusItem?.button?.target = self
+        statusItem?.button?.action = #selector(statusItemClicked(_:))
+        statusItem?.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         rebuildMenu()
     }
 
@@ -881,90 +890,26 @@ final class Coordinator: NSObject, NSMenuDelegate {
 
     private func rebuildMenu() {
         guard statusItem != nil else { return }
-        let menu = self.menu ?? NSMenu()
-        menu.delegate = self; menu.removeAllItems()
-        let backendLabel = runtime.configuration.petBackend == "external" ? "动画桌宠" : "静态预览"
-        let statusLabel = (multiPet?.lastError ?? pet.lastError).map { "运行异常：\($0.prefix(72))" }
-            ?? (paused ? "已暂停" : backendLabel)
-        let label = NSMenuItem(title: "\(AppCopy.name) · \(statusLabel)", action: nil, keyEquivalent: "")
-        label.isEnabled = false; menu.addItem(label); menu.addItem(.separator())
-        if let multiPet {
-            let enabled = multiPet.instances.filter(\.enabled).count
-            let active = multiPet.instances.filter { [.starting, .running, .stopping].contains($0.phase) }.count
-            let summary = NSMenuItem(title: "\(active) / \(enabled) 个实例运行中", action: nil, keyEquivalent: "")
-            summary.isEnabled = false; menu.addItem(summary)
+        let menu = NSMenu(title: AppCopy.name)
+        let exit = NSMenuItem(title: AppCopy.quitTitle, action: #selector(quit), keyEquivalent: "")
+        exit.target = self
+        menu.addItem(exit)
+        self.menu = menu
+    }
+
+    @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
+        guard let event = NSApp.currentEvent else {
+            diagnostics.record("workspace.status-item-click event=unavailable route=pets")
+            openWorkspace(.pets)
+            return
         }
-        func item(_ title: String, _ selector: Selector) { let i = NSMenuItem(title: title, action: selector, keyEquivalent: ""); i.target = self; menu.addItem(i) }
-        let activeManagedPets = multiPet?.instances.contains { [.starting, .running, .stopping].contains($0.phase) } == true
-        let primaryAction = multiPet != nil
-            ? (activeManagedPets ? "停止全部桌宠" : "启动全部桌宠")
-            : (pet.isVisible ? "隐藏桌宠" : "显示桌宠")
-        if mode != .previewAnimation {
-            if paused {
-                item("恢复陪伴", #selector(togglePause))
-            } else if mode == .watch && session.pid == nil {
-                let waiting = NSMenuItem(title: "等待应用启动", action: nil, keyEquivalent: "")
-                waiting.isEnabled = false; menu.addItem(waiting)
-            } else {
-                item(primaryAction, #selector(togglePetAvailability))
-            }
+        if event.type == .rightMouseUp {
+            guard let menu else { return }
+            NSMenu.popUpContextMenu(menu, with: event, for: sender)
+            return
         }
-        if let management = petManagementMenu() {
-            let managementItem = NSMenuItem(title: "实例管理", action: nil, keyEquivalent: "")
-            managementItem.submenu = management
-            menu.addItem(managementItem)
-        }
-        if mode != .previewAnimation && mode != .previewCharacterWindow && mode != .controlTest {
-            let modelManager = NSMenuItem(title: "模型管理…", action: #selector(openModelManager), keyEquivalent: "")
-            modelManager.target = self
-            menu.addItem(modelManager)
-            addInteractiveSpeechMenuItem(to: menu)
-            let speechSettings = NSMenuItem(title: "直播语音…", action: #selector(openSpeechSettings), keyEquivalent: "")
-            speechSettings.target = self
-            menu.addItem(speechSettings)
-            let character = NSMenuItem(title: "角色与记忆…", action: #selector(openCharacterWindow), keyEquivalent: "")
-            character.target = self
-            menu.addItem(character)
-        }
-        if mode != .previewAnimation, multiPet == nil, runtime.configuration.petBackend == "external" {
-            if let candidate = PetInstanceRuntime(runtime: runtime), candidate.registryIsMissing {
-                menu.addItem(.separator())
-                if ExternalPetDescriptor.supportsManagedHandoff(runtime) {
-                    let create = NSMenuItem(title: firstCloneInProgress ? "正在切换桌宠" : "创建龙妹分身",
-                                            action: firstCloneInProgress ? nil : #selector(createFirstClone), keyEquivalent: "")
-                    create.target = self
-                    create.isEnabled = !firstCloneInProgress && !paused && pet.canHandoffToMultiPet
-                    if !pet.canHandoffToMultiPet { create.title = "先显示由桌边小崽启动的增强龙妹" }
-                    menu.addItem(create)
-                } else {
-                    let unavailable = NSMenuItem(title: "当前龙妹构建不支持安全分身切换", action: nil, keyEquivalent: "")
-                    unavailable.isEnabled = false; menu.addItem(unavailable)
-                }
-            } else if let candidate = PetInstanceRuntime(runtime: runtime), !candidate.hasValidRegistry {
-                menu.addItem(.separator())
-                let unavailable = NSMenuItem(title: "实例清单无效；为保护现有数据，已停用首次创建入口", action: nil, keyEquivalent: "")
-                unavailable.isEnabled = false; menu.addItem(unavailable)
-            } else if PetInstanceRuntime(runtime: runtime) == nil {
-                let unavailable = NSMenuItem(title: "当前桌宠构建不支持实例管理", action: nil, keyEquivalent: "")
-                unavailable.isEnabled = false; menu.addItem(unavailable)
-            }
-        }
-        if mode == .watch || mode == .launch {
-            menu.addItem(.separator()); item(paused ? "恢复联动" : "暂停联动", #selector(togglePause))
-        }
-        let advanced = NSMenu()
-        advanced.title = "高级"
-        if !AXIsProcessTrusted() {
-            let permission = NSMenuItem(title: "允许关联窗口大小", action: #selector(openWindowPermissionSettings), keyEquivalent: "")
-            permission.target = self; advanced.addItem(permission)
-        }
-        let settings = NSMenuItem(title: "打开数据文件夹", action: #selector(openSettings), keyEquivalent: "")
-        settings.target = self; advanced.addItem(settings)
-        let advancedItem = NSMenuItem(title: "高级", action: nil, keyEquivalent: "")
-        advancedItem.submenu = advanced
-        menu.addItem(advancedItem)
-        menu.addItem(.separator()); item(AppCopy.quitTitle, #selector(quit))
-        statusItem?.menu = menu; self.menu = menu
+        diagnostics.record("workspace.status-item-click route=pets")
+        openWorkspace(.pets)
     }
 
     private func addInteractiveSpeechMenuItem(to menu: NSMenu) {
@@ -1068,17 +1013,23 @@ final class Coordinator: NSObject, NSMenuDelegate {
     @objc private func showPet() { _ = handle(.init(.show)) }
     @objc private func hidePet() { _ = handle(.init(.hide)) }
     @objc private func togglePetAvailability() {
+        guard mode != .previewCharacterWindow else { return }
         if let multiPet {
             let active = multiPet.instances.contains { [.starting, .running, .stopping].contains($0.phase) }
-            _ = handle(.init(active ? .hide : .show))
+            if active {
+                hidePetRuntime()
+            } else {
+                session.showPet()
+                showPetRuntime(near: lastFrame, startAllManaged: true)
+            }
         } else if pet.isVisible {
             hidePet()
-        } else if multiPet != nil {
-            _ = handle(.init(.show))
         } else {
-            showPet()
+            session.showPet()
+            showPetRuntime(near: lastFrame)
         }
         rebuildMenu()
+        companionWorkspaceWindow?.refreshPetControls()
     }
     @objc private func cloneManagedPet(_ sender: NSMenuItem) {
         guard let action = sender.representedObject as? PetMenuAction,
@@ -1091,14 +1042,23 @@ final class Coordinator: NSObject, NSMenuDelegate {
         guard !stopping, !paused, !firstCloneInProgress else { return }
         do {
             if petManagerWindow == nil {
-                let window = try PetManagerWindow(runtime: runtime)
-                window.addPackages = { [weak self] packages, completion in
-                    guard let self else { return }
-                    self.addLocalPets(packages, completion: completion)
+                let window: PetManagerWindow
+                if mode == .previewCharacterWindow {
+                    window = try PetManagerWindow(runtime: runtime,
+                                                  sourceOperation: WorkspacePreviewSources.operation(in: runtime.state))
+                    window.addPackages = { packages, completion in
+                        completion(.success("离线演示：已接收\(packages.count)只桌宠；未导入素材或启动实例。"))
+                    }
+                } else {
+                    window = try PetManagerWindow(runtime: runtime)
+                    window.addPackages = { [weak self] packages, completion in
+                        guard let self else { return }
+                        self.addLocalPets(packages, completion: completion)
+                    }
                 }
                 petManagerWindow = window
             }
-            petManagerWindow?.open()
+            petManagerWindow?.open(parentWindow: companionWorkspaceWindow?.window)
         } catch { showError(error.localizedDescription) }
     }
 
@@ -1130,21 +1090,66 @@ final class Coordinator: NSObject, NSMenuDelegate {
         openWorkspace(.character)
     }
 
-    private func openWorkspace(_ section: CompanionWorkspaceWindow.Section) {
+    @objc private func openCompanionWorkspace() {
+        openWorkspace(.pets)
+    }
+
+    private func openWorkspace(_ section: WorkspaceSection) {
+        diagnostics.record("workspace.open-begin section=\(section.rawValue) stopping=\(stopping) existing=\(companionWorkspaceWindow != nil)")
         guard !stopping else { return }
         do {
             if companionWorkspaceWindow == nil {
+                diagnostics.record("workspace.open-create-controllers")
                 let offlinePreview = mode == .previewCharacterWindow
                 let models = try ModelManagerWindow(store: ModelProviderStore(stateDirectory: runtime.state),
                                                     offlinePreview: offlinePreview)
+                diagnostics.record("workspace.open-model-controller-created")
                 let speech = try makeSpeechSettingsController()
+                diagnostics.record("workspace.open-speech-controller-created")
                 let character = try makeCharacterController()
+                diagnostics.record("workspace.open-character-controller-created")
                 speechSettingsController = speech
+                let actions = CompanionWorkspaceWindow.Actions(
+                    petStatus: { [weak self] in self?.workspacePetStatus() ?? "桌宠状态暂不可用。" },
+                    petServiceConnected: { [weak self] in
+                        guard let self else { return false }
+                        if let multiPet = self.multiPet {
+                            return multiPet.isLoadingStatus || ["running", "visible"].contains(multiPet.state)
+                        }
+                        return ["running", "running-no-visible-window", "visible", "hidden"].contains(self.pet.state)
+                    },
+                    petActionTitle: { [weak self] in self?.workspacePetActionTitle() ?? "显示 / 隐藏桌宠" },
+                    petIsVisible: { [weak self] in
+                        guard let self else { return false }
+                        if let multiPet = self.multiPet { return multiPet.instances.contains { $0.phase == .running } }
+                        return self.pet.isVisible
+                    },
+                    togglePet: { [weak self] in self?.togglePetAvailability() },
+                    canControlPets: { [weak self] in self?.workspaceCanTogglePets() == true },
+                    canTogglePause: { [weak self] in self?.mode != .previewCharacterWindow && self?.stopping == false },
+                    petInstances: { [weak self] in self?.workspacePetInstances() ?? [] },
+                    toggleInstance: { [weak self] id in self?.workspaceToggleInstance(id) },
+                    cloneInstance: { [weak self] id in self?.workspaceCloneInstance(id) },
+                    deleteInstance: { [weak self] id in self?.workspaceDeleteInstance(id) },
+                    managePets: { [weak self] in self?.openPetManager() },
+                    pauseTitle: { [weak self] in self?.paused == true ? "恢复联动" : "暂停联动" },
+                    isPaused: { [weak self] in self?.paused == true },
+                    togglePause: { [weak self] in self?.togglePause() },
+                    openData: { [weak self] in self?.openSettings() },
+                    openAccessibility: { [weak self] in self?.openWindowPermissionSettings() },
+                    canManagePets: { [weak self] in self?.workspaceCanManagePets() == true },
+                    canOpenAccessibility: { !AXIsProcessTrusted() }
+                )
                 companionWorkspaceWindow = CompanionWorkspaceWindow(models: models, speech: speech,
-                                                                      character: character)
+                                                                      character: character, actions: actions)
+                diagnostics.record("workspace.open-window-controller-created hasWindow=\(companionWorkspaceWindow?.window != nil)")
             }
             companionWorkspaceWindow?.open(section)
-        } catch { showError(error.localizedDescription) }
+            diagnostics.record("workspace.open-presented visible=\(companionWorkspaceWindow?.window?.isVisible ?? false) appActive=\(NSApp.isActive) appWindows=\(NSApp.windows.count)")
+        } catch {
+            diagnostics.record("workspace.open-failed section=\(section.rawValue) error=\(error.localizedDescription)")
+            showError(error.localizedDescription)
+        }
     }
 
     private func makeSpeechSettingsController() throws -> SpeechSettingsWindow {
@@ -1165,7 +1170,7 @@ final class Coordinator: NSObject, NSMenuDelegate {
         return controller
     }
 
-    private func makeCharacterController() throws -> NSViewController {
+    private func makeCharacterController() throws -> CharacterWorkspaceController {
         let store = try CharacterMemoryStore(stateDirectory: runtime.state, petID: "white-dragon")
         let capabilities = mode == .previewCharacterWindow
             ? CharacterCapabilitySnapshot.offlinePreview
@@ -1182,9 +1187,142 @@ final class Coordinator: NSObject, NSMenuDelegate {
             guard let self else { throw ModelProviderError.service("桌边小崽已关闭") }
             return try await self.replyToCharacterChat(text, history: history)
         }
+        let navigation = CharacterWorkspaceNavigation()
         let content = CharacterWorkspaceView(store: store, defaultName: "龙妹", capabilities: capabilities,
-                                             suggestGoal: suggestGoal, chat: chat)
-        return NSHostingController(rootView: content)
+                                             suggestGoal: suggestGoal, chat: chat, navigation: navigation)
+        return CharacterWorkspaceController(content: content, navigation: navigation)
+    }
+
+    private func workspacePetInstances() -> [WorkspacePetInstance] {
+        let builtin = PetCoverSource.builtin(runtime: runtime)
+        let canControl = mode != .previewCharacterWindow && !paused && !stopping && !firstCloneInProgress
+        if let multiPet {
+            return multiPet.instances.sorted { $0.id < $1.id }.map { row in
+                let cover = PetCoverSource(directory: runtime.petLibraryURL.appendingPathComponent("packages")
+                    .appendingPathComponent(row.package.id).appendingPathComponent(row.package.version),
+                    isPackage: true, fallback: row.package.id == "local.bailong.white-dragon" ? builtin.fallback : nil)
+                return WorkspacePetInstance(id: row.id,
+                    name: PetPresentation.name(id: row.id, displayName: row.displayName),
+                    phase: row.phase, enabled: row.enabled, isClone: PetInstanceDefinition.isCloneID(row.id), error: row.error,
+                    canControl: canControl && !multiPet.isLoadingStatus,
+                    canClone: canControl && !multiPet.isLoadingStatus && row.enabled && multiPet.instances.count < 32,
+                    canDelete: mode != .previewCharacterWindow && !stopping && !multiPet.isLoadingStatus &&
+                        multiPet.instances.count > 1 && PetInstanceDefinition.isCloneID(row.id) &&
+                        (row.phase == .stopped || row.phase == .failed),
+                    cover: cover)
+            }
+        }
+        let phase: PetInstancePhase = pet.lastError != nil ? .failed :
+            (["starting", "switching"].contains(pet.state) ? .starting : (pet.isVisible ? .running : .stopped))
+        return [WorkspacePetInstance(id: "white-dragon", name: "龙妹", phase: phase, enabled: true,
+            isClone: false, error: pet.lastError, canControl: workspaceCanTogglePets(),
+            canClone: canControl && pet.canHandoffToMultiPet && workspaceCanManagePets(), canDelete: false, cover: builtin)]
+    }
+
+    private func workspaceToggleInstance(_ id: String) {
+        guard let row = workspacePetInstances().first(where: { $0.id == id }), row.canToggle else { return }
+        if let multiPet {
+            if row.isRunning { multiPet.stop(instanceID: id) } else { multiPet.start(instanceID: id) }
+            rebuildMenu()
+        } else { togglePetAvailability() }
+        companionWorkspaceWindow?.refreshPetControls()
+    }
+
+    private func workspaceCloneInstance(_ id: String) {
+        guard let row = workspacePetInstances().first(where: { $0.id == id }), row.canClone else { return }
+        if let multiPet { multiPet.clone(sourceID: id) }
+        else {
+            beginManagedHandoff(includeClone: true) { [weak self] result in
+                if case .failure(let error) = result { self?.showError(error.localizedDescription) }
+                self?.companionWorkspaceWindow?.refreshPetControls()
+            }
+        }
+        rebuildMenu()
+    }
+
+    private func workspaceDeleteInstance(_ id: String) {
+        guard let row = multiPet?.instances.first(where: { $0.id == id }),
+              PetInstanceDefinition.isCloneID(row.id), row.phase == .stopped || row.phase == .failed else { return }
+        confirmDeleteManagedPet(instanceID: id)
+    }
+
+    private func confirmDeleteManagedPet(instanceID: String) {
+        guard instanceID != "white-dragon", let multiPet,
+              let row = multiPet.instances.first(where: { $0.id == instanceID }),
+              multiPet.instances.count > 1, row.phase == .stopped || row.phase == .failed else { return }
+        let alert = NSAlert()
+        alert.messageText = "删除这个桌宠实例？"
+        alert.informativeText = "将从实例清单中移除“\(PetPresentation.name(id: row.id, displayName: row.displayName))”。必须先停止并完成清理；素材包和独立状态目录会保留。原始龙妹不可删除。"
+        alert.addButton(withTitle: "删除实例")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        multiPet.delete(instanceID: row.id)
+        rebuildMenu()
+        companionWorkspaceWindow?.refreshPetControls()
+    }
+
+    private func workspacePetStatus() -> String {
+        if let multiPet {
+            if let error = multiPet.lastError { return "控制器异常：\(error)" }
+            if speechWarmupInProgress && multiPet.state == "idle" { return "正在准备语音互动，桌宠服务即将启动…" }
+            if multiPet.isLoadingStatus { return "正在连接桌宠控制器…" }
+            let rows = multiPet.instances.filter(\.enabled)
+            let starting = rows.filter { $0.phase == .starting }.count
+            let stopping = rows.filter { $0.phase == .stopping }.count
+            let running = rows.filter { $0.phase == .running }.count
+            if starting > 0 { return "正在启动 \(starting) 个桌宠 · \(running) 个运行中" }
+            if stopping > 0 { return "正在停止 \(stopping) 个桌宠 · \(running) 个运行中" }
+            if running > 0 { return "\(running) / \(rows.count) 个桌宠运行中" }
+            if rows.isEmpty { return "暂无已启用桌宠，可在实例管理中添加或启用。" }
+            if multiPet.state == "idle" { return "桌宠尚未启动 · \(rows.count) 个已就绪" }
+            return "\(rows.count) 个桌宠待启动"
+        }
+        if let error = pet.lastError { return "启动或控制失败：\(error)" }
+        if speechWarmupInProgress && pet.state == "idle" { return "正在准备语音互动，桌宠服务即将启动…" }
+        switch pet.state {
+        case "starting": return "正在启动桌宠…"
+        case "switching": return "正在切换桌宠控制方式…"
+        case "running-no-visible-window": return "桌宠服务已启动，正在等待窗口显示…"
+        case "running": return "桌宠服务运行中，桌宠窗口尚未显示。"
+        case "visible": return "龙妹正在桌面陪伴。"
+        case "hidden": return "桌宠服务运行中，龙妹已隐藏。"
+        case "not-running": return "桌宠尚未运行，点击下方按钮启动。"
+        default: return "桌宠服务已停止，点击下方按钮启动。"
+        }
+    }
+
+    private func workspacePetActionTitle() -> String {
+        if multiPet != nil {
+            if speechWarmupInProgress, multiPet?.state == "idle" { return "正在准备语音…" }
+            if multiPet?.isLoadingStatus == true { return "正在连接…" }
+            if multiPet?.instances.contains(where: { $0.phase == .starting }) == true { return "正在启动…" }
+            if multiPet?.instances.contains(where: { $0.phase == .stopping }) == true { return "正在停止…" }
+            return multiPet?.instances.contains { [.starting, .running, .stopping].contains($0.phase) } == true
+                ? "停止全部桌宠" : "启动全部桌宠"
+        }
+        if speechWarmupInProgress && pet.state == "idle" { return "正在准备语音…" }
+        if pet.state == "starting" || pet.state == "switching" { return "正在启动…" }
+        return pet.isVisible ? "隐藏桌宠" : "显示桌宠"
+    }
+
+    private func workspaceCanTogglePets() -> Bool {
+        guard mode != .previewCharacterWindow, !stopping, !paused else { return false }
+        if let multiPet {
+            if speechWarmupInProgress && multiPet.state == "idle" { return false }
+            return !multiPet.isLoadingStatus && !multiPet.instances.contains {
+                $0.phase == .starting || $0.phase == .stopping
+            }
+        }
+        if speechWarmupInProgress && pet.state == "idle" { return false }
+        return pet.state != "starting" && pet.state != "switching"
+    }
+
+    private func workspaceCanManagePets() -> Bool {
+        if mode == .previewCharacterWindow { return !stopping }
+        guard !paused, !stopping, !firstCloneInProgress,
+              let candidate = multiPet ?? PetInstanceRuntime(runtime: runtime) else { return false }
+        return candidate.hasValidRegistry ||
+            (candidate.registryIsMissing && ExternalPetDescriptor.supportsManagedHandoff(runtime))
     }
 
     func replyToCharacterChat(_ text: String, history: [CharacterChatTurn],
@@ -1911,21 +2049,13 @@ final class Coordinator: NSObject, NSMenuDelegate {
         rebuildMenu()
     }
     @objc private func deleteManagedPet(_ sender: NSMenuItem) {
-        guard let action = sender.representedObject as? PetMenuAction,
-              action.instanceID != "white-dragon",
-              let multiPet,
-              let row = multiPet.instances.first(where: { $0.id == action.instanceID }),
-              row.phase == .stopped || row.phase == .failed else { return }
-        let alert = NSAlert()
-        alert.messageText = "删除这个桌宠实例？"
-        alert.informativeText = "将从实例清单中移除“\(PetPresentation.name(id: row.id, displayName: row.displayName))”。必须先停止并完成清理；素材包和独立状态目录会保留。原始龙妹不可删除。"
-        alert.addButton(withTitle: "删除实例")
-        alert.addButton(withTitle: "取消")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        multiPet.delete(instanceID: row.id)
-        rebuildMenu()
+        guard let action = sender.representedObject as? PetMenuAction else { return }
+        confirmDeleteManagedPet(instanceID: action.instanceID)
     }
-    @objc private func togglePause() { _ = handle(.init(paused ? .resume : .pause)) }
+    @objc private func togglePause() {
+        guard mode != .previewCharacterWindow else { return }
+        _ = handle(.init(paused ? .resume : .pause))
+    }
     @objc private func quit() { _ = handle(.init(.quit)) }
     @objc private func openWindowPermissionSettings() {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else { return }

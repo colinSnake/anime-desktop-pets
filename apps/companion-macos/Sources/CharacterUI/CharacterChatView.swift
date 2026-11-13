@@ -33,8 +33,8 @@ public struct CharacterChatView: View {
                                     .foregroundStyle(.secondary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .padding(14)
-                                    .background(Color(nsColor: .controlBackgroundColor))
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    .background(CharacterUIStyle.cardBackground)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10))
                             }
                             ForEach(Array(model.chatTurns.enumerated()), id: \.offset) { index, turn in
                                 chatBubble(turn).id(index)
@@ -56,40 +56,59 @@ public struct CharacterChatView: View {
                     }
                 }
 
-                Divider()
-                HStack(alignment: .bottom, spacing: 8) {
-                    TextField("和龙妹聊聊……", text: $draft, axis: .vertical)
-                        .lineLimit(1...4)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { send() }
-                    Button("发送") { send() }
-                        .buttonStyle(CharacterActionButtonStyle())
-                        .disabled(model.isChatSending || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    Button("清空") { draft = ""; model.clearChat() }
-                        .disabled(model.isChatSending || model.chatTurns.isEmpty)
-                }
-                .padding(14)
-                if model.failedChatText != nil && !model.isChatSending {
-                    HStack {
-                        Text("上一条消息没有得到回复。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Button("重试上次") { model.retryFailedChat() }
-                            .buttonStyle(.link)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, 10)
-                }
             }
         }
-        .overlay(alignment: .bottomLeading) {
-            if !model.status.isEmpty {
-                Text(model.status)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 4)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if model.chat != nil {
+                VStack(alignment: .leading, spacing: 0) {
+                    if model.failedChatText != nil && !model.isChatSending {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.circle")
+                                .foregroundStyle(.orange)
+                            Text("上一条消息没有得到回复。")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                            Button("重试") { model.retryFailedChat() }
+                                .buttonStyle(.link)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 10)
+                    }
+                    if !model.status.isEmpty {
+                        Text(model.status)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 16)
+                            .padding(.top, 8)
+                    }
+                    Divider().padding(.top, 10)
+                    HStack(alignment: .bottom, spacing: 10) {
+                        TextField("和龙妹聊聊……", text: $draft, axis: .vertical)
+                            .lineLimit(2...5)
+                            .textFieldStyle(.plain)
+                            .frame(minHeight: 42, maxHeight: 72)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 10)
+                                    .stroke(Color(nsColor: .separatorColor).opacity(0.55), lineWidth: 0.7)
+                            }
+                            .onSubmit { send() }
+                        Button("发送") { send() }
+                            .buttonStyle(CharacterActionButtonStyle())
+                            .frame(minHeight: 36)
+                            .disabled(model.isChatSending || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        Button("清空") { draft = ""; model.clearChat() }
+                            .frame(minHeight: 36)
+                            .disabled(model.isChatSending || model.chatTurns.isEmpty)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                }
+                .background(CharacterUIStyle.cardBackground)
             }
         }
     }

@@ -1,5 +1,13 @@
 import SwiftUI
 
+enum CharacterUIStyle {
+    static let cardBackground = Color(nsColor: NSColor(name: NSColor.Name("CharacterCardBackground")) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(calibratedWhite: 0.21, alpha: 1)
+            : NSColor(calibratedWhite: 0.99, alpha: 1)
+    })
+}
+
 struct CharacterSectionHeader: View {
     let title: String
     let subtitle: String
@@ -7,7 +15,6 @@ struct CharacterSectionHeader: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title).font(.title2.weight(.semibold))
-            Text(subtitle).font(.callout).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.bottom, 8)

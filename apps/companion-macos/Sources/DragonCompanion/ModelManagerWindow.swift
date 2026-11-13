@@ -1,20 +1,20 @@
 import AppKit
+import SwiftUI
 
 @MainActor
-final class ModelManagerWindow: NSViewController {
+final class ModelManagerWindow: NSViewController, ObservableObject {
     private let store: ModelProviderStore
     private let keyStore = ModelAPIKeyStore()
     private var settings: ModelProviderSettings
-    private let provider = NSPopUpButton()
-    private let baseURL = NSTextField(string: "")
-    private let model = NSTextField(string: "")
-    private let apiKey = NSSecureTextField(string: "")
-    private let status = NSTextField(wrappingLabelWithString: "")
-    private let saveButton = NSButton(title: "保存", target: nil, action: nil)
-    private let testButton = NSButton(title: "测试连接（可能计费）", target: nil, action: nil)
-    private let removeKeyButton = NSButton(title: "删除已保存 Key", target: nil, action: nil)
-    private var hasSavedKey = false
-    private let offlinePreview: Bool
+    fileprivate let offlinePreview: Bool
+
+    @Published var providerIndex = 0
+    @Published var baseURL = ""
+    @Published var modelName = ""
+    @Published var apiKey = ""
+    @Published private(set) var status = ""
+    @Published private(set) var hasSavedKey = false
+    @Published private(set) var isTesting = false
 
     init(store: ModelProviderStore, offlinePreview: Bool = false) throws {
         self.store = store
@@ -22,170 +22,185 @@ final class ModelManagerWindow: NSViewController {
         settings = try store.load()
         super.init(nibName: nil, bundle: nil)
         view = NSView()
-        buildContent()
+        installSwiftUIPage()
         apply(settings)
-        if offlinePreview {
-            saveButton.isEnabled = false
-            testButton.isEnabled = false
-            removeKeyButton.isEnabled = false
-            status.stringValue = "离线预览：模型配置、钥匙串和网络操作已禁用。"
-        }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
 
-    private func buildContent() {
-        let content = view
-        let title = NSTextField(labelWithString: "在线模型服务")
-        title.font = .systemFont(ofSize: 17, weight: .semibold)
-        let note = NSTextField(wrappingLabelWithString:
-            "语音识别仍在本机运行；识别文本会发送到下方服务商生成回复。GPT、Codex、Grok 等可通过兼容中转填写模型名称和中转 Key；Codex 订阅登录不能直接代替 API Key。Key 存在 macOS 钥匙串。调用与测试可能计费，费用按服务商/中转站单价结算，本应用无法预估或限制账单。天气查询会把城市名称发送给 Open-Meteo。")
-        note.textColor = .secondaryLabelColor
-
-        provider.addItems(withTitles: ["OpenAI API", "DeepSeek", "自定义 / 中转站（GPT、Codex、Grok 等）"])
-        provider.target = self
-        provider.action = #selector(providerChanged)
-        baseURL.placeholderString = "例如 https://api.openai.com/v1"
-        model.placeholderString = "例如 gpt-4o-mini、deepseek-chat、grok-3 或中转提供的名称"
-        apiKey.placeholderString = "留空则保留已保存的 Key；输入新 Key 将替换"
-        for field in [baseURL, model, apiKey] {
-            field.maximumNumberOfLines = 1
-            field.usesSingleLineMode = true
-        }
-        status.textColor = .secondaryLabelColor
-
-        saveButton.target = self
-        saveButton.action = #selector(saveSettings)
-        testButton.target = self
-        testButton.action = #selector(testConnection)
-        removeKeyButton.target = self
-        removeKeyButton.action = #selector(removeSavedKey)
-        let actions = NSStackView(views: [removeKeyButton, testButton, saveButton])
-        actions.orientation = .horizontal
-        actions.alignment = .centerY
-        actions.spacing = 8
-
-        let grid = NSGridView(views: [
-            [label("提供商"), provider],
-            [label("Base URL"), baseURL],
-            [label("模型名称"), model],
-            [label("API Key"), apiKey],
-        ])
-        grid.rowSpacing = 14
-        grid.columnSpacing = 12
-        grid.xPlacement = .leading
-        grid.column(at: 0).xPlacement = .trailing
-        grid.column(at: 0).width = 82
-        for field in [baseURL, model, apiKey] {
-            field.widthAnchor.constraint(greaterThanOrEqualToConstant: 380).isActive = true
-        }
-        let stack = NSStackView(views: [title, note, grid, status, actions])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 16
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(stack)
+    private func installSwiftUIPage() {
+        let host = NSHostingController(rootView: ModelManagerPage(model: self))
+        addChild(host)
+        let hostedView = host.view
+        hostedView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(hostedView)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 22),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -22),
-            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 22),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -20),
-            grid.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            hostedView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            hostedView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            hostedView.topAnchor.constraint(equalTo: view.topAnchor),
+            hostedView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
-    }
-
-    private func label(_ value: String) -> NSTextField {
-        let field = NSTextField(labelWithString: value)
-        field.textColor = .secondaryLabelColor
-        return field
     }
 
     private func apply(_ value: ModelProviderSettings) {
         settings = value
-        let index = ["openai", "deepseek", "openai-compatible"].firstIndex(of: value.provider) ?? 2
-        provider.selectItem(at: index)
-        baseURL.stringValue = value.baseURL
-        model.stringValue = value.model
-        apiKey.stringValue = ""
+        providerIndex = ["openai", "deepseek", "openai-compatible"].firstIndex(of: value.provider) ?? 2
+        baseURL = value.baseURL
+        modelName = value.model
+        apiKey = ""
         if offlinePreview {
             hasSavedKey = false
-            status.stringValue = "离线预览：模型配置、钥匙串和网络操作已禁用。"
+            status = "离线预览：模型配置、钥匙串和网络操作已禁用。"
         } else {
-            do {
-                hasSavedKey = try keyStore.read()?.isEmpty == false
-                status.stringValue = hasSavedKey ? "API Key 已保存在 macOS 钥匙串。" : "尚未保存 API Key。"
-            } catch { status.stringValue = error.localizedDescription }
+            hasSavedKey = keyStore.hasValue()
+            status = hasSavedKey ? "API Key 已保存在 macOS 钥匙串。" : "尚未保存 API Key。"
         }
     }
 
-    @objc private func providerChanged() {
-        switch provider.indexOfSelectedItem {
+    func providerChanged(to index: Int) {
+        providerIndex = index
+        switch index {
         case 0:
-            baseURL.stringValue = "https://api.openai.com/v1"
-            if model.stringValue.isEmpty || model.stringValue == "deepseek-chat" { model.stringValue = "gpt-4o-mini" }
+            baseURL = "https://api.openai.com/v1"
+            if modelName.isEmpty || modelName == "deepseek-chat" { modelName = "gpt-4o-mini" }
         case 1:
-            baseURL.stringValue = "https://api.deepseek.com"
-            if model.stringValue.isEmpty || model.stringValue.hasPrefix("gpt-") { model.stringValue = "deepseek-chat" }
+            baseURL = "https://api.deepseek.com"
+            if modelName.isEmpty || modelName.hasPrefix("gpt-") { modelName = "deepseek-chat" }
         default: break
         }
     }
 
-    private func readControls() throws -> ModelProviderSettings {
+    private func readSettings() throws -> ModelProviderSettings {
         var next = ModelProviderSettings()
-        next.provider = ["openai", "deepseek", "openai-compatible"].indices.contains(provider.indexOfSelectedItem)
-            ? ["openai", "deepseek", "openai-compatible"][provider.indexOfSelectedItem]
+        next.provider = ["openai", "deepseek", "openai-compatible"].indices.contains(providerIndex)
+            ? ["openai", "deepseek", "openai-compatible"][providerIndex]
             : "openai-compatible"
-        next.baseURL = baseURL.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        next.model = model.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        next.baseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        next.model = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
         try next.validate()
         return next
     }
 
-    @objc private func saveSettings() {
+    func saveSettings() {
+        guard !offlinePreview else { return }
         do {
-            let next = try readControls()
+            let next = try readSettings()
             try store.save(next)
-            let key = apiKey.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !key.isEmpty { try keyStore.save(key); hasSavedKey = true }
+            let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !key.isEmpty {
+                try keyStore.save(key)
+                hasSavedKey = true
+            }
             settings = next
-            apiKey.stringValue = ""
-            status.stringValue = "模型设置已保存。"
-        } catch { status.stringValue = error.localizedDescription }
+            apiKey = ""
+            status = "模型设置已保存。"
+        } catch {
+            status = error.localizedDescription
+        }
     }
 
-    @objc private func testConnection() {
+    func testConnection() {
+        guard !offlinePreview, !isTesting else { return }
         do {
-            let next = try readControls()
-            let enteredKey = apiKey.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let next = try readSettings()
+            let enteredKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
             let key = enteredKey.isEmpty ? try keyStore.read() : enteredKey
             guard let key, !key.isEmpty else { throw ModelProviderError.missingAPIKey }
-            testButton.isEnabled = false
-            status.stringValue = "正在发送最小测试请求…"
-            Task {
+            isTesting = true
+            status = "正在发送最小测试请求…"
+            Task { [weak self] in
                 do {
                     let reply = try await ModelProviderClient().complete(
                         settings: next, apiKey: key, userText: "只回复OK", maxTokens: 8
                     )
-                    await MainActor.run {
-                        self.testButton.isEnabled = true
-                        self.status.stringValue = "连接成功，模型回复：\(reply.prefix(80))"
-                    }
+                    self?.status = "连接成功，模型回复：\(reply.prefix(80))"
                 } catch {
-                    await MainActor.run {
-                        self.testButton.isEnabled = true
-                        self.status.stringValue = error.localizedDescription
-                    }
+                    self?.status = error.localizedDescription
                 }
+                self?.isTesting = false
             }
-        } catch { status.stringValue = error.localizedDescription }
+        } catch {
+            status = error.localizedDescription
+        }
     }
 
-    @objc private func removeSavedKey() {
+    func removeSavedKey() {
+        guard !offlinePreview else { return }
         do {
             try keyStore.delete()
             hasSavedKey = false
-            apiKey.stringValue = ""
-            status.stringValue = "已从 macOS 钥匙串删除 API Key。"
-        } catch { status.stringValue = error.localizedDescription }
+            apiKey = ""
+            status = "已从 macOS 钥匙串删除 API Key。"
+        } catch {
+            status = error.localizedDescription
+        }
     }
+}
+
+private struct ModelManagerPage: View {
+    @ObservedObject var model: ModelManagerWindow
+    private let providers = ["OpenAI API", "DeepSeek", "自定义 / 中转站（GPT、Codex、Grok 等）"]
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                WorkspaceSectionCard(title: "服务连接") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        field("提供商") {
+                            Picker("提供商", selection: Binding(get: { model.providerIndex }, set: { model.providerChanged(to: $0) })) {
+                                ForEach(providers.indices, id: \.self) { index in Text(providers[index]).tag(index) }
+                            }
+                            .labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        field("Base URL") {
+                            TextField("例如 https://api.openai.com/v1", text: $model.baseURL)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                        field("模型名称") {
+                            TextField("例如 gpt-4o-mini、deepseek-chat 或中转提供的名称", text: $model.modelName)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                        field("API Key") {
+                            SecureField("留空则保留已保存的 Key；输入新 Key 将替换", text: $model.apiKey)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                    }
+                }
+                WorkspaceSectionCard(title: "凭证与费用") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(model.hasSavedKey ? "API Key 已保存在 macOS 钥匙串" : "尚未保存 API Key", systemImage: model.hasSavedKey ? "key.fill" : "key")
+                            .font(.system(size: 13, weight: .medium))
+                        Text("语音识别在本机完成；仅生成回复时才会向所选服务商发送识别文本。连接测试会发送最小请求并可能产生费用，保存设置不会发起请求。")
+                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                    }
+                }
+                Text(model.status)
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("model-settings-status")
+                HStack(spacing: 8) {
+                    Button("测试连接（可能计费）", action: model.testConnection)
+                        .disabled(model.offlinePreview || model.isTesting)
+                    Button("保存", action: model.saveSettings)
+                        .keyboardShortcut(.defaultAction)
+                        .buttonStyle(WorkspaceActionButtonStyle(prominent: true))
+                        .disabled(model.offlinePreview)
+                    Button("删除已保存 Key", role: .destructive, action: model.removeSavedKey)
+                        .disabled(model.offlinePreview || !model.hasSavedKey)
+                }
+            }
+            .padding(22)
+            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .tint(Color(nsColor: WorkspacePalette.accent))
+    }
+
+    private func field<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
+            content()
+        }
+    }
+
 }

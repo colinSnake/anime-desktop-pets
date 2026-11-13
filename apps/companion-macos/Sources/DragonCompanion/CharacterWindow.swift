@@ -5,6 +5,54 @@ import CharacterUI
 import SwiftUI
 
 @MainActor
+final class CharacterWorkspaceController: NSViewController {
+    private let navigation: CharacterWorkspaceNavigation
+    private let hostingController: NSHostingController<CharacterWorkspaceView>
+
+    init(content: CharacterWorkspaceView, navigation: CharacterWorkspaceNavigation) {
+        self.navigation = navigation
+        hostingController = NSHostingController(rootView: content)
+        super.init(nibName: nil, bundle: nil)
+        addChild(hostingController)
+        view = NSView()
+        let hostedView = hostingController.view
+        hostedView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(hostedView)
+        NSLayoutConstraint.activate([
+            hostedView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            hostedView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            hostedView.topAnchor.constraint(equalTo: view.topAnchor),
+            hostedView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
+
+    func select(_ page: CharacterWorkspacePage) {
+        navigation.page = page
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.applyCompactOverlayScrollbars(in: self.hostingController.view)
+        }
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        applyCompactOverlayScrollbars(in: hostingController.view)
+    }
+
+    private func applyCompactOverlayScrollbars(in view: NSView) {
+        if let scroll = view as? NSScrollView {
+            scroll.scrollerStyle = .overlay
+            scroll.verticalScroller?.controlSize = .mini
+        }
+        for child in view.subviews {
+            applyCompactOverlayScrollbars(in: child)
+        }
+    }
+}
+
+@MainActor
 final class CharacterWindow: NSWindowController {
     init(store: CharacterMemoryStore, capabilities: [CharacterCapability],
          suggestGoal: ((String, String) async throws -> CharacterGoalDraft)?,

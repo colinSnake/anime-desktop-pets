@@ -38,6 +38,7 @@ python3 scripts/build-pet-runtime.py build --source-revision 8e5466d9a438deb6cb4
 ## 实现约定
 
 - 优先沿用现有模块边界、工具和测试模式；修改保持在请求涉及的范围内。不要在 Swift 业务代码中写入本机绝对路径。
+- 大型 Swift 文件/类型增加职责前，先按窗口编排、页面状态、领域操作和通用视图组件检查拆分点；一个类型只负责一个清晰职责。多个页面复用的布局、控件和样式收敛到通用组件，禁止复制粘贴形成近似实现；组件 API 保持窄小，领域状态和副作用留在所属控制器/Coordinator。拆分时保留既有行为并运行受影响的测试，不为拆分制造不必要的模块依赖。
 - 新建通用文件、模块和命令使用产品/职责命名（如 `pet_*`、`speech_*`），不要把当前角色名 `dragon` 写进通用层文件名。`apps/pet-runtime/bailong/dragon_*` 是龙妹角色实现，保留角色名；`apps/pet-runtime/pets/dragon_instances.py`、`dragon_instance_ipc.py`、`dragon_pet_helper.py` 是待迁移的历史通用名，内容纳入冻结 helper 指纹，必须等固定上游可重建、兼容测试完成后成组迁移，不能留下失配的已发布 helper。
 - 产品可见名称统一为「桌边小崽」。Bundle ID、内部可执行名与配置键保持兼容；用户数据默认位于 `~/Library/Application Support/AnimeDesktopPets`，旧 `DragonCodexCompanion` 只作为安全迁移及兼容链接路径保留。
 - 完整增强版默认包含 35 个动作；`--full-pet` 明确选择未经增强的原版，`--native-pet` 是静态 PNG 降级。不要把静态图效果描述为完整动画播放器。
@@ -46,6 +47,10 @@ python3 scripts/build-pet-runtime.py build --source-revision 8e5466d9a438deb6cb4
 - 当前优先完成龙妹本机闭环，再考虑新增角色。真实桌面矩阵由用户选择安全时机，不自动启动应用或中断 Codex；自动化测试不能替代多屏、Space、焦点、长期资源和安装验收。
 
 ## 关键防回归要求
+
+### AppKit Auto Layout
+
+- 约束连接两个不同视图时，只有在它们已加入同一个视图层级后才能激活；独立构建的行/卡片不要提前约束到尚未接入的页面 `view`。先挂接父子视图，再统一激活跨视图约束。新增布局时通过离线工作区预览确认窗口真实可见，并在项目检查中覆盖容易回归的层级边界。
 
 ### Qt 原生崩溃
 

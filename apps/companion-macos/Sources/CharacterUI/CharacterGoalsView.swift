@@ -101,8 +101,14 @@ private struct CharacterGoalRow: View {
             }
         }
         .padding(12)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .background {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(CharacterUIStyle.cardBackground)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color(nsColor: .separatorColor).opacity(0.45), lineWidth: 0.5)
+                }
+        }
         .confirmationDialog("删除这个目标及其计划？此操作无法撤销。", isPresented: $confirmsDeletion,
                             titleVisibility: .visible) {
             Button("删除目标", role: .destructive, action: onDelete)

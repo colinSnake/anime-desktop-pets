@@ -15,38 +15,48 @@ struct CharacterMemoryView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            CharacterSectionHeader(
-                title: "本地记忆",
-                subtitle: "手动添加的记忆先审核；语音明确要求记住普通内容时可自动保存到本机。在线分享仍需逐条允许。"
-            )
-            Button("导入角色知识…") { showingImport = true }
-            HStack {
+            HStack(alignment: .top, spacing: 12) {
+                CharacterSectionHeader(
+                    title: "本地记忆",
+                    subtitle: "新内容先进入待审核；在线分享需逐条允许。"
+                )
+                Spacer(minLength: 8)
+                Button("导入知识…") { showingImport = true }
+            }
+            VStack(alignment: .leading, spacing: 12) {
                 Picker("类型", selection: $draftKind) {
                     ForEach(CharacterMemoryKind.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }
-                .frame(width: 150)
-                TextField(draftKind == .knowledge ? "添加一条角色知识" : "添加一条记忆", text: $draftText)
-                Button("保存记忆") {
-                    if model.addMemory(text: draftText, kind: draftKind, source: draftSource,
-                                       citation: draftCitation, version: draftVersion) {
-                        draftText = ""
-                        draftCitation = ""
-                        draftVersion = ""
+                .frame(maxWidth: 220, alignment: .leading)
+                TextEditor(text: $draftText)
+                    .font(.body)
+                    .frame(minHeight: 76, maxHeight: 112)
+                    .scrollContentBackground(.hidden)
+                    .padding(6)
+                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(nsColor: .separatorColor), lineWidth: 0.5))
+                    .overlay(alignment: .topLeading) {
+                        if draftText.isEmpty {
+                            Text(draftKind == .knowledge ? "写下一条可核对的角色知识…" : "写下一条简洁、明确的记忆…")
+                                .font(.body)
+                                .foregroundStyle(.tertiary)
+                                .padding(.horizontal, 11)
+                                .padding(.vertical, 14)
+                                .allowsHitTesting(false)
+                        }
                     }
-                }
-                .buttonStyle(CharacterActionButtonStyle())
-                .disabled(draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
             if draftKind == .knowledge {
-                HStack {
-                    TextField("知识来源（作者、作品或用户设定）", text: $draftSource)
-                    TextField("引用或定位（可选）", text: $draftCitation)
-                    TextField("版本/日期（可选）", text: $draftVersion)
+                    VStack(alignment: .leading, spacing: 8) {
+                        TextField("知识来源（作者、作品或用户设定）", text: $draftSource)
+                        HStack(spacing: 8) {
+                            TextField("引用或定位（可选）", text: $draftCitation)
+                            TextField("版本或日期（可选）", text: $draftVersion)
+                        }
+                    }
+                    .textFieldStyle(.roundedBorder)
+                    Text("来源信息用于核对依据，不会被当作模型指令。")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                .font(.caption)
-                Text("角色知识会在在线上下文中带上来源、引用和版本；这些字段只是依据，不是模型指令。")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
             let draftFindings = model.draftMemoryFindings(text: draftText, kind: draftKind)
             if !draftFindings.isEmpty {
                 VStack(alignment: .leading, spacing: 3) {
@@ -59,8 +69,46 @@ struct CharacterMemoryView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
+                HStack {
+                    Text("待审核后才会用于回答")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("加入待审核") {
+                        if model.addMemory(text: draftText, kind: draftKind, source: draftSource,
+                                           citation: draftCitation, version: draftVersion) {
+                            draftText = ""
+                            draftCitation = ""
+                            draftVersion = ""
+                        }
+                    }
+                    .buttonStyle(CharacterActionButtonStyle())
+                    .disabled(draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .padding(14)
+            .background {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(CharacterUIStyle.cardBackground)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color(nsColor: .separatorColor).opacity(0.45), lineWidth: 0.5)
+                    }
+            }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
+                    if candidates.isEmpty && confirmed.isEmpty {
+                        VStack(spacing: 8) {
+                            Image(systemName: "brain.head.profile")
+                                .font(.system(size: 24))
+                                .foregroundStyle(.secondary)
+                            Text("还没有记忆").font(.headline)
+                            Text("添加记忆或导入知识后，会先在这里审核。")
+                                .font(.callout).foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 160)
+                        .background(CharacterUIStyle.cardBackground, in: RoundedRectangle(cornerRadius: 10))
+                    }
                     memorySection("待审核", items: candidates)
                     memorySection("已确认", items: confirmed)
                 }
@@ -185,8 +233,14 @@ private struct CharacterMemoryRow: View {
             shareEnabled = value.shareWithOnlineModel
         }
         .padding(12)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .background {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(CharacterUIStyle.cardBackground)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color(nsColor: .separatorColor).opacity(0.45), lineWidth: 0.5)
+                }
+        }
         .confirmationDialog("删除这条记忆？此操作无法撤销。", isPresented: $confirmsDeletion, titleVisibility: .visible) {
             Button("删除记忆", role: .destructive) { onDelete(memory) }
             Button("取消", role: .cancel) {}

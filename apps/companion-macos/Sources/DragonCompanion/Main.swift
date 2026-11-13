@@ -75,8 +75,8 @@ struct DragonCompanionMain {
             print("""
             \(AppCopy.name) · Anime Desktop Pets
             \(AppCopy.tagline)
-            --launch                 启动/复用 Codex（默认）；只对新进程播放动画
-            --watch                  监视后续 Codex 启动；已有 Codex 只显示桌宠
+            --launch                 启动/复用 Codex（默认）；只对新进程播放动画，点击菜单栏图标打开管理窗口
+            --watch                  监视后续 Codex 启动；已有 Codex 只显示桌宠，管理窗口默认不弹出
             --preview-animation      只预览本地动画，不启动或激活 Codex
             --preview-pet            只预览桌宠，不读取 Codex 任务
             --preview-character-window 只打开角色、记忆与聊天窗口，不启动桌宠或在线服务

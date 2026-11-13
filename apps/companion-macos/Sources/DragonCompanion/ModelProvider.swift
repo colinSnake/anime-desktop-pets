@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import LocalAuthentication
 import Security
 import CharacterCore
 
@@ -97,7 +98,12 @@ struct ModelAPIKeyStore {
         var query = baseQuery
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         query[kSecReturnAttributes as String] = true
-        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        query[kSecUseAuthenticationContext as String] = context
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        return status == errSecSuccess || status == errSecInteractionNotAllowed
     }
 
     func save(_ value: String) throws {

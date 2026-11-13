@@ -51,7 +51,7 @@ final class VoiceInputRecorder {
     private let sampleQueue = DispatchQueue(label: "local.desktop-pets.microphone-samples",
                                             qos: .userInitiated)
     private var limitTimer: Timer?
-    private let requestAccess: (@escaping (Bool) -> Void) -> Void
+    private let requestAccess: (@escaping @Sendable (Bool) -> Void) -> Void
     private var pendingPermission: (id: UUID, completion: (Result<Void, Error>) -> Void)?
     private var lastCaptureSummary = AudioCaptureSummary.empty
     var onLimitReached: ((URL?) -> Void)?
@@ -62,8 +62,8 @@ final class VoiceInputRecorder {
     private(set) var peakLevel: Float = 0
     var captureSummary: AudioCaptureSummary { statistics?.snapshot ?? lastCaptureSummary }
 
-    init(requestAccess: @escaping (@escaping (Bool) -> Void) -> Void = {
-        AVCaptureDevice.requestAccess(for: .audio, completionHandler: $0)
+    init(requestAccess: @escaping (@escaping @Sendable (Bool) -> Void) -> Void = { completion in
+        AVCaptureDevice.requestAccess(for: .audio, completionHandler: completion)
     }) {
         self.requestAccess = requestAccess
     }
