@@ -48,6 +48,7 @@ public struct CharacterWorkspaceView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(CharacterUIStyle.canvas)
         .onChange(of: navigation.page) { selected in
             switch selected {
             case .memories: model.refreshMemories()

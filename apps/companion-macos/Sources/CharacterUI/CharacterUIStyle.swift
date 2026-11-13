@@ -1,11 +1,10 @@
 import SwiftUI
 
 enum CharacterUIStyle {
-    static let cardBackground = Color(nsColor: NSColor(name: NSColor.Name("CharacterCardBackground")) { appearance in
-        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(calibratedWhite: 0.21, alpha: 1)
-            : NSColor(calibratedWhite: 0.99, alpha: 1)
-    })
+    static let canvas = Color(nsColor: ManagementSurfacePalette.canvas)
+    static let cardBackground = Color(nsColor: ManagementSurfacePalette.card)
+    static let input = Color(nsColor: ManagementSurfacePalette.input)
+    static let border = Color(nsColor: ManagementSurfacePalette.border)
 }
 
 struct CharacterSectionHeader: View {

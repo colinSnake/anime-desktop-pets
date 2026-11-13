@@ -44,6 +44,7 @@ struct CharacterIdentityView: View {
                 }
             }
         }
+        .listRowBackground(CharacterUIStyle.cardBackground)
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .padding(.horizontal, 20)
@@ -79,8 +80,8 @@ struct CharacterIdentityView: View {
                 .frame(minHeight: height, maxHeight: height)
                 .scrollContentBackground(.hidden)
                 .padding(5)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(nsColor: .separatorColor), lineWidth: 0.5))
+                .background(CharacterUIStyle.input, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(CharacterUIStyle.border, lineWidth: 0.5))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

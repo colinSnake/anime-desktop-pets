@@ -55,6 +55,7 @@ final class PetManagerWindow: NSWindowController, NSWindowDelegate, ObservableOb
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
         window.title = "添加桌宠"
+        window.backgroundColor = WorkspacePalette.canvas
         window.minSize = NSSize(width: 580, height: 360)
         window.maxSize = NSSize(width: 900, height: 620)
         window.isReleasedWhenClosed = false
@@ -220,12 +221,6 @@ final class PetManagerWindow: NSWindowController, NSWindowDelegate, ObservableOb
         updateSelectionStatus()
     }
 
-    func selectAllVisible() {
-        guard !busy else { return }
-        selectedPaths.formUnion(filteredSources.map(\.path))
-        updateSelectionStatus()
-    }
-
     func queryChanged() {
         updateSelectionStatus()
     }
@@ -316,10 +311,8 @@ private struct PetManagerPage: View {
                     .disabled(model.busy)
                 Button(action: model.rescan) { Text("刷新") }
                     .disabled(model.busy)
-                Button(action: model.selectAllVisible) { Text("全选") }
-                    .disabled(model.busy || model.filteredSources.isEmpty)
-                TextField("搜索名称、版本或路径", text: $model.query)
-                    .textFieldStyle(.roundedBorder).frame(minWidth: 130)
+                WorkspaceSearchField(prompt: "搜索名称、版本或路径", text: $model.query)
+                    .frame(minWidth: 130)
                     .disabled(model.busy)
                 Button(action: model.addSelected) { Text("添加") }
                     .keyboardShortcut(.defaultAction)
@@ -369,6 +362,7 @@ private struct PetManagerPage: View {
         }
         .padding(16)
         .frame(minWidth: 548, minHeight: 328)
+        .background(Color(nsColor: WorkspacePalette.canvas))
         .tint(Color(nsColor: WorkspacePalette.accent))
         .onChange(of: model.query) { _ in model.queryChanged() }
     }

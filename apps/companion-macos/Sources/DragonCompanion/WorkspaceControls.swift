@@ -1,6 +1,11 @@
 import SwiftUI
+import CharacterUI
 
 enum WorkspacePalette {
+    static let canvas = ManagementSurfacePalette.canvas
+    static let card = ManagementSurfacePalette.card
+    static let input = ManagementSurfacePalette.input
+    static let border = ManagementSurfacePalette.border
     static let accent = NSColor(calibratedRed: 0.39, green: 0.31, blue: 0.82, alpha: 1)
 }
 
@@ -35,8 +40,8 @@ struct WorkspaceSectionCard<Content: View>: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(nsColor: .separatorColor).opacity(0.45), lineWidth: 0.5))
+        .background(Color(nsColor: WorkspacePalette.card), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(nsColor: WorkspacePalette.border), lineWidth: 0.7))
     }
 }
 

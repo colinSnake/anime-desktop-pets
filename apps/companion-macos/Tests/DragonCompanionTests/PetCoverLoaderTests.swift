@@ -161,31 +161,33 @@ final class PetCoverLoaderTests: XCTestCase {
         let accent = try XCTUnwrap(NSBitmapImageRep(cgImage: XCTUnwrap(reference.cgImage))
             .colorAt(x: 1, y: 1)?.usingColorSpace(.deviceRGB))
         for scheme in [ColorScheme.light, .dark] {
-            let renderer = ImageRenderer(content:
-                PetManagerSourceCard(source: source, cover: .unavailable, selected: true,
-                                     busy: false, select: {}, reveal: {})
-                    .clipped()
-                    .background(Color(nsColor: .windowBackgroundColor))
-                    .environment(\.colorScheme, scheme)
-            )
-            renderer.scale = 2
-            let rendered = try XCTUnwrap(renderer.cgImage)
-            let bitmap = NSBitmapImageRep(cgImage: rendered)
-            // A 1.5pt border must retain at least two fully covered pixels at 2x on all sides.
-            let points = [NSPoint(x: 1, y: 80), NSPoint(x: rendered.width - 2, y: 80),
-                          NSPoint(x: 160, y: 1), NSPoint(x: 160, y: rendered.height - 2)]
-            for point in points {
-                let pixel = try XCTUnwrap(bitmap.colorAt(x: Int(point.x), y: Int(point.y))?.usingColorSpace(.deviceRGB))
-                XCTAssertEqual(pixel.redComponent, accent.redComponent, accuracy: 0.04, "\(scheme) at \(point)")
-                XCTAssertEqual(pixel.greenComponent, accent.greenComponent, accuracy: 0.04, "\(scheme) at \(point)")
-                XCTAssertEqual(pixel.blueComponent, accent.blueComponent, accuracy: 0.04, "\(scheme) at \(point)")
-                XCTAssertEqual(pixel.alphaComponent, 1, accuracy: 0.01)
-            }
-            if let path = ProcessInfo.processInfo.environment["ADP_UI_SNAPSHOT_DIR"] {
-                let directory = URL(fileURLWithPath: path, isDirectory: true)
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-                    .write(to: directory.appendingPathComponent("card-\(scheme)-clipped-border.png"))
+            for scale in [CGFloat(1), CGFloat(2)] {
+                let renderer = ImageRenderer(content:
+                    PetManagerSourceCard(source: source, cover: .unavailable, selected: true,
+                                         busy: false, select: {}, reveal: {})
+                        .clipped()
+                        .background(Color(nsColor: .windowBackgroundColor))
+                        .environment(\.colorScheme, scheme)
+                )
+                renderer.scale = scale
+                let rendered = try XCTUnwrap(renderer.cgImage)
+                let bitmap = NSBitmapImageRep(cgImage: rendered)
+                // A 2pt border retains two full pixels even at 1x, and is never clipped at 2x.
+                let points = [NSPoint(x: 1, y: 80), NSPoint(x: rendered.width - 2, y: 80),
+                              NSPoint(x: rendered.width / 2, y: 1), NSPoint(x: rendered.width / 2, y: rendered.height - 2)]
+                for point in points {
+                    let pixel = try XCTUnwrap(bitmap.colorAt(x: Int(point.x), y: Int(point.y))?.usingColorSpace(.deviceRGB))
+                    XCTAssertEqual(pixel.redComponent, accent.redComponent, accuracy: 0.04, "\(scheme) at \(point)")
+                    XCTAssertEqual(pixel.greenComponent, accent.greenComponent, accuracy: 0.04, "\(scheme) at \(point)")
+                    XCTAssertEqual(pixel.blueComponent, accent.blueComponent, accuracy: 0.04, "\(scheme) at \(point)")
+                    XCTAssertEqual(pixel.alphaComponent, 1, accuracy: 0.01)
+                }
+                if let path = ProcessInfo.processInfo.environment["ADP_UI_SNAPSHOT_DIR"] {
+                    let directory = URL(fileURLWithPath: path, isDirectory: true)
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                        .write(to: directory.appendingPathComponent("card-\(scheme)-\(Int(scale))x-clipped-border.png"))
+                }
             }
         }
     }

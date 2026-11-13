@@ -16,6 +16,10 @@ struct PetManagerSourceCard: View {
     let select: () -> Void
     let reveal: () -> Void
 
+    private var cardFill: Color {
+        selected ? Color(nsColor: WorkspacePalette.accent).opacity(0.12) : Color(nsColor: .controlBackgroundColor)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             Button(action: select) {
@@ -61,12 +65,17 @@ struct PetManagerSourceCard: View {
             .accessibilityLabel("在 Finder 中查看\(source.name)的素材目录")
             .padding(10)
         }
+        // Reserve a border lane outside the clipped content. Cover images, material badges
+        // and button drawing must not share the border's pixels, including in a scroll view.
+        // Keep this inset constant so selection never changes the content's geometry.
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(2)
         .frame(width: Self.width)
-        .background(selected ? Color(nsColor: WorkspacePalette.accent).opacity(0.12) : Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(cardFill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
             .strokeBorder(selected ? Color(nsColor: WorkspacePalette.accent) : Color(nsColor: .separatorColor).opacity(0.55),
-                    lineWidth: selected ? 1.5 : 0.7))
+                    lineWidth: selected ? 2 : 1)
+            .allowsHitTesting(false))
     }
 
     @ViewBuilder

@@ -89,6 +89,7 @@ final class CompanionWorkspaceWindow: NSWindowController, NSWindowDelegate {
         window.title = AppCopy.name
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
+        window.backgroundColor = WorkspacePalette.canvas
         window.minSize = NSSize(width: 1000, height: 680)
         window.isReleasedWhenClosed = false
         super.init(window: window)

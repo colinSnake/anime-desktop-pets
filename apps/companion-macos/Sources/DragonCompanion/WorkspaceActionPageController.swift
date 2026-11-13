@@ -136,6 +136,7 @@ struct WorkspaceActionPage: View {
             .frame(maxWidth: 760, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
+        .background(Color(nsColor: WorkspacePalette.canvas))
         .tint(model.accent)
     }
 }

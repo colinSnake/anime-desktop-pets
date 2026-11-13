@@ -64,6 +64,7 @@ final class CharacterWindow: NSWindowController {
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
         window.title = "角色、记忆与聊天"
+        window.backgroundColor = WorkspacePalette.canvas
         window.contentViewController = NSHostingController(rootView: VStack(spacing: 0) {
             if offlinePreview {
                 Text("离线验收 · 使用临时资料 · 不连接在线服务 · 关闭窗口即可退出")

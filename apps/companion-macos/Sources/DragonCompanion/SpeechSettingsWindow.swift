@@ -399,6 +399,7 @@ private struct SpeechSettingsPage: View {
             }
             .padding(.horizontal, 18).padding(.vertical, 10)
         }
+        .background(Color(nsColor: WorkspacePalette.canvas))
         .tint(Color(nsColor: WorkspacePalette.accent))
     }
 

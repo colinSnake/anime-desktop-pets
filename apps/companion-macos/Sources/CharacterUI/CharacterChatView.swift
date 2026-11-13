@@ -91,10 +91,10 @@ public struct CharacterChatView: View {
                             .frame(minHeight: 42, maxHeight: 72)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
-                            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+                            .background(CharacterUIStyle.input, in: RoundedRectangle(cornerRadius: 10))
                             .overlay {
                                 RoundedRectangle(cornerRadius: 10)
-                                    .stroke(Color(nsColor: .separatorColor).opacity(0.55), lineWidth: 0.7)
+                                    .stroke(CharacterUIStyle.border.opacity(0.55), lineWidth: 0.7)
                             }
                             .onSubmit { send() }
                         Button("发送") { send() }

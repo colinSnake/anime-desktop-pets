@@ -106,7 +106,7 @@ private struct CharacterGoalRow: View {
                 .fill(CharacterUIStyle.cardBackground)
                 .overlay {
                     RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color(nsColor: .separatorColor).opacity(0.45), lineWidth: 0.5)
+                        .stroke(CharacterUIStyle.border, lineWidth: 0.5)
                 }
         }
         .confirmationDialog("删除这个目标及其计划？此操作无法撤销。", isPresented: $confirmsDeletion,

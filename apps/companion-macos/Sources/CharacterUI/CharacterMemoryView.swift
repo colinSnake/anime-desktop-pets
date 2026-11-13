@@ -33,8 +33,8 @@ struct CharacterMemoryView: View {
                     .frame(minHeight: 76, maxHeight: 112)
                     .scrollContentBackground(.hidden)
                     .padding(6)
-                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(nsColor: .separatorColor), lineWidth: 0.5))
+                    .background(CharacterUIStyle.input, in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(CharacterUIStyle.border, lineWidth: 0.5))
                     .overlay(alignment: .topLeading) {
                         if draftText.isEmpty {
                             Text(draftKind == .knowledge ? "写下一条可核对的角色知识…" : "写下一条简洁、明确的记忆…")
@@ -92,7 +92,7 @@ struct CharacterMemoryView: View {
                     .fill(CharacterUIStyle.cardBackground)
                     .overlay {
                         RoundedRectangle(cornerRadius: 10)
-                            .stroke(Color(nsColor: .separatorColor).opacity(0.45), lineWidth: 0.5)
+                            .stroke(CharacterUIStyle.border.opacity(0.45), lineWidth: 0.5)
                     }
             }
             ScrollView {
@@ -238,7 +238,7 @@ private struct CharacterMemoryRow: View {
                 .fill(CharacterUIStyle.cardBackground)
                 .overlay {
                     RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color(nsColor: .separatorColor).opacity(0.45), lineWidth: 0.5)
+                        .stroke(CharacterUIStyle.border.opacity(0.45), lineWidth: 0.5)
                 }
         }
         .confirmationDialog("删除这条记忆？此操作无法撤销。", isPresented: $confirmsDeletion, titleVisibility: .visible) {

@@ -10,12 +10,15 @@ struct WorkspacePetInstanceCard: View {
     var body: some View {
         VStack(spacing: 0) {
             ZStack(alignment: .top) {
-                Color(nsColor: .windowBackgroundColor)
-                if let cover {
-                    Image(decorative: cover, scale: 2).resizable().scaledToFit().padding(12)
-                } else {
-                    Image(systemName: "pawprint.fill").font(.system(size: 38)).foregroundStyle(.tertiary)
+                Color(nsColor: WorkspacePalette.card)
+                Group {
+                    if let cover {
+                        Image(decorative: cover, scale: 2).resizable().scaledToFit().padding(12)
+                    } else {
+                        Image(systemName: "pawprint.fill").font(.system(size: 38)).foregroundStyle(.tertiary)
+                    }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 HStack(alignment: .top, spacing: 8) {
                     Text(instance.name)
                         .font(.system(size: 12, weight: .semibold)).lineLimit(1)
@@ -70,28 +73,30 @@ struct WorkspacePetInstanceCard: View {
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(Color(nsColor: WorkspacePalette.canvas))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
-            .stroke(Color(nsColor: .separatorColor).opacity(0.55), lineWidth: 0.7))
+            .strokeBorder(Color(nsColor: WorkspacePalette.border), lineWidth: 0.7))
         .task(id: instance.cover) { cover = await PetCoverLoader.shared.image(for: instance.cover) }
     }
 }
 
 private struct WorkspacePetActionButtonStyle: ButtonStyle {
     let prominent: Bool
+    @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .foregroundStyle(prominent ? Color.white : Color.primary)
+            .foregroundStyle(prominent ? Color(nsColor: WorkspacePalette.canvas) : Color.primary)
             .background {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(prominent
-                          ? Color.black.opacity(configuration.isPressed ? 0.72 : 1)
-                          : Color(nsColor: .quaternaryLabelColor).opacity(configuration.isPressed ? 0.34 : 0.2))
+                          ? Color.primary
+                          : Color(nsColor: WorkspacePalette.input))
             }
             .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(prominent ? Color.clear : Color(nsColor: .separatorColor).opacity(0.7), lineWidth: 0.7))
+                .strokeBorder(prominent ? Color.clear : Color(nsColor: WorkspacePalette.border), lineWidth: 0.7))
             .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .opacity(isEnabled ? (configuration.isPressed ? 0.82 : 1) : 0.6)
     }
 }

@@ -79,12 +79,12 @@ class ProjectChecks(unittest.TestCase):
         self.assertIn('parentWindow.beginSheet(window)', manager)
         self.assertIn('NSHostingController(rootView: PetManagerPage(model: self))', manager)
         self.assertIn('private struct PetManagerPage: View', manager)
-        self.assertIn('TextField("搜索名称、版本或路径", text: $model.query)', manager)
+        self.assertIn('WorkspaceSearchField(prompt: "搜索名称、版本或路径", text: $model.query)', manager)
         self.assertIn('ForEach(model.filteredSources, id: \\.path)', manager)
-        self.assertIn('Button(action: model.selectAllVisible)', manager)
+        self.assertNotIn('Button(action: model.selectAllVisible)', manager)
         self.assertIn('.disabled(!model.canAdd)', manager)
         self.assertIn('一次最多添加16只', manager)
-        self.assertIn('func selectAllVisible()', manager)
+        self.assertNotIn('func selectAllVisible()', manager)
         self.assertIn('func rescan()', manager)
         self.assertIn('private func setBusy(_ value: Bool, message: String)', manager)
         self.assertIn('if model.busy && model.sources.isEmpty', manager)
@@ -102,7 +102,7 @@ class ProjectChecks(unittest.TestCase):
         self.assertIn('$0.path.localizedCaseInsensitiveContains(value)', manager)
         self.assertIn('@Published private(set) var selectedPaths = Set<String>()', manager)
         self.assertIn('selectedPaths.removeAll()', manager)
-        self.assertIn('selectedPaths.formUnion(filteredSources.map(\\.path))', manager)
+        self.assertIn('selectedPaths.formUnion(range.map { visible[$0] })', manager)
         self.assertIn('sources.filter { selectedPaths.contains($0.path) }', manager)
         self.assertIn('guard canAdd else { return }', manager)
         self.assertIn('var canAdd: Bool { !busy && (1...16).contains(selectedCount) }', manager)
@@ -155,13 +155,24 @@ class ProjectChecks(unittest.TestCase):
         self.assertIn('if !subtitle.isEmpty', heading)
         self.assertNotIn('选择本地桌宠素材', page)
         self.assertNotIn('{ Label(', page)
-        for title in ['选择素材目录', '刷新', '全选', '添加']:
+        for title in ['选择素材目录', '刷新', '添加']:
             self.assertIn(f'Text("{title}")', page)
         self.assertNotIn('添加到我的桌宠', page)
+        self.assertNotIn('Text("全选")', page)
         self.assertIn('WorkspaceActionButtonStyle(prominent: true, compact: true)', page)
         self.assertIn('.buttonStyle(WorkspaceActionButtonStyle(compact: true))', page)
         self.assertIn('var compact = false', style)
-        self.assertIn('.frame(minHeight: compact ? 26 : 34)', style)
+        self.assertIn('static let compactHeight: CGFloat = 26', style)
+        self.assertIn('.frame(height: compact ? WorkspaceControlStyle.compactHeight : WorkspaceControlStyle.regularHeight)', style)
+        self.assertIn('WorkspaceSearchField(prompt: "搜索名称、版本或路径", text: $model.query)', page)
+        self.assertNotIn('.textFieldStyle(.roundedBorder)', page)
+        field = (source/'WorkspaceSearchField.swift').read_text()
+        self.assertIn('.frame(height: WorkspaceControlStyle.compactHeight)', field)
+        self.assertIn('WorkspaceControlStyle.borderColor(for: colorScheme)', field)
+        self.assertIn('WorkspaceControlStyle.borderColor(for: colorScheme)', style)
+        self.assertIn('.focused($focused)', field)
+        pets = (source/'WorkspacePetsPageController.swift').read_text()
+        self.assertIn('.buttonStyle(WorkspaceActionButtonStyle(compact: true)).disabled(!model.canAdd)', pets)
 
     def test_startup_cover_keeps_painting_and_avoids_letterboxing(self):
         host = ROOT/'apps/companion-macos/Sources/DragonCompanion'
@@ -305,6 +316,28 @@ class ProjectChecks(unittest.TestCase):
         self.assertIn('.disabled(!instance.canDelete)', pet_card)
         self.assertIn('confirmDeleteManagedPet(instanceID: id)', (source/'Coordinator.swift').read_text())
 
+    def test_workspace_canvas_and_cards_use_shared_theme_surfaces(self):
+        source = ROOT/'apps/companion-macos/Sources/DragonCompanion'
+        character = ROOT/'apps/companion-macos/Sources/CharacterUI'
+        palette = (character/'ManagementSurfacePalette.swift').read_text()
+        self.assertIn('public static let canvas = surface("ManagementCanvas", light: .white', palette)
+        self.assertIn('appearance.bestMatch(from: [.darkAqua, .aqua])', palette)
+        for name in ['card', 'input', 'border']:
+            self.assertIn(f'public static let {name} = surface(', palette)
+        shell = (source/'WorkspaceShellView.swift').read_text()
+        self.assertEqual(shell.count('Color(nsColor: WorkspacePalette.canvas)'), 3)
+        self.assertNotIn('Color(nsColor: .windowBackgroundColor)', shell)
+        self.assertIn('window.backgroundColor = WorkspacePalette.canvas', (source/'CompanionWorkspaceWindow.swift').read_text())
+        for file in ['WorkspacePetsPageController.swift', 'ModelManagerWindow.swift',
+                     'SpeechSettingsWindow.swift', 'WorkspaceActionPageController.swift']:
+            self.assertIn('.background(Color(nsColor: WorkspacePalette.canvas))', (source/file).read_text(), file)
+        self.assertIn('.background(CharacterUIStyle.canvas)', (character/'CharacterWorkspaceView.swift').read_text())
+        card = (source/'WorkspacePetInstanceCard.swift').read_text()
+        self.assertIn('Color(nsColor: WorkspacePalette.card)', card)
+        self.assertIn('.background(Color(nsColor: WorkspacePalette.canvas))', card)
+        self.assertIn('.strokeBorder(Color(nsColor: WorkspacePalette.border)', card)
+        self.assertIn('Color(nsColor: WorkspacePalette.input)', card)
+
     def test_workspace_sidebar_groups_are_fixed_and_live_tabs_are_distinct(self):
         source = ROOT/'apps/companion-macos/Sources/DragonCompanion'
         workspace = (source/'CompanionWorkspaceWindow.swift').read_text()
@@ -418,7 +451,7 @@ class ProjectChecks(unittest.TestCase):
         self.assertIn('NSMenuItem(title: "桌宠管理…"', management)
         self.assertIn('self.addLocalPets(packages, completion: completion)', coordinator)
         window = (host/'PetManagerWindow.swift').read_text()
-        self.assertIn('Button(action: model.selectAllVisible)', window)
+        self.assertNotIn('Button(action: model.selectAllVisible)', window)
         self.assertIn('model.selectSource(source.path)', window)
         self.assertIn('func addSelected()', window)
         self.assertIn('一次最多添加16只', window)

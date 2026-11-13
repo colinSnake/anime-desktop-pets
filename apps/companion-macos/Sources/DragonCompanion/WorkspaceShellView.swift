@@ -57,7 +57,7 @@ struct WorkspaceShellView: View {
                 detail
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
+        .background(Color(nsColor: WorkspacePalette.canvas).ignoresSafeArea())
         .preferredColorScheme(model.theme.preferredColorScheme)
         .onAppear { model.refreshStatus(isServiceConnected()) }
         .onChange(of: model.selected) { section in
@@ -92,7 +92,7 @@ struct WorkspaceShellView: View {
         }
         .padding(.horizontal, 18)
         .frame(height: 48)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color(nsColor: WorkspacePalette.canvas))
     }
 
     private var sidebar: some View {
@@ -160,7 +160,7 @@ struct WorkspaceShellView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color(nsColor: WorkspacePalette.canvas))
     }
 
     private func navigationButton(_ section: WorkspaceSection) -> some View {

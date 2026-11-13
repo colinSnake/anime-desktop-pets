@@ -71,7 +71,7 @@ struct WorkspacePetsPage: View {
                             Label("添加桌宠", systemImage: "plus")
                                 .foregroundStyle(Color(nsColor: .labelColor))
                         }
-                            .buttonStyle(.borderless).disabled(!model.canAdd)
+                            .buttonStyle(WorkspaceActionButtonStyle(compact: true)).disabled(!model.canAdd)
                     }
                     if model.instances.isEmpty {
                         Text("还没有桌宠实例，添加一只开始陪伴。")
@@ -94,6 +94,7 @@ struct WorkspacePetsPage: View {
             .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 24)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
+        .background(Color(nsColor: WorkspacePalette.canvas))
         .tint(Color(nsColor: WorkspacePalette.accent))
     }
 

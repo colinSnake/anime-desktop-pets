@@ -50,7 +50,7 @@ struct CharacterCapabilitiesView: View {
                                 .fill(CharacterUIStyle.cardBackground)
                                 .overlay {
                                     RoundedRectangle(cornerRadius: 10)
-                                        .stroke(Color(nsColor: .separatorColor).opacity(0.45), lineWidth: 0.5)
+                                        .stroke(CharacterUIStyle.border, lineWidth: 0.5)
                                 }
                         }
                     }
