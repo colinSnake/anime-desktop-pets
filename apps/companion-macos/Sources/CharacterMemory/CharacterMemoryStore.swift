@@ -32,6 +32,22 @@ public actor CharacterMemoryStore {
         self.fileManager = fileManager
     }
 
+    private struct AutomationSettings: Codable { let enabled: Bool }
+
+    public func loadAutomaticReviewEnabled() throws -> Bool {
+        try prepareDirectories()
+        let url = characterDirectory.appendingPathComponent("automation-settings.json")
+        guard fileExists(url) else { return false }
+        guard isRegularFile(url) else { throw CharacterMemoryStoreError.unsafePath }
+        return try JSONDecoder().decode(AutomationSettings.self, from: readData(from: url, limit: 1024)).enabled
+    }
+
+    public func saveAutomaticReviewEnabled(_ enabled: Bool) throws {
+        try prepareDirectories()
+        try write(JSONEncoder().encode(AutomationSettings(enabled: enabled)),
+                  to: characterDirectory.appendingPathComponent("automation-settings.json"))
+    }
+
     public func loadIdentity(defaultName: String) throws -> CharacterIdentity {
         try prepareDirectories()
         let url = characterDirectory.appendingPathComponent("identity.md")
@@ -42,18 +58,68 @@ public actor CharacterMemoryStore {
 
     public func saveIdentity(_ identity: CharacterIdentity) throws {
         try prepareDirectories()
-        let name = identity.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let name = identity.validatedName else { throw CharacterMemoryStoreError.invalidRecord }
         let fields = [identity.role, identity.background, identity.personality, identity.values,
                       identity.motivations, identity.relationship, identity.speakingStyle,
                       identity.knowledgeScope, identity.boundaries]
-        guard !name.isEmpty, name.count <= 80, !name.contains("\n"), !name.contains("\r"),
-              fields.allSatisfy({ $0.count <= 2_000 }), fields.reduce(name.count, { $0 + $1.count }) <= 8_000 else {
+        guard fields.allSatisfy({ $0.count <= 2_000 }), fields.reduce(name.count, { $0 + $1.count }) <= 8_000 else {
             throw CharacterMemoryStoreError.invalidRecord
         }
         var normalized = identity
         normalized.name = name
-        try write(CharacterMarkdownCodec.encode(identity: normalized),
-                  to: characterDirectory.appendingPathComponent("identity.md"))
+        let url = characterDirectory.appendingPathComponent("identity.md")
+        if fileExists(url) {
+            guard isRegularFile(url) else { throw CharacterMemoryStoreError.unsafePath }
+            let previous = try CharacterMarkdownCodec.decodeIdentity(readData(from: url, limit: 64 * 1024))
+            if identityContentChanged(previous, normalized) {
+                try archive(previous)
+                normalized.createdAt = previous.createdAt
+                normalized.updatedAt = .now
+                normalized.revision = previous.revision + 1
+            } else {
+                normalized.createdAt = previous.createdAt
+                normalized.updatedAt = previous.updatedAt
+                normalized.revision = previous.revision
+            }
+        } else {
+            normalized.revision = 1
+        }
+        try write(CharacterMarkdownCodec.encode(identity: normalized), to: url)
+    }
+
+    public func identityHistory() throws -> [CharacterIdentity] {
+        try prepareDirectories()
+        let identityURL = characterDirectory.appendingPathComponent("identity.md")
+        guard fileExists(identityURL) else { return [] }
+        guard isRegularFile(identityURL) else { throw CharacterMemoryStoreError.unsafePath }
+        let directory = identityHistoryDirectory
+        guard fileExists(directory) else { return [] }
+        guard isDirectory(directory) else { throw CharacterMemoryStoreError.unsafePath }
+        let urls = try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil,
+                                                       options: [.skipsHiddenFiles])
+        return try urls.filter { $0.pathExtension == "md" }.sorted { revisionNumber($0) < revisionNumber($1) }
+            .map { url in
+                guard isRegularFile(url) else { throw CharacterMemoryStoreError.unsafePath }
+                return try CharacterMarkdownCodec.decodeIdentity(readData(from: url, limit: 64 * 1024))
+            }
+    }
+
+    public func restoreIdentityRevision(revision: Int) throws {
+        let identityURL = characterDirectory.appendingPathComponent("identity.md")
+        guard fileExists(identityURL), isRegularFile(identityURL) else { throw CharacterMemoryStoreError.invalidRecord }
+        let directory = identityHistoryDirectory
+        guard isDirectory(directory) else { throw CharacterMemoryStoreError.invalidRecord }
+        let target = directory.appendingPathComponent("r-\(revision).md")
+        guard isRegularFile(target) else { throw CharacterMemoryStoreError.invalidRecord }
+        let current = try CharacterMarkdownCodec.decodeIdentity(readData(from: identityURL, limit: 64 * 1024))
+        let previous = try CharacterMarkdownCodec.decodeIdentity(readData(from: target, limit: 64 * 1024))
+        try archive(current)
+        var restored = previous
+        restored.createdAt = current.createdAt
+        restored.updatedAt = .now
+        restored.revision = current.revision + 1
+        restored.shareWithOnlineModel = false
+        try write(CharacterMarkdownCodec.encode(identity: restored), to: identityURL)
     }
 
     public func listMemories() throws -> [CharacterMemory] {
@@ -78,12 +144,20 @@ public actor CharacterMemoryStore {
         try prepareDirectories()
         var normalized = memory
         normalized.expiresAt = memory.expiresAt.map { Date(timeIntervalSince1970: floor($0.timeIntervalSince1970)) }
-        if memory.kind == .knowledge, fileExists(memoryURL(memory.id)) {
+        if fileExists(memoryURL(memory.id)) {
             let previous = try readMemory(from: memoryURL(memory.id))
-            if previous.text != memory.text || previous.source != memory.source || previous.citation != memory.citation
-                || previous.version != memory.version || previous.expiresAt != normalized.expiresAt {
+            if contentChanged(previous, normalized) {
+                try archive(previous)
+                normalized.revision = previous.revision + 1
+                normalized.updatedAt = .now
+                normalized.confirmedAt = nil
                 normalized.status = .candidate
                 normalized.shareWithOnlineModel = false
+            } else {
+                normalized.revision = previous.revision
+                normalized.createdAt = previous.createdAt
+                normalized.updatedAt = previous.updatedAt
+                normalized.confirmedAt = normalized.status == .confirmed ? (previous.confirmedAt ?? .now) : nil
             }
         }
         try write(CharacterMarkdownCodec.encode(memory: normalized), to: memoryURL(memory.id))
@@ -93,6 +167,7 @@ public actor CharacterMemoryStore {
         var memory = try readMemory(from: existingMemoryURL(id))
         guard !memory.isExpired() else { throw CharacterKnowledgeImportError.expired }
         memory.status = .confirmed
+        memory.confirmedAt = .now
         if let shareWithOnlineModel { memory.shareWithOnlineModel = shareWithOnlineModel }
         try saveMemory(memory)
     }
@@ -101,13 +176,58 @@ public actor CharacterMemoryStore {
         guard !memory.isExpired() else { throw CharacterKnowledgeImportError.expired }
         var confirmed = memory
         confirmed.status = .confirmed
+        confirmed.confirmedAt = .now
         try saveMemory(confirmed)
     }
 
     public func deleteMemory(id: String) throws {
         let url = try existingMemoryURL(id)
         guard isRegularFile(url) else { throw CharacterMemoryStoreError.unsafePath }
+        let history = memoryHistoryDirectory(id)
+        if fileExists(history) {
+            guard isDirectory(history) else { throw CharacterMemoryStoreError.unsafePath }
+        }
         try fileManager.removeItem(at: url)
+        if fileExists(history) {
+            try fileManager.removeItem(at: history)
+        }
+    }
+
+    public func memoryHistory(id: String) throws -> [CharacterMemory] {
+        guard id.range(of: "^[A-Fa-f0-9-]{16,64}$", options: .regularExpression) != nil else {
+            throw CharacterMemoryStoreError.invalidRecord
+        }
+        try prepareDirectories()
+        if !fileExists(memoryURL(id)) { return [] }
+        guard isRegularFile(memoryURL(id)) else { throw CharacterMemoryStoreError.unsafePath }
+        let directory = memoryHistoryDirectory(id)
+        guard fileExists(directory) else { return [] }
+        guard isDirectory(directory) else { throw CharacterMemoryStoreError.unsafePath }
+        let urls = try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil,
+                                                       options: [.skipsHiddenFiles])
+        return try urls.filter { $0.pathExtension == "md" }.sorted { revisionNumber($0) < revisionNumber($1) }
+            .map { url in
+                guard isRegularFile(url) else { throw CharacterMemoryStoreError.unsafePath }
+                return try CharacterMarkdownCodec.decodeMemory(readData(from: url, limit: 64 * 1024), expectedID: id)
+            }
+    }
+
+    public func restoreMemoryRevision(id: String, revision: Int) throws {
+        let currentURL = try existingMemoryURL(id)
+        let historyDirectory = memoryHistoryDirectory(id)
+        guard isDirectory(historyDirectory) else { throw CharacterMemoryStoreError.invalidRecord }
+        let revisionURL = historyDirectory.appendingPathComponent("r-\(revision).md")
+        guard isRegularFile(revisionURL) else { throw CharacterMemoryStoreError.invalidRecord }
+        let current = try readMemory(from: currentURL)
+        let previous = try CharacterMarkdownCodec.decodeMemory(readData(from: revisionURL, limit: 64 * 1024), expectedID: id)
+        try archive(current)
+        var restored = previous
+        restored.revision = current.revision + 1
+        restored.updatedAt = .now
+        restored.confirmedAt = nil
+        restored.status = .candidate
+        restored.shareWithOnlineModel = false
+        try write(CharacterMarkdownCodec.encode(memory: restored), to: currentURL)
     }
 
     /// User-selected input only. A bounded regular-file read never follows symlinks or opens FIFOs.
@@ -148,7 +268,7 @@ public actor CharacterMemoryStore {
         return (pending.count, entries.count - pending.count)
     }
 
-    private func readData(from url: URL, limit: Int) throws -> Data {
+    func readData(from url: URL, limit: Int) throws -> Data {
         let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
         guard fd >= 0 else { throw CharacterMemoryStoreError.unsafePath }
         let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
@@ -163,13 +283,15 @@ public actor CharacterMemoryStore {
         return data
     }
 
-    private var characterDirectory: URL {
+    nonisolated var characterDirectory: URL {
         stateDirectory.appendingPathComponent("pets", isDirectory: true)
             .appendingPathComponent(petID, isDirectory: true)
             .appendingPathComponent("character", isDirectory: true)
     }
 
     private var memoriesDirectory: URL { characterDirectory.appendingPathComponent("memories", isDirectory: true) }
+    private var historyRootDirectory: URL { characterDirectory.appendingPathComponent("memory-history", isDirectory: true) }
+    private var identityHistoryDirectory: URL { characterDirectory.appendingPathComponent("identity-history", isDirectory: true) }
     private var plansDirectory: URL { characterDirectory.appendingPathComponent("plans", isDirectory: true) }
 
     public func listGoals() throws -> [CharacterGoal] {
@@ -197,7 +319,7 @@ public actor CharacterMemoryStore {
         try fileManager.removeItem(at: url)
     }
 
-    private func prepareDirectories() throws {
+    func prepareDirectories() throws {
         var rootInfo = stat()
         if lstat(stateDirectory.path, &rootInfo) == 0 {
             guard rootInfo.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else { throw CharacterMemoryStoreError.unsafePath }
@@ -224,7 +346,7 @@ public actor CharacterMemoryStore {
         }
     }
 
-    private func write(_ data: Data, to url: URL) throws {
+    func write(_ data: Data, to url: URL) throws {
         if fileExists(url), !isRegularFile(url) { throw CharacterMemoryStoreError.unsafePath }
         try data.write(to: url, options: .atomic)
         try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
@@ -248,15 +370,89 @@ public actor CharacterMemoryStore {
     }
 
     private func memoryURL(_ id: String) -> URL { memoriesDirectory.appendingPathComponent("\(id).md") }
+    private func memoryHistoryDirectory(_ id: String) -> URL { historyRootDirectory.appendingPathComponent(id, isDirectory: true) }
     private func planURL(_ id: String) -> URL { plansDirectory.appendingPathComponent("\(id).md") }
 
-    private func fileExists(_ url: URL) -> Bool {
+    private func contentChanged(_ lhs: CharacterMemory, _ rhs: CharacterMemory) -> Bool {
+        lhs.kind != rhs.kind || lhs.text != rhs.text || lhs.source != rhs.source
+            || lhs.citation != rhs.citation || lhs.version != rhs.version || lhs.expiresAt != rhs.expiresAt
+    }
+
+    private func identityContentChanged(_ lhs: CharacterIdentity, _ rhs: CharacterIdentity) -> Bool {
+        lhs.name != rhs.name || lhs.role != rhs.role || lhs.background != rhs.background
+            || lhs.personality != rhs.personality || lhs.values != rhs.values || lhs.motivations != rhs.motivations
+            || lhs.relationship != rhs.relationship || lhs.speakingStyle != rhs.speakingStyle
+            || lhs.knowledgeScope != rhs.knowledgeScope || lhs.boundaries != rhs.boundaries
+            || lhs.shareWithOnlineModel != rhs.shareWithOnlineModel
+    }
+
+    private func archive(_ identity: CharacterIdentity) throws {
+        let fields = [identity.name, identity.role, identity.background, identity.personality, identity.values,
+                      identity.motivations, identity.relationship, identity.speakingStyle,
+                      identity.knowledgeScope, identity.boundaries]
+        guard !CharacterMemoryReview.isCredentialLike(fields.joined(separator: " ")) else { return }
+        try createHistoryDirectory(identityHistoryDirectory)
+        let destination = identityHistoryDirectory.appendingPathComponent("r-\(identity.revision).md")
+        guard !fileExists(destination) else { throw CharacterMemoryStoreError.invalidRecord }
+        try write(CharacterMarkdownCodec.encode(identity: identity), to: destination)
+        try pruneHistory(in: identityHistoryDirectory)
+    }
+
+    private func archive(_ memory: CharacterMemory) throws {
+        guard !CharacterMemoryReview.isCredentialLike(CharacterMemoryReview.memoryContent(memory)) else { return }
+        let directory = memoryHistoryDirectory(memory.id)
+        try createHistoryDirectory(directory)
+        let destination = directory.appendingPathComponent("r-\(memory.revision).md")
+        guard !fileExists(destination) else { throw CharacterMemoryStoreError.invalidRecord }
+        try write(CharacterMarkdownCodec.encode(memory: memory), to: destination)
+        try pruneHistory(in: directory)
+    }
+
+    private func createHistoryDirectory(_ directory: URL) throws {
+        let root = directory.deletingLastPathComponent()
+        if fileExists(root) {
+            guard isDirectory(root) else { throw CharacterMemoryStoreError.unsafePath }
+        } else {
+            try fileManager.createDirectory(at: root, withIntermediateDirectories: false,
+                                            attributes: [.posixPermissions: 0o700])
+        }
+        if fileExists(directory) {
+            guard isDirectory(directory) else { throw CharacterMemoryStoreError.unsafePath }
+        } else {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: false,
+                                            attributes: [.posixPermissions: 0o700])
+        }
+        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+    }
+
+    private func pruneHistory(in directory: URL) throws {
+        let urls = try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil,
+                                                       options: [.skipsHiddenFiles])
+            .filter { $0.pathExtension == "md" }
+            .sorted { revisionNumber($0) > revisionNumber($1) }
+        for old in urls.dropFirst(10) {
+            guard isRegularFile(old) else { throw CharacterMemoryStoreError.unsafePath }
+            try fileManager.removeItem(at: old)
+        }
+    }
+
+    private func revisionNumber(_ url: URL) -> Int {
+        Int(url.deletingPathExtension().lastPathComponent.dropFirst(2)) ?? 0
+    }
+
+    func fileExists(_ url: URL) -> Bool {
         var info = stat()
         return lstat(url.path, &info) == 0
     }
 
-    private func isRegularFile(_ url: URL) -> Bool {
+    func isRegularFile(_ url: URL) -> Bool {
         var info = stat()
         return lstat(url.path, &info) == 0 && info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG)
+    }
+
+    private func isDirectory(_ url: URL) -> Bool {
+        var info = stat()
+        return lstat(url.path, &info) == 0 && info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
     }
 }

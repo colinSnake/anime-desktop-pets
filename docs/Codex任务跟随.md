@@ -52,7 +52,7 @@
 版本号、是否允许观察、时间戳。仅正常联动且 Codex 应用仍在运行时启用；暂停/退出即时写入关闭状态，
 异常退出的心跳 10 秒过期。关闭后后台丢弃游标，不再扫描会话。
 
-`PetController` 和 `PetInstanceRuntime` 仅在正常联动模式传入 `DRAGON_TASK_LEASE`；
+`PetController` 和 `PetInstanceRuntime` 仅在正常联动模式传入 `PET_TASK_LEASE`；
 `--preview-pet`、开机动画预览、`--check` 与控制测试不启用观察。
 未经增强的 `--full-pet` 和 Swift PNG 降级不具备任务工作动画跟随。
 

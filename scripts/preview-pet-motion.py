@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / '.local/pet-build/previews/motion'
 OUT.mkdir(parents=True, exist_ok=True)
 
-with tempfile.TemporaryDirectory(prefix='dragon-motion-preview-') as home:
+with tempfile.TemporaryDirectory(prefix='pet-motion-preview-') as home:
     os.environ.update(HOME=home, BAILONG_DATA_DIR=home, QT_QPA_PLATFORM='offscreen',
                       BAILONG_CODEX='/usr/bin/false')
     sys.path[:0] = [str(ROOT / 'apps/pet-runtime/bailong'), str(ROOT / '.local/pet-build/generated-source/app')]

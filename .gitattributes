@@ -1,2 +1,5 @@
 # Unified diff 的空白上下文行必须保留前导空格，禁止按尾随空白自动修剪。
 *.patch whitespace=-blank-at-eol
+
+# PDF 为二进制资源，不按文本检查内部交叉引用表的空白。
+*.pdf binary

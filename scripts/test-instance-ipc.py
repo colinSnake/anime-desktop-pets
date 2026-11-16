@@ -16,9 +16,9 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'apps/pet-runtime/pets'))
-from dragon_instance_ipc import (MAX_REQUEST, SOCKET_NAME, InstanceCommandServer, SpeechPresentationServer, endpoint,
+from pet_instance_ipc import (MAX_REQUEST, SOCKET_NAME, InstanceCommandServer, SpeechPresentationServer, endpoint,
                                  send_command, validate_request, validate_reply, validate_speech_event)
-from dragon_instances import InstanceController, InstanceError, InstanceStore, speech_reply_available
+from pet_instances import InstanceController, InstanceError, InstanceStore, speech_reply_available
 
 
 def request(command='status', **fields):
@@ -29,7 +29,7 @@ def request(command='status', **fields):
 
 def fixture_server(profile):
     # 禁止把测试入口误当成正常桌宠启动器。
-    if os.environ.get('DRAGON_INSTANCE_IPC_FIXTURE') != '1' or os.environ.get('QT_QPA_PLATFORM') != 'offscreen':
+    if os.environ.get('PET_INSTANCE_IPC_FIXTURE') != '1' or os.environ.get('QT_QPA_PLATFORM') != 'offscreen':
         return 2
     from PySide6.QtCore import QObject, QTimer, Signal
     from PySide6.QtWidgets import QApplication
@@ -69,14 +69,14 @@ def fixture_server(profile):
 
 def parent_watch_fixture(profile):
     """Start a real helper, then exit so its owner-watch path must reap it."""
-    if os.environ.get('DRAGON_INSTANCE_IPC_FIXTURE') != '1' or os.environ.get('QT_QPA_PLATFORM') != 'offscreen':
+    if os.environ.get('PET_INSTANCE_IPC_FIXTURE') != '1' or os.environ.get('QT_QPA_PLATFORM') != 'offscreen':
         return 2
     profile = Path(profile)
     profile.mkdir(parents=True, exist_ok=True, mode=0o700)
     env = dict(os.environ, HOME=str(profile.parent), BAILONG_DATA_DIR=str(profile),
                QT_QPA_PLATFORM='offscreen', PYTHONPATH=str(ROOT / 'apps/pet-runtime/pets'),
                BAILONG_PARENT_PID=str(os.getpid()))
-    code = 'from dragon_pet_helper import main; raise SystemExit(main())'
+    code = 'from pet_helper import main; raise SystemExit(main())'
     child = subprocess.Popen([sys.executable, '-c', code, '--multi-profile', str(profile)], env=env)
     (profile / 'parent-watch-child.pid').write_text(str(child.pid))
     socket_path = profile / SOCKET_NAME
@@ -97,7 +97,7 @@ def parent_watch_fixture(profile):
 
 
 def transport_fixture(profile, mode):
-    if os.environ.get('DRAGON_INSTANCE_IPC_FIXTURE') != '1': return 2
+    if os.environ.get('PET_INSTANCE_IPC_FIXTURE') != '1': return 2
     path = Path(profile) / SOCKET_NAME
     with socket.socket(socket.AF_UNIX) as server:
         server.bind(str(path)); path.chmod(0o600); server.listen(1); server.settimeout(5)
@@ -236,7 +236,7 @@ class RequestChecks(unittest.TestCase):
     def test_existing_non_socket_path_is_never_removed(self):
         with tempfile.TemporaryDirectory(prefix='dpi-', dir='/tmp') as tmp:
             path = Path(tmp) / SOCKET_NAME; path.write_bytes(b'preserve user file')
-            env = dict(os.environ, HOME=tmp, QT_QPA_PLATFORM='offscreen', DRAGON_INSTANCE_IPC_FIXTURE='1')
+            env = dict(os.environ, HOME=tmp, QT_QPA_PLATFORM='offscreen', PET_INSTANCE_IPC_FIXTURE='1')
             result = subprocess.run([sys.executable, str(Path(__file__).resolve()), '--fixture-server', tmp],
                                     env=env, capture_output=True, text=True, timeout=5)
             self.assertNotEqual(result.returncode, 0)
@@ -253,7 +253,7 @@ class IPCChecks(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix='dpi-', dir='/tmp')
         self.profile = Path(self.temp.name)
         self.env = dict(os.environ, HOME=str(self.profile), BAILONG_DATA_DIR=str(self.profile),
-                        QT_QPA_PLATFORM='offscreen', DRAGON_INSTANCE_IPC_FIXTURE='1')
+                        QT_QPA_PLATFORM='offscreen', PET_INSTANCE_IPC_FIXTURE='1')
         self.child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--fixture-server', str(self.profile)],
                                       env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.path = self.profile / SOCKET_NAME
@@ -483,10 +483,10 @@ class IPCChecks(unittest.TestCase):
 
 class ParentOwnershipChecks(unittest.TestCase):
     def test_helper_exits_when_owning_host_disappears(self):
-        with tempfile.TemporaryDirectory(prefix='dragon-parent-watch-', dir='/tmp') as tmp:
+        with tempfile.TemporaryDirectory(prefix='pet-parent-watch-', dir='/tmp') as tmp:
             profile = Path(tmp) / 'profile'
             env = dict(os.environ, HOME=tmp, QT_QPA_PLATFORM='offscreen',
-                       DRAGON_INSTANCE_IPC_FIXTURE='1')
+                       PET_INSTANCE_IPC_FIXTURE='1')
             fixture = subprocess.run(
                 [sys.executable, str(Path(__file__).resolve()), '--parent-watch-fixture', str(profile)],
                 env=env, capture_output=True, text=True, timeout=5)
@@ -508,7 +508,7 @@ class ParentOwnershipChecks(unittest.TestCase):
 
 class FirstRunBootstrapChecks(unittest.TestCase):
     def test_helper_initializes_missing_profile_and_leaves_copy_stopped(self):
-        with tempfile.TemporaryDirectory(prefix='dragon-first-run-', dir='/tmp') as tmp:
+        with tempfile.TemporaryDirectory(prefix='pet-first-run-', dir='/tmp') as tmp:
             root = Path(tmp); profile = root / 'profile'; profile.mkdir(mode=0o700)
             assets = root / 'assets'; assets.mkdir()
             (assets / '素材清单.json').write_text('{"version":1}', encoding='utf-8')
@@ -518,7 +518,7 @@ class FirstRunBootstrapChecks(unittest.TestCase):
                                movement=True, hideInFullscreen=False)
             code = (
                 'import sys; from PySide6.QtWidgets import QApplication; QApplication([]); '
-                'from dragon_pet_helper import main; '
+                'from pet_helper import main; '
                 'raise SystemExit(main(sys.argv[1:]))'
             )
             env = dict(os.environ, HOME=str(root), QT_QPA_PLATFORM='offscreen',

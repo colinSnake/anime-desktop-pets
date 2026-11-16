@@ -7,7 +7,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'apps/pet-runtime/pets'))
-from dragon_instance_ipc import send_command
+from pet_instance_ipc import send_command
 
 
 def main():

@@ -18,6 +18,22 @@ private final class ImportFailureFileManager: FileManager, @unchecked Sendable {
 final class CharacterContinuityStoreTests: XCTestCase {
     private func root() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString) }
 
+    func testSyntheticLifecycleFixtureCoversRequiredSafetyAndContinuityCases() throws {
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "memory-lifecycle-cases", withExtension: "json", subdirectory: "Fixtures"))
+        let data = try Data(contentsOf: url)
+        let fixture = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(fixture["schema"] as? Int, 1)
+        XCTAssertEqual(fixture["dataPolicy"] as? String, "synthetic-only")
+        let cases = try XCTUnwrap(fixture["cases"] as? [[String: Any]])
+        let ids = Set(try cases.map { try XCTUnwrap($0["id"] as? String) })
+        XCTAssertEqual(ids, Set([
+            "add-pending", "duplicate-knowledge", "conflicting-preference", "sensitive-candidate",
+            "expired-knowledge", "edit-revokes-approval", "reject-candidate", "restore-revision",
+            "delete-purges-history", "relevant-local-recall", "unauthorized-online-context"
+        ]))
+        XCTAssertTrue(cases.allSatisfy { $0["expected"] is String && $0["area"] is String })
+    }
+
     @MainActor
     func testExistingIdentityCompletionIsPreviewOnlyAndMemoryRefreshKeepsDraft() async throws {
         let directory = root()
@@ -46,10 +62,42 @@ final class CharacterContinuityStoreTests: XCTestCase {
         for _ in 0..<100 where model.status != "身份资料已保存。" { try await Task.sleep(nanoseconds: 10_000_000) }
         let restarted = try CharacterMemoryStore(stateDirectory: directory, petID: "white-dragon")
         let persisted = try await restarted.loadIdentity(defaultName: "龙妹")
-        XCTAssertEqual(persisted, savedForm)
+        XCTAssertEqual(persisted.name, savedForm.name)
+        XCTAssertEqual(persisted.role, savedForm.role)
+        XCTAssertEqual(persisted.background, savedForm.background)
+        XCTAssertEqual(persisted.values, savedForm.values)
+        XCTAssertEqual(persisted.revision, savedForm.revision + 1)
         XCTAssertEqual(persisted.name, original.name)
         XCTAssertEqual(persisted.personality, original.personality)
         XCTAssertTrue(persisted.shareWithOnlineModel)
+    }
+
+    @MainActor
+    func testIdentitySaveRejectsMultilineNameWithClearFeedbackAndPreservesExistingData() async throws {
+        let directory = root()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try CharacterMemoryStore(stateDirectory: directory, petID: "name-validation")
+        let original = CharacterIdentity(name: "小桃", role: "保留背景", values: "保留价值")
+        try await store.saveIdentity(original)
+        let model = CharacterWorkspaceModel(store: store, defaultName: "龙妹")
+        for _ in 0..<100 where !model.canSaveIdentity { try await Task.sleep(nanoseconds: 10_000_000) }
+        for invalid in ["第一行\n第二行", "\n", String(repeating: "字", count: 81)] {
+            model.identity.name = invalid
+            model.saveIdentity()
+            for _ in 0..<100 where model.status.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+            XCTAssertTrue(model.status.contains("名称"), model.status)
+            let persisted = try await store.loadIdentity(defaultName: "龙妹")
+            XCTAssertEqual(persisted, original)
+        }
+        model.identity.name = " 小雪 "
+        model.identity.personality = "新的性格"
+        model.saveIdentity()
+        for _ in 0..<100 where model.status != "身份资料已保存。" { try await Task.sleep(nanoseconds: 10_000_000) }
+        let saved = try await store.loadIdentity(defaultName: "龙妹")
+        XCTAssertEqual(saved.name, "小雪")
+        XCTAssertEqual(saved.personality, "新的性格")
+        XCTAssertEqual(saved.role, original.role)
+        XCTAssertEqual(saved.values, original.values)
     }
 
     func testGoalSharingPersistsAndLegacyMarkdownAndJSONDefaultToLocal() async throws {
@@ -117,6 +165,122 @@ final class CharacterContinuityStoreTests: XCTestCase {
             try await restarted.confirmMemory(id: item.id, shareWithOnlineModel: true)
             records = try await restarted.listMemories()
         }
+    }
+
+    func testMemoryEditsCreateRestorableRevisionsAndDeletePurgesHistory() async throws {
+        let directory = root()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try CharacterMemoryStore(stateDirectory: directory, petID: "white-dragon")
+        var memory = CharacterMemory(kind: .preference, text: "喜欢安静",
+                                     createdAt: Date.now.addingTimeInterval(-60), source: "用户明确要求", status: .confirmed,
+                                     shareWithOnlineModel: true)
+        try await store.saveMemory(memory)
+
+        memory.text = "喜欢安静的书房"
+        try await store.saveMemory(memory)
+        let initialRecords = try await store.listMemories()
+        var current = try XCTUnwrap(initialRecords.first)
+        XCTAssertEqual(current.status, .candidate)
+        XCTAssertFalse(current.shareWithOnlineModel)
+        XCTAssertEqual(current.revision, 2)
+        XCTAssertGreaterThan(current.updatedAt, current.createdAt)
+
+        let history = try await store.memoryHistory(id: memory.id)
+        XCTAssertEqual(history.count, 1)
+        XCTAssertEqual(history[0].text, "喜欢安静")
+        XCTAssertEqual(history[0].status, .confirmed)
+
+        try await store.restoreMemoryRevision(id: memory.id, revision: history[0].revision)
+        let restoredRecords = try await store.listMemories()
+        current = try XCTUnwrap(restoredRecords.first)
+        XCTAssertEqual(current.text, "喜欢安静")
+        XCTAssertEqual(current.status, .candidate)
+        XCTAssertFalse(current.shareWithOnlineModel)
+        let restoredHistory = try await store.memoryHistory(id: memory.id)
+        XCTAssertEqual(restoredHistory.count, 2)
+
+        try await store.deleteMemory(id: memory.id)
+        let deletedHistory = try await store.memoryHistory(id: memory.id)
+        XCTAssertTrue(deletedHistory.isEmpty)
+    }
+
+    func testMemoryHistoryRetainsOnlyTenNewestSnapshots() async throws {
+        let directory = root()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try CharacterMemoryStore(stateDirectory: directory, petID: "history-limit")
+        var memory = CharacterMemory(kind: .fact, text: "版本 0", source: "合成测试")
+        try await store.saveMemory(memory)
+        for revision in 1...12 {
+            memory.text = "版本 \(revision)"
+            try await store.saveMemory(memory)
+        }
+
+        let history = try await store.memoryHistory(id: memory.id)
+        XCTAssertEqual(history.count, 10)
+        XCTAssertEqual(history.map(\.revision), Array(3...12))
+    }
+
+    func testConfirmingMemoryRecordsConfirmationTimestamp() async throws {
+        let directory = root()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try CharacterMemoryStore(stateDirectory: directory, petID: "white-dragon")
+        let memory = CharacterMemory(kind: .fact, text: "只用合成测试资料", source: "用户添加")
+        try await store.saveMemory(memory)
+        try await store.confirmMemory(id: memory.id)
+        let savedRecords = try await store.listMemories()
+        let saved = try XCTUnwrap(savedRecords.first)
+        XCTAssertEqual(saved.status, .confirmed)
+        XCTAssertNotNil(saved.confirmedAt)
+    }
+
+    func testIdentityEditsAreVersionedAndCanBeRestoredWithoutOnlineAuthorization() async throws {
+        let directory = root()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try CharacterMemoryStore(stateDirectory: directory, petID: "white-dragon")
+        var identity = CharacterIdentity(name: "龙妹", personality: "简洁直率", shareWithOnlineModel: true)
+        try await store.saveIdentity(identity)
+        identity = try await store.loadIdentity(defaultName: "龙妹")
+        identity.personality = "先问清楚再回答"
+        identity.shareWithOnlineModel = true
+        try await store.saveIdentity(identity)
+
+        let updated = try await store.loadIdentity(defaultName: "龙妹")
+        XCTAssertEqual(updated.revision, 2)
+        XCTAssertEqual(updated.personality, "先问清楚再回答")
+        let history = try await store.identityHistory()
+        XCTAssertEqual(history.map(\.personality), ["简洁直率"])
+
+        try await store.restoreIdentityRevision(revision: history[0].revision)
+        let restored = try await store.loadIdentity(defaultName: "龙妹")
+        XCTAssertEqual(restored.personality, "简洁直率")
+        XCTAssertFalse(restored.shareWithOnlineModel)
+        XCTAssertEqual(restored.revision, 3)
+    }
+
+    @MainActor
+    func testIdentityHistoryIsAvailableAndRestorableThroughWorkspaceModel() async throws {
+        let directory = root()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try CharacterMemoryStore(stateDirectory: directory, petID: "identity-history")
+        try await store.saveIdentity(CharacterIdentity(name: "龙妹", personality: "原始性格",
+                                                        shareWithOnlineModel: true))
+        var edited = try await store.loadIdentity(defaultName: "龙妹")
+        edited.personality = "修改后的性格"
+        try await store.saveIdentity(edited)
+
+        let model = CharacterWorkspaceModel(store: store, defaultName: "龙妹")
+        for _ in 0..<100 where model.identityHistory.isEmpty {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(model.identityHistory.map(\.personality), ["原始性格"])
+
+        model.restoreIdentityRevision(1)
+        for _ in 0..<100 where model.status != "已恢复身份版本；在线分享已关闭，请检查后重新授权。" {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(model.identity.personality, "原始性格")
+        XCTAssertFalse(model.identity.shareWithOnlineModel)
+        XCTAssertEqual(model.identity.revision, 3)
     }
 
     func testExpiredKnowledgeCannotBeConfirmedAndOldSchemasHaveNoExpiry() async throws {

@@ -36,7 +36,7 @@ def owned_bundle(path, identity):
 
 
 def owned_host(path):
-    return owned_bundle(path, 'local.dragon.codex-companion')
+    return owned_bundle(path, 'local.anime-desktop-pets.companion')
 
 
 def safe_directory(path):
@@ -90,7 +90,7 @@ def cache_candidates():
         if safe_directory(path):
             found.append(path)
     stage = ROOT / '.local/pet-build/generated-source'
-    marker = stage / '.dragon-generated'
+    marker = stage / '.pet-generated'
     if safe_directory(stage) and marker.is_file() and not marker.is_symlink():
         try:
             if marker.read_text(encoding='utf-8') == 'generated local source\n':

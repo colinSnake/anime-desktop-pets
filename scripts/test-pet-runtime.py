@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 # 在导入任何 Qt/上游模块前隔离配置与可写状态；不连接用户 Codex。
-HOME = tempfile.TemporaryDirectory(prefix='dragon-runtime-test-')
+HOME = tempfile.TemporaryDirectory(prefix='pet-runtime-test-')
 os.environ.update(HOME=HOME.name, BAILONG_DATA_DIR=HOME.name, QT_QPA_PLATFORM='offscreen', BAILONG_CODEX='/usr/bin/false')
 sys.path[:0] = [str(ROOT / 'apps/pet-runtime/bailong'), str(ROOT / '.local/pet-build/generated-source/app')]
 from PIL import Image
@@ -1038,6 +1038,37 @@ class BehaviorTests(unittest.TestCase):
             self.behavior.drag_samples.extend([(self.now-.1, 100, 100), (self.now, 100+speed*.1, 100)])
             self.assertTrue(self.behavior.drag_animation()['id'].startswith(expected))
 
+    def test_release_uses_soft_combined_speed_without_changing_drag_pose_estimator(self):
+        self.pet.manifest['movementAnimations'] = self.original_movements
+        self.behavior.drag_samples.clear()
+        self.behavior.drag_samples.extend([(self.now-.1, 100, 100), (self.now, 160, 180)])
+        self.behavior.drag_distance = 100.
+        self.assertTrue(self.behavior.release_drag())
+        spring = self.behavior.release_spring
+        self.assertAlmostEqual(spring.vx / spring.vy, .75)
+        self.assertAlmostEqual(math.hypot(spring.vx, spring.vy), 873.125537, places=5)
+        # Holding/dragging still uses the old pose estimator, not throw amplification.
+        self.assertAlmostEqual(math.hypot(*self.behavior.drag_velocity(.15)), 1000.)
+
+    def test_release_acceleration_and_peak_preserve_short_fast_flick(self):
+        self.pet.manifest['movementAnimations'] = self.original_movements
+        self.behavior.drag_samples.clear()
+        self.behavior.drag_samples.extend([(self.now-.1, 100, 100),
+                                           (self.now-.05, 110, 100), (self.now, 160, 100)])
+        self.behavior.drag_distance = 60.
+        self.assertTrue(self.behavior.release_drag())
+        # Mean 600 + peak 1000, evenly weighted, with 60% acceleration gain.
+        self.assertAlmostEqual(self.behavior.release_spring.vx,
+                               3600. * (1. - math.exp(-1280. / 3600.)), places=5)
+
+    def test_release_rejects_unreliable_sub_twenty_ms_samples(self):
+        self.pet.manifest['movementAnimations'] = self.original_movements
+        self.behavior.drag_samples.clear()
+        self.behavior.drag_samples.extend([(self.now-.01, 100, 100), (self.now, 150, 100)])
+        self.behavior.drag_distance = 50.
+        self.assertFalse(self.behavior.release_drag())
+        self.assertIsNone(self.behavior.release_spring)
+
     def test_drag_velocity_accounts_for_time_since_last_move(self):
         self.behavior.drag_samples.clear()
         self.behavior.drag_samples.extend([(self.now-.15, 100, 100), (self.now-.05, 140, 100)])
@@ -1691,45 +1722,59 @@ class ReleaseRulesTests(unittest.TestCase):
                 if spring.settled:break
             self.assertTrue(spring.settled)
             launches.append((spring.restitution,spring.elapsed))
-        self.assertEqual([entry[0] for entry in launches], [.62, .62, .62])
+        self.assertTrue(all(entry[0] == launches[0][0] for entry in launches))
 
-    def test_contact_friction_scales_with_normal_impact_and_never_reverses_tangent(self):
+    def test_contact_friction_depends_on_time_not_normal_impact(self):
         from dragon_behavior import ReleaseSpring
-        spring = ReleaseSpring.launch((100, 300), (500, 0), (0, 0, 300, 900))
-        weak = spring.apply_contact_friction(500., 100.)
-        strong = spring.apply_contact_friction(500., 300.)
-        self.assertGreater(weak, strong)
-        self.assertGreaterEqual(spring.apply_contact_friction(20., 1000.), 0.)
-        self.assertLessEqual(spring.apply_contact_friction(-20., 1000.), 0.)
+        tangents = []
+        for impact in (100., 300., 1000.):
+            spring = ReleaseSpring.launch((100, 199.99), (500, impact), (0, 0, 300, 200))
+            spring.gravity = 0.
+            spring.advance(1/240)
+            tangents.append(spring.vx)
+            self.assertGreater(spring.vx, 0.)
+            self.assertLess(spring.vy, 0.)
+        self.assertEqual(tangents, [494.7916666666667] * 3)
 
-    def test_large_screen_fallback_lands_smoothly_instead_of_hard_snap(self):
+    def test_large_screen_throws_land_by_contact_without_hard_snap(self):
         from dragon_behavior import ReleaseSpring
-        for span in (1600,2200,5000):
-            spring=ReleaseSpring.launch((600,span*.4),(1000,-200),(0,0,3000,span))
-            spring.gravity=20.;spring.restitution=.99 # force the bounded fallback
-            previous=spring.y;tail=[]
-            for _ in range(240*10):
+        for span in (1600, 2200, 5000):
+            spring = ReleaseSpring.launch((600, span*.4), (1000, -200), (0, 0, 3000, span))
+            previous = spring.y
+            for _ in range(240*30):
                 spring.advance(1/240)
-                if spring.elapsed>=8:tail.append(abs(spring.y-previous))
-                previous=spring.y
-                if spring.settled:break
+                self.assertLess(abs(spring.y-previous), 16.)
+                previous = spring.y
+                if spring.settled:
+                    break
             self.assertTrue(spring.settled)
-            self.assertIsNotNone(spring._finish_at)
-            self.assertEqual(spring.y,span)
-            self.assertLess(spring.elapsed,9.3)
-            self.assertLess(max(tail),span*.03)
-            self.assertLess(tail[-1],.2)
+            self.assertEqual(spring.y, span)
+            self.assertTrue(spring.grounded)
 
-    def test_floor_expansion_during_smooth_finish_restarts_without_jump(self):
+    def test_low_gravity_does_not_force_land_after_eight_seconds(self):
         from dragon_behavior import ReleaseSpring
-        spring=ReleaseSpring.launch((600,900),(800,0),(0,0,3000,2200))
-        spring.gravity=20.;spring.restitution=.99
-        spring.advance(8.5);previous=spring.y
-        spring.update_bounds((0,0,3000,2600));spring.advance(1/240)
-        self.assertAlmostEqual(spring.y,previous)
+        spring = ReleaseSpring.launch((600, 2000), (0, -200), (0, 0, 3000, 5000))
+        spring.gravity = 20.
+        spring.restitution = .99
+        spring.advance(10.)
+        self.assertFalse(spring.settled)
+        self.assertAlmostEqual(spring.y, 1000.4166666667)
+        self.assertAlmostEqual(spring.vy, 0.)
+
+    def test_floor_expansion_preserves_ballistic_position_and_velocity(self):
+        from dragon_behavior import ReleaseSpring
+        spring = ReleaseSpring.launch((600, 900), (800, 0), (0, 0, 3000, 2200))
+        spring.gravity = 20.
+        spring.restitution = .99
+        spring.advance(8.5)
+        previous = (spring.x, spring.y, spring.vx, spring.vy)
+        spring.update_bounds((0, 0, 3000, 2600))
+        self.assertEqual((spring.x, spring.y, spring.vx, spring.vy), previous)
+        spring.advance(1/240)
+        self.assertAlmostEqual(spring.y, previous[1] + (previous[3]+20./240)/240)
         spring.advance(1.3)
-        self.assertTrue(spring.settled)
-        self.assertEqual(spring.y,2600)
+        self.assertFalse(spring.settled)
+        self.assertLess(spring.y, 2600.)
 
     def test_loop_seam_crossfade_advances_timeline_without_restarting(self):
         from dragon_playback import PresentationClock

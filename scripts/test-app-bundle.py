@@ -28,8 +28,8 @@ def bundle(path, identity=publisher.BUNDLE_ID, marker='old'):
     (path / 'Contents/MacOS').mkdir(parents=True)
     with (path / 'Contents/Info.plist').open('wb') as stream:
         plistlib.dump(dict(CFBundleIdentifier=identity, CFBundleName='桌边小崽',
-                           CFBundleDisplayName='桌边小崽', CFBundleExecutable='DragonCompanion'), stream)
-    exe = path / 'Contents/MacOS/DragonCompanion'
+                           CFBundleDisplayName='桌边小崽', CFBundleExecutable='PetCompanion'), stream)
+    exe = path / 'Contents/MacOS/PetCompanion'
     exe.write_text('#!/bin/sh\nexit 0\n'); exe.chmod(0o755)
     (path / 'marker').write_text(marker)
     return path
@@ -42,6 +42,68 @@ class PublicationTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.build = self.root / 'build'; self.build.mkdir()
         self.staged = bundle(self.root / 'stage' / publisher.APP_NAME, marker='new')
+
+    @unittest.skipUnless(os.uname().sysname == 'Darwin', 'macOS build staging only')
+    def test_host_staging_includes_chat_vector_resource_bundle(self):
+        # Exercise the real staging script in a throwaway repository. Swift and
+        # codesign are stubs: no application is built, signed, launched or installed.
+        scripts = self.root / 'scripts'; scripts.mkdir()
+        for name in ('build.sh', 'publish-app-bundle.py'):
+            shutil.copy2(ROOT / 'scripts' / name, scripts / name)
+        for name in ('media/startup.mp4', 'pet/preview.png', 'poster/placeholder', 'branding/AppIcon.icns'):
+            path = self.root / 'resources' / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'fixture')
+        (self.root / 'config').mkdir()
+        (self.root / 'config/companion.example.json').write_text('{}')
+        (self.root / 'licenses').mkdir()
+        for name in ('LICENSE', 'THIRD_PARTY_NOTICES.md', 'licenses/fixture.md'):
+            (self.root / name).write_text('fixture')
+        (self.root / 'apps/companion-macos').mkdir(parents=True)
+        (self.root / '.build').mkdir()
+        products = self.root / 'swift-products'; products.mkdir()
+        (products / 'PetCompanion').write_text('fixture executable; never run')
+        resource = products / 'AnimeDesktopPets_CharacterUI.bundle/Contents/Resources/chat-welcome-mark.svg'
+        resource.parent.mkdir(parents=True)
+        resource.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
+        tools = self.root / 'tools'; tools.mkdir()
+        (tools / 'swift').write_text('#!/bin/sh\ncase "$*" in *--show-bin-path*) printf "%s\\n" "$FIXTURE_PRODUCTS";; esac\n')
+        (tools / 'codesign').write_text('#!/bin/sh\nexit 0\n')
+        for path in tools.iterdir(): path.chmod(0o755)
+        environment = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ['PATH'],
+                           FIXTURE_PRODUCTS=str(products), PET_SKIP_BUILD_CLEANUP='1')
+        result = subprocess.run(['bash', str(scripts / 'build.sh'), '--native-pet'],
+                                env=environment, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        staged = self.build / publisher.APP_NAME / 'Contents/Resources' / resource.relative_to(products)
+        self.assertTrue(staged.is_file(), 'Published host must carry its SwiftUI vector resource bundle')
+        self.assertEqual(staged.read_bytes(), resource.read_bytes())
+
+    @unittest.skipUnless(os.uname().sysname == 'Darwin', 'macOS build entry only')
+    def test_enhanced_preflight_failure_prints_complete_rebuild_commands(self):
+        scripts = self.root / 'scripts'; scripts.mkdir()
+        shutil.copy2(ROOT / 'scripts/build.sh', scripts / 'build.sh')
+        tools = self.root / 'tools'; tools.mkdir()
+        touched = self.root / 'swift-was-called'
+        (tools / 'swift').write_text(f'#!/bin/sh\ntouch "{touched}"\nexit 99\n')
+        (tools / 'swift').chmod(0o755)
+        environment = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ['PATH'])
+        for failed_step in ('prepare-full-pet', 'pet-build-inputs'):
+            with self.subTest(failed_step=failed_step):
+                for name in ('prepare-full-pet', 'pet-build-inputs'):
+                    (scripts / f'{name}.py').write_text(
+                        'import sys\nprint("synthetic helper validation failure", file=sys.stderr)\nsys.exit(1)\n'
+                        if name == failed_step else 'pass\n')
+                result = subprocess.run(['bash', str(scripts / 'build.sh'), '--enhanced-pet'],
+                                        env=environment, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(touched.exists(), 'Invalid helpers must fail before Swift compilation')
+                for required in ('build-pet-runtime.py build', '--source-revision',
+                                 '8e5466d9a438deb6cb43f460e7f5a9bdb9d7a578',
+                                 '--local-test-font', '上首软糖体.ttf', './scripts/build.sh --enhanced-pet',
+                                 'docs/产品命名与重建.md'):
+                    self.assertIn(required, result.stderr, required)
+                self.assertIn('synthetic helper validation failure', result.stderr)
 
     def test_first_publish_uses_chinese_bundle_name(self):
         target, archives = publisher.publish(self.staged, self.build)
@@ -97,14 +159,14 @@ class PublicationTests(unittest.TestCase):
 
     def test_build_keeps_runtime_assets_external_and_explicit(self):
         build_script = (ROOT / 'scripts/build.sh').read_text()
-        pet_controller = (ROOT / 'apps/companion-macos/Sources/DragonCompanion/PetController.swift').read_text()
+        pet_controller = (ROOT / 'apps/companion-macos/Sources/PetCompanion/PetController.swift').read_text()
         self.assertIn("config['externalPetAssetsPath'] = str(Path(sys.argv[3]).expanduser().resolve())", build_script)
         self.assertIn('BAILONG_ASSETS_DIR', pet_controller)
 
     def test_host_has_dock_identity_and_branded_status_item(self):
         build_script = (ROOT / 'scripts/build.sh').read_text()
-        main = (ROOT / 'apps/companion-macos/Sources/DragonCompanion/Main.swift').read_text()
-        coordinator = (ROOT / 'apps/companion-macos/Sources/DragonCompanion/Coordinator.swift').read_text()
+        main = (ROOT / 'apps/companion-macos/Sources/PetCompanion/Main.swift').read_text()
+        coordinator = (ROOT / 'apps/companion-macos/Sources/PetCompanion/Coordinator.swift').read_text()
         self.assertNotIn('LSUIElement', build_script)
         self.assertIn('mode == .controlTest ? .prohibited : .regular', main)
         self.assertIn('let icon = makeStatusItemImage()', coordinator)
@@ -151,7 +213,7 @@ class CacheCleanupTests(unittest.TestCase):
         cache = self.directory('.build/out/ModuleCache.noindex')
         work = self.directory('.local/pet-build/work')
         stage = self.directory('.local/pet-build/generated-source')
-        (stage / '.dragon-generated').write_text('generated local source\n')
+        (stage / '.pet-generated').write_text('generated local source\n')
         protected = [self.directory(p) for p in (
             '.build/out/Products', '.local/pet-build/source',
             '.local/pet-build/venv', '.local/pet-build/benchmark-20261105', '.local/reports',
@@ -161,7 +223,7 @@ class CacheCleanupTests(unittest.TestCase):
 
     def test_generated_stage_requires_exact_ownership_marker(self):
         stage = self.directory('.local/pet-build/generated-source')
-        marker = stage / '.dragon-generated'
+        marker = stage / '.pet-generated'
         marker.write_text('user data\n')
         self.assertNotIn(stage, cleaner.cache_candidates())
         marker.write_text('generated local source\n')
@@ -286,7 +348,7 @@ class InstallFixtureTests(unittest.TestCase):
             shutil.copy2(ROOT / 'scripts' / name, self.root / 'scripts' / name)
         bundle(self.root / 'build' / publisher.APP_NAME, marker='new')
         self.home = Path(self.temp.name) / '用户 home'; self.home.mkdir()
-        self.agent = self.home / 'Library/LaunchAgents/local.dragon.codex-companion.watch.plist'
+        self.agent = self.home / 'Library/LaunchAgents/local.anime-desktop-pets.companion.watch.plist'
         tools = Path(self.temp.name) / 'tools'; tools.mkdir()
         stubs = {
             'codesign': '#!/bin/sh\nexit 0\n',
@@ -313,8 +375,8 @@ class InstallFixtureTests(unittest.TestCase):
     def test_install_rejects_unrecognized_agent_target(self):
         self.agent.parent.mkdir(parents=True)
         with self.agent.open('wb') as stream:
-            plistlib.dump(dict(Label='local.dragon.codex-companion.watch', ProgramArguments=[
-                str(self.home / 'Applications' / 'Unrecognized.app' / 'Contents/MacOS/DragonCompanion'), '--watch']), stream)
+            plistlib.dump(dict(Label='local.anime-desktop-pets.companion.watch', ProgramArguments=[
+                str(self.home / 'Applications' / 'Unrecognized.app' / 'Contents/MacOS/PetCompanion'), '--watch']), stream)
         result = self.run_script('install.sh', '--confirm')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('ownership mismatch', result.stderr)
@@ -326,13 +388,13 @@ class InstallFixtureTests(unittest.TestCase):
         destination = self.home / 'Applications' / publisher.APP_NAME
         self.assertTrue((destination / 'Contents/Info.plist').is_file())
         with self.agent.open('rb') as stream: info = plistlib.load(stream)
-        self.assertEqual(info['ProgramArguments'][0], str(destination / 'Contents/MacOS/DragonCompanion'))
+        self.assertEqual(info['ProgramArguments'][0], str(destination / 'Contents/MacOS/PetCompanion'))
         self.assertIn('bootstrap', (self.home / 'tool-calls').read_text())
 
     def test_install_refuses_same_label_with_unrelated_agent_executable(self):
         self.agent.parent.mkdir(parents=True)
         with self.agent.open('wb') as stream:
-            plistlib.dump(dict(Label='local.dragon.codex-companion.watch', ProgramArguments=['/unrelated/tool']), stream)
+            plistlib.dump(dict(Label='local.anime-desktop-pets.companion.watch', ProgramArguments=['/unrelated/tool']), stream)
         result = self.run_script('install.sh', '--confirm')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('ownership mismatch', result.stderr)

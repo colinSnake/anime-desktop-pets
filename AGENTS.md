@@ -12,8 +12,8 @@
 
 ## 目录与开发入口
 
-- `apps/companion-macos/Sources/DragonCore/`：配置、状态机及可独立验证的核心逻辑。
-- `apps/companion-macos/Sources/DragonCompanion/`：AppKit 宿主、视频、控制接口和桌宠生命周期。
+- `apps/companion-macos/Sources/PetCore/`：配置、状态机及可独立验证的核心逻辑。
+- `apps/companion-macos/Sources/PetCompanion/`：AppKit 宿主、视频、控制接口和桌宠生命周期。
 - `apps/pet-runtime/bailong/`：龙妹播放、UI、行为和帧调度增强层；`integrations/bailong/` 保存固定上游接入补丁及清单。
 - `scripts/`：构建、验证、预览和维护入口；通用宿主控制命令为 `scripts/petctl.sh`；`docs/`：需求、设计、使用及验证文档。
 
@@ -39,11 +39,11 @@ python3 scripts/build-pet-runtime.py build --source-revision 8e5466d9a438deb6cb4
 
 - 优先沿用现有模块边界、工具和测试模式；修改保持在请求涉及的范围内。不要在 Swift 业务代码中写入本机绝对路径。
 - 大型 Swift 文件/类型增加职责前，先按窗口编排、页面状态、领域操作和通用视图组件检查拆分点；一个类型只负责一个清晰职责。多个页面复用的布局、控件和样式收敛到通用组件，禁止复制粘贴形成近似实现；组件 API 保持窄小，领域状态和副作用留在所属控制器/Coordinator。拆分时保留既有行为并运行受影响的测试，不为拆分制造不必要的模块依赖。
-- 新建通用文件、模块和命令使用产品/职责命名（如 `pet_*`、`speech_*`），不要把当前角色名 `dragon` 写进通用层文件名。`apps/pet-runtime/bailong/dragon_*` 是龙妹角色实现，保留角色名；`apps/pet-runtime/pets/dragon_instances.py`、`dragon_instance_ipc.py`、`dragon_pet_helper.py` 是待迁移的历史通用名，内容纳入冻结 helper 指纹，必须等固定上游可重建、兼容测试完成后成组迁移，不能留下失配的已发布 helper。
-- 产品可见名称统一为「桌边小崽」。Bundle ID、内部可执行名与配置键保持兼容；用户数据默认位于 `~/Library/Application Support/AnimeDesktopPets`，旧 `DragonCodexCompanion` 只作为安全迁移及兼容链接路径保留。
+- 新建通用文件、模块和命令使用产品/职责命名（如 `pet_*`、`speech_*`），不要把当前角色名 `dragon` 写进通用层文件名。`apps/pet-runtime/bailong/dragon_*` 是龙妹角色实现，保留角色名；`apps/pet-runtime/pets/pet_instances.py`、`pet_instance_ipc.py`、`pet_helper.py` 已使用职责命名，均纳入冻结 helper 指纹；修改后必须从固定上游重建并通过输入与运行时检查，不得把旧冻结 helper 当成新源码的可发布版本。
+- 产品可见名称统一为「桌边小崽」。通用 Swift 模块使用 `PetCore`、`PetCompanion`，Package 为 `AnimeDesktopPets`；内部可执行名为 `PetCompanion`、宿主 Bundle ID 为 `local.anime-desktop-pets.companion`，环境变量使用 `PET_*`。按用户确认不保留旧标识兼容入口；数据只使用 `~/Library/Application Support/AnimeDesktopPets`，不自动迁移旧目录或创建兼容链接，更不得删除旧用户资料。命名变更后的重建及旧服务人工处置见本地开发指南。
 - 完整增强版默认包含 35 个动作；`--full-pet` 明确选择未经增强的原版，`--native-pet` 是静态 PNG 降级。不要把静态图效果描述为完整动画播放器。
 - 默认增强 helper 不内嵌动画素材。保持现有全局缓存、解码并发和线程边界；QPixmap 只能在 GUI 线程使用，真实绘制不得回退到同步 WebP 解码。实现细节见专题构建文档。
-- **本机 SSRuanTangTi 构建铁律：** 当前桌宠消息气泡采用 `SSRuanTangTi` 时，任何交付给用户的增强版 `.app` 都必须通过 `python3 scripts/build-pet-runtime.py build --source-revision 8e5466d9a438deb6cb43f460e7f5a9bdb9d7a578 --local-test-font <已审核本机字体路径>` 重建 helper，再构建宿主。不得省略 `--local-test-font` 后直接发布/安装。发布前必须由 `scripts/pet-build-inputs.py` 校验最终嵌入的 `Contents/Helpers/BailongPet.app/Contents/Resources/fonts/上首软糖体.ttf` 与 `DRAGON_PATCH.json` 的 SHA-256，并通过 helper/宿主签名检查；任一缺失或不匹配都必须停止发布。字体仅限该用户授权的本机测试，不得提交、公开发布或再分发。
+- **本机 SSRuanTangTi 构建铁律：** 当前桌宠消息气泡采用 `SSRuanTangTi` 时，任何交付给用户的增强版 `.app` 都必须通过 `python3 scripts/build-pet-runtime.py build --source-revision 8e5466d9a438deb6cb43f460e7f5a9bdb9d7a578 --local-test-font <已审核本机字体路径>` 重建 helper，再构建宿主。不得省略 `--local-test-font` 后直接发布/安装。发布前必须由 `scripts/pet-build-inputs.py` 校验最终嵌入的 `Contents/Helpers/BailongPet.app/Contents/Resources/fonts/上首软糖体.ttf` 与 `PET_PATCH.json` 的 SHA-256，并通过 helper/宿主签名检查；任一缺失或不匹配都必须停止发布。字体仅限该用户授权的本机测试，不得提交、公开发布或再分发。
 - 当前优先完成龙妹本机闭环，再考虑新增角色。真实桌面矩阵由用户选择安全时机，不自动启动应用或中断 Codex；自动化测试不能替代多屏、Space、焦点、长期资源和安装验收。
 
 ## 关键防回归要求

@@ -369,7 +369,7 @@ class LeasedReader:
 
 def attach_task_follower(pet):
     """Opt in only through a host-supplied lease, sharing one worker across pets."""
-    path = os.environ.get('DRAGON_TASK_LEASE')
+    path = os.environ.get('PET_TASK_LEASE')
     if not path:
         return None
     from concurrent.futures import ThreadPoolExecutor
@@ -378,13 +378,13 @@ def attach_task_follower(pet):
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance()
-    monitor = getattr(app, '_dragon_task_monitor', None)
+    monitor = getattr(app, '_pet_task_monitor', None)
     if monitor is None:
         class Monitor(QObject):
             def __init__(self):
                 super().__init__(app)
                 self.reader = LeasedReader(os.environ.get('CODEX_HOME') or Path.home() / '.codex', path)
-                self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='dragon-task')
+                self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='pet-task')
                 self.future = None
                 self.pets = weakref.WeakSet()
                 self.snapshot = TaskSnapshot('unknown')
@@ -426,7 +426,7 @@ def attach_task_follower(pet):
                 self.executor.shutdown(wait=False, cancel_futures=True)
 
         monitor = Monitor()
-        app._dragon_task_monitor = monitor
+        app._pet_task_monitor = monitor
     monitor.pets.add(pet)
     return monitor
 

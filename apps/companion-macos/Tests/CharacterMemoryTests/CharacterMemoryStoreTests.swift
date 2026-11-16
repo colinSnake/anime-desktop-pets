@@ -52,7 +52,7 @@ final class CharacterMemoryStoreTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try CharacterMemoryStore(stateDirectory: root, petID: "white-dragon")
         var calls = 0
-        let model = CharacterWorkspaceModel(store: store, defaultName: "龙妹", chat: { _, _ in
+        let model = CharacterWorkspaceModel(store: store, defaultName: "龙妹", chat: { _, _, _ in
             calls += 1
             if calls == 1 { throw NSError(domain: "test", code: 1) }
             return "第二次回复"
@@ -134,7 +134,11 @@ final class CharacterMemoryStoreTests: XCTestCase {
         let custom = CharacterIdentity(name: "龙妹", personality: "用户自己填写的性格")
         try await store.saveIdentity(custom)
         let preserved = try await store.loadIdentity(defaultName: "龙妹")
-        XCTAssertEqual(preserved, custom)
+        XCTAssertEqual(preserved.name, custom.name)
+        XCTAssertEqual(preserved.personality, custom.personality)
+        XCTAssertEqual(preserved.revision, 2)
+        XCTAssertEqual(preserved.createdAt, preset.createdAt)
+        XCTAssertGreaterThanOrEqual(preserved.updatedAt, preserved.createdAt)
     }
 
     func testIdentityAndMemoryRoundTripAndConfirmation() async throws {

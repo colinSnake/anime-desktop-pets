@@ -17,7 +17,10 @@ public enum CharacterIdentityCompletion {
     ]
 
     public static func proposedFields(for identity: CharacterIdentity, defaultName: String) -> [Field] {
-        let preset = CharacterIdentity.starter(name: defaultName)
+        var preset = CharacterIdentity.starter(name: defaultName)
+        preset.name = identity.name
+        preset.role = preset.resolvedRole
+        preset.background = preset.resolvedBackground
         return fields.compactMap { id, title, key in
             guard identity[keyPath: key].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   !preset[keyPath: key].isEmpty else { return nil }
@@ -27,7 +30,10 @@ public enum CharacterIdentityCompletion {
 
     public static func fillingBlanks(in identity: CharacterIdentity, defaultName: String) -> CharacterIdentity {
         var result = identity
-        let preset = CharacterIdentity.starter(name: defaultName)
+        var preset = CharacterIdentity.starter(name: defaultName)
+        preset.name = identity.name
+        preset.role = preset.resolvedRole
+        preset.background = preset.resolvedBackground
         for (_, _, key) in fields where result[keyPath: key].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             result[keyPath: key] = preset[keyPath: key]
         }

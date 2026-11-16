@@ -5,7 +5,7 @@
       "id": "white-dragon",
       "package": {
         "id": "local.bailong.white-dragon",
-        "version": "0.6.2-dragon.8"
+        "version": "0.6.2-pet.8"
       },
       "enabled": false,
       "autoStartOnLaunch": true,

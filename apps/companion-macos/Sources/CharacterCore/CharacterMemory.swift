@@ -17,6 +17,9 @@ public struct CharacterMemory: Codable, Equatable, Identifiable, Sendable {
     public var kind: CharacterMemoryKind
     public var text: String
     public var createdAt: Date
+    public var updatedAt: Date
+    public var confirmedAt: Date?
+    public var revision: Int
     public var source: String
     /// Optional provenance details used by character knowledge entries.
     public var citation: String
@@ -28,11 +31,15 @@ public struct CharacterMemory: Codable, Equatable, Identifiable, Sendable {
     public init(id: String = UUID().uuidString.lowercased(), kind: CharacterMemoryKind,
                 text: String, createdAt: Date = .now, source: String,
                 citation: String = "", version: String = "",
-                status: Status = .candidate, shareWithOnlineModel: Bool = false, expiresAt: Date? = nil) {
+                status: Status = .candidate, shareWithOnlineModel: Bool = false, expiresAt: Date? = nil,
+                updatedAt: Date? = nil, confirmedAt: Date? = nil, revision: Int = 1) {
         self.id = id
         self.kind = kind
         self.text = text
         self.createdAt = createdAt
+        self.updatedAt = updatedAt ?? createdAt
+        self.confirmedAt = confirmedAt ?? (status == .confirmed ? createdAt : nil)
+        self.revision = revision
         self.source = source
         self.citation = citation
         self.version = version
@@ -67,10 +74,10 @@ public enum CharacterLocalAnswer {
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
         if let answer = CharacterGoalContext.localAnswer(for: text, goals: goals) { return answer }
         if text.contains("你是谁") || text.contains("介绍一下自己") || text.contains("自我介绍") {
-            let background = identity.background.trimmingCharacters(in: .whitespacesAndNewlines)
+            let background = identity.resolvedBackground.trimmingCharacters(in: .whitespacesAndNewlines)
             let personality = identity.personality.trimmingCharacters(in: .whitespacesAndNewlines)
-            let role = identity.role.trimmingCharacters(in: .whitespacesAndNewlines)
-            var answer = "我是\(identity.name)。"
+            let role = identity.resolvedRole.trimmingCharacters(in: .whitespacesAndNewlines)
+            var answer = "我是\(identity.displayName)。"
             if !role.isEmpty { answer += "我是\(role.prefix(24))。" }
             if !background.isEmpty { answer += "\(background.prefix(36))。" }
             if !personality.isEmpty { answer += "我的性格是\(personality.prefix(24))。" }
@@ -83,6 +90,13 @@ public enum CharacterLocalAnswer {
                 : CharacterMemoryRetriever.relevant(to: text, in: knowledge, limit: 3,
                                                     includeKnowledgeProvenance: true, now: now)
             guard !matches.isEmpty else { return "我还没有可用的已确认角色知识；待审核、已过期或存在冲突的条目不参与回答。" }
+            if ["来源", "引用", "版本", "依据"].contains(where: text.contains), let first = matches.first {
+                // Reserve room for evidence rather than truncating it behind a long body.
+                var evidence = "知识：\(first.text.prefix(24))；来源：\(first.source.prefix(28))"
+                if !first.citation.isEmpty { evidence += "；引用：\(first.citation.prefix(18))" }
+                if !first.version.isEmpty { evidence += "；版本：\(first.version.prefix(18))" }
+                return String(evidence.prefix(120))
+            }
             let items = matches.map { "知识：\($0.text)" }
             return String(("我目前确认的角色知识有：" + items.joined(separator: "；")).prefix(120))
         }
@@ -125,7 +139,7 @@ public enum CharacterLocalAnswer {
     }
 
     private static func isKnowledgeRecallQuestion(_ text: String) -> Bool {
-        ["角色知识", "来源", "引用", "版本", "你知道哪些角色知识", "你知道什么角色知识", "你的角色知识",
+        ["角色知识", "来源", "引用", "版本", "依据", "你知道哪些角色知识", "你知道什么角色知识", "你的角色知识",
          "你了解这个角色什么", "你对自己知道什么"].contains(where: text.contains)
     }
 

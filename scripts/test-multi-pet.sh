@@ -2,7 +2,7 @@
 # 新增MP1离线入口，独立scratch，不占用另一个会话的正式构建目录。
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PYTHON="${DRAGON_MULTI_PET_PYTHON:-$ROOT/.local/pet-build/venv/bin/python}"
+PYTHON="${PET_RUNTIME_PYTHON:-$ROOT/.local/pet-build/venv/bin/python}"
 if [[ ! -x "$PYTHON" ]]; then
   echo 'Missing prepared Python/PySide6/Pillow runtime; no automatic download or partial-pass claim.' >&2
   exit 1

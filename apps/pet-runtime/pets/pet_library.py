@@ -431,8 +431,10 @@ def audit_bailong(source):
     """只读现成生成目录，产出归一化目录清单；不复制 1.3GB 媒体。"""
     source = Path(source).resolve(strict=True)
     catalog = read_json(source / 'outputs/白龙桌宠素材/素材清单.json')
-    patch = read_json(source / 'DRAGON_PATCH.json')
-    require(patch.get('patchVersion') == 'dragon.8' and patch.get('upstreamVersion') == '0.4.1-mac.3', '当前仅适配已固定的 dragon.8 / mac.3')
+    patch = read_json(source / 'PET_PATCH.json')
+    patch_version = patch.get('patchVersion')
+    require(isinstance(patch_version, str) and re.fullmatch(r'pet\.[0-9]+', patch_version) is not None
+            and patch.get('upstreamVersion') == '0.4.1-mac.3', '当前仅适配带 pet.N 来源标记的固定 mac.3 基线')
     groups = [('idle', [catalog['idle']] + catalog.get('additionalIdleAnimations', [])),
               ('interaction', catalog.get('variants', [])), ('work', catalog.get('workAnimations', [])),
               ('special', [catalog.get(key) for key in ('dragAnimation', 'landingAnimation', 'quotaAnimation')]),
@@ -478,7 +480,7 @@ def audit_bailong(source):
         require(path.is_file() and not path.is_symlink() and path.stat().st_size <= MAX_METADATA, '缺少上游声明或声明超限')
         require(bool(path.read_text(encoding='utf-8').strip()), '上游声明为空')
         notice_records.append(dict(source=name, file='notices/' + name + '.txt', sha256=digest(path)))
-    manifest = dict(schemaVersion=SCHEMA, id='local.bailong.white-dragon', version='0.6.2-dragon.8',
+    manifest = dict(schemaVersion=SCHEMA, id='local.bailong.white-dragon', version='0.7.11-' + patch_version,
                     name='白龙', runtime='webp-v1', defaultAction='idle',
                     sources=[dict(repository='chihayaanon210-spec/bailong-desktop-pet-macos', release='v0.4.1-mac.3',
                                   archiveSha256=patch['upstreamArchiveSHA256']),

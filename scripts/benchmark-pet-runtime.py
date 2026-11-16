@@ -15,7 +15,7 @@ parser.add_argument('--mode',choices=['baseline','enhanced'],required=True)
 parser.add_argument('--seconds',type=float,default=16)
 parser.add_argument('--output',type=Path,required=True)
 args=parser.parse_args()
-with tempfile.TemporaryDirectory(prefix='dragon-bench-') as home:
+with tempfile.TemporaryDirectory(prefix='pet-bench-') as home:
     os.environ.update(HOME=home,BAILONG_DATA_DIR=home,QT_QPA_PLATFORM='offscreen',BAILONG_CODEX='/usr/bin/false')
     sys.path[:0]=[str(ROOT/'apps/pet-runtime/bailong'),str(ROOT/'.local/pet-build/generated-source/app')]
     import psutil

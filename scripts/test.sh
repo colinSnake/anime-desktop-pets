@@ -8,13 +8,17 @@ python3 "$ROOT/scripts/test-speech-runtime-queue.py"
 python3 "$ROOT/scripts/test-speech-runtime-session.py"
 python3 "$ROOT/scripts/test-speech-runtime-service.py"
 python3 "$ROOT/scripts/test-speech-cues.py"
+python3 "$ROOT/scripts/test-pet-ai-bubbles.py"
+python3 "$ROOT/scripts/test-speech-roundtrip-acceptance.py"
 python3 "$ROOT/scripts/test-live-runtime.py"
 python3 "$ROOT/scripts/test-speech-mlx-backend.py"
 python3 "$ROOT/scripts/test-startup-upscale.py"
 python3 "$ROOT/scripts/check-project.py"
+python3 "$ROOT/scripts/test-product-naming.py"
 python3 "$ROOT/scripts/test-app-bundle.py"
 python3 "$ROOT/scripts/test-app-icon.py"
 python3 "$ROOT/scripts/test-pet-build-inputs.py"
+python3 "$ROOT/scripts/test-pet-release-physics.py"
 python3 "$ROOT/scripts/test-full-pet.py"
 python3 "$ROOT/scripts/test-extra-animations.py"
 if [[ -x "$ROOT/.local/pet-build/venv/bin/python" ]]; then
@@ -28,7 +32,7 @@ else
   python3 "$ROOT/scripts/test-pet-library.py"
   echo 'Pet-source management and derived-animation audit tests skipped: prepared runtime is unavailable.'
 fi
-if [[ -x "$ROOT/.local/pet-build/venv/bin/python" && -f "$ROOT/.local/pet-build/generated-source/DRAGON_PATCH.json" ]]; then
+if [[ -x "$ROOT/.local/pet-build/venv/bin/python" && -f "$ROOT/.local/pet-build/generated-source/PET_PATCH.json" ]]; then
   /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network*)' \
     "$ROOT/.local/pet-build/venv/bin/python" "$ROOT/scripts/test-pet-runtime.py"
   /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network*)' \
@@ -36,11 +40,11 @@ if [[ -x "$ROOT/.local/pet-build/venv/bin/python" && -f "$ROOT/.local/pet-build/
 else
   echo 'Enhanced runtime tests skipped: prepare the private source build first.'
 fi
-if [[ -x "$ROOT/build/桌边小崽.app/Contents/MacOS/DragonCompanion" ]]; then
+if [[ -x "$ROOT/build/桌边小崽.app/Contents/MacOS/PetCompanion" ]]; then
   python3 "$ROOT/scripts/test-control.py"
 fi
 
-if [[ -x "$ROOT/.local/pet-build/venv/bin/python" && -f "$ROOT/.local/pet-build/generated-source/DRAGON_PATCH.json" ]]; then
+if [[ -x "$ROOT/.local/pet-build/venv/bin/python" && -f "$ROOT/.local/pet-build/generated-source/PET_PATCH.json" ]]; then
   /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network-outbound (remote ip "*:*")) (deny network-inbound (local ip "*:*"))' \
     "$ROOT/.local/pet-build/venv/bin/python" "$ROOT/scripts/test-real-pet-adapter.py"
   /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network*)' \

@@ -18,8 +18,8 @@ from PIL import Image
 from PySide6.QtWidgets import QApplication
 import pet_sources as sources
 import pet_library as library
-from dragon_instances import InstanceController, InstanceError, InstanceStore, validate_registry
-from dragon_instance_ipc import dispatch, validate_request
+from pet_instances import InstanceController, InstanceError, InstanceStore, validate_registry
+from pet_instance_ipc import dispatch, validate_request
 
 APP = QApplication.instance() or QApplication([])
 APP.setStyle('Fusion')

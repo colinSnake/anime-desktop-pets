@@ -46,7 +46,7 @@ struct CharacterGoalEditorView: View {
                 Text("计划步骤").font(.headline)
                 Text("每行写一步；留空也可以先保存目标。")
                     .font(.caption).foregroundStyle(.secondary)
-                TextEditor(text: $steps).frame(minHeight: 150)
+                CharacterTextEditor(text: $steps).frame(minHeight: 150)
                     .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.secondary.opacity(0.25)))
             }
             if suggestGoal != nil {

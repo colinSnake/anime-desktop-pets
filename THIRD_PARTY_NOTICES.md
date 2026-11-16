@@ -56,7 +56,7 @@ AppKit、AVFoundation、AVKit、CoreGraphics、ImageIO、QuartzCore 是系统框
 
 用户下载的 `jingh12312-rgb/bailong-desktop-pet` v0.5.1 包提供 4 新待机与 6 移动；
 本工程在忽略目录中保留源 WebM、清单与随包声明，并无损转 WebP。
-增强构建只将这 10 段与原 25 动作合并，写入 `outputs/DRAGON_EXTRA_SOURCE.json` 来源和散列；
+增强构建只将这 10 段与原 25 动作合并，写入 `outputs/PET_EXTRA_SOURCE.json` 来源和散列；
 上游素材、第三方声明和项目的公开发行边界不变，不称为原创角色帧。
 
 ## 桌边小崽应用的原创几何标识（2026-11-02 设计初版）

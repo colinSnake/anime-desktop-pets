@@ -22,7 +22,7 @@ PAYLOAD = b'not-an-image; protocol fixture only'
 
 
 def manifest():
-    return dict(schemaVersion=1, id='local.fixture.dragon', version='1.0.0', name='合成宠物',
+    return dict(schemaVersion=1, id='local.fixture.pet', version='1.0.0', name='合成宠物',
                 runtime='webp-v1', defaultAction='idle',
                 sources=[dict(repository='local/synthetic-fixture', release='v1', archiveSha256='0' * 64)],
                 rights=dict(scope='private-local-only', statement='测试，无第三方内容', notices=['notices/source.txt']),
@@ -211,31 +211,31 @@ class InstallChecks(unittest.TestCase):
 
     def test_resolve_exact_package_version_and_verify_contents(self):
         library.import_package(self.pack, self.library)
-        resolved = library.resolve_package(self.library, 'local.fixture.dragon', '1.0.0')
-        self.assertEqual((resolved['id'], resolved['version']), ('local.fixture.dragon', '1.0.0'))
-        self.assertEqual(resolved['manifest']['id'], 'local.fixture.dragon')
-        self.assertEqual(resolved['path'].resolve(), (self.library / 'packages/local.fixture.dragon/1.0.0').resolve())
+        resolved = library.resolve_package(self.library, 'local.fixture.pet', '1.0.0')
+        self.assertEqual((resolved['id'], resolved['version']), ('local.fixture.pet', '1.0.0'))
+        self.assertEqual(resolved['manifest']['id'], 'local.fixture.pet')
+        self.assertEqual(resolved['path'].resolve(), (self.library / 'packages/local.fixture.pet/1.0.0').resolve())
         with self.assertRaisesRegex(library.PackageError, '不存在'):
-            library.resolve_package(self.library, 'local.fixture.dragon', '2.0.0')
+            library.resolve_package(self.library, 'local.fixture.pet', '2.0.0')
         self.assertEqual(library.list_packages(self.library)[0]['version'], '1.0.0')
         self.assertFalse(list(self.library.glob('.import-*')))
 
     def test_resolve_rejects_identity_mismatch_and_symlink(self):
         library.import_package(self.pack, self.library)
-        target = self.library / 'packages/local.fixture.dragon/1.0.0'
+        target = self.library / 'packages/local.fixture.pet/1.0.0'
         manifest_path = target / 'manifest.json'
         data = json.loads(manifest_path.read_text())
         data['version'] = '2.0.0'
         manifest_path.write_text(json.dumps(data))
         with self.assertRaisesRegex(library.PackageError, '身份不符'):
-            library.resolve_package(self.library, 'local.fixture.dragon', '1.0.0')
+            library.resolve_package(self.library, 'local.fixture.pet', '1.0.0')
         manifest_path.write_text(json.dumps(manifest()))
 
         outside = self.root / 'outside'; outside.mkdir()
         target.rename(self.root / 'real-package')
         target.symlink_to(outside, target_is_directory=True)
         with self.assertRaisesRegex(library.PackageError, '符号链接'):
-            library.resolve_package(self.library, 'local.fixture.dragon', '1.0.0')
+            library.resolve_package(self.library, 'local.fixture.pet', '1.0.0')
 
     def _instance_registry(self, rows):
         path = self.root / 'profile' / 'pet-instances.json'
@@ -246,7 +246,7 @@ class InstallChecks(unittest.TestCase):
     def test_delete_unreferenced_package(self):
         library.import_package(self.pack, self.library)
         registry = self._instance_registry([])
-        result = library.delete_package(self.library, 'local.fixture.dragon', '1.0.0', registry)
+        result = library.delete_package(self.library, 'local.fixture.pet', '1.0.0', registry)
         self.assertTrue(result['deleted'])
         self.assertEqual(library.list_packages(self.library), [])
         self.assertFalse(list(self.library.glob('.delete-*')))
@@ -254,20 +254,20 @@ class InstallChecks(unittest.TestCase):
     def test_delete_rejects_stopped_and_enabled_references(self):
         library.import_package(self.pack, self.library)
         for enabled in (False, True):
-            registry = self._instance_registry([dict(id='pet-one', package=dict(id='local.fixture.dragon', version='1.0.0'), enabled=enabled)])
+            registry = self._instance_registry([dict(id='pet-one', package=dict(id='local.fixture.pet', version='1.0.0'), enabled=enabled)])
             with self.subTest(enabled=enabled), self.assertRaisesRegex(library.PackageError, '仍被实例清单引用'):
-                library.delete_package(self.library, 'local.fixture.dragon', '1.0.0', registry)
+                library.delete_package(self.library, 'local.fixture.pet', '1.0.0', registry)
         self.assertEqual(len(library.list_packages(self.library)), 1)
 
     def test_delete_fails_closed_for_missing_or_invalid_registry(self):
         library.import_package(self.pack, self.library)
         missing = self.root / 'missing.json'
         with self.assertRaisesRegex(library.PackageError, '实例清单缺失'):
-            library.delete_package(self.library, 'local.fixture.dragon', '1.0.0', missing)
+            library.delete_package(self.library, 'local.fixture.pet', '1.0.0', missing)
         registry = self._instance_registry([])
         registry.write_text('{broken')
         with self.assertRaisesRegex(library.PackageError, '损坏'):
-            library.delete_package(self.library, 'local.fixture.dragon', '1.0.0', registry)
+            library.delete_package(self.library, 'local.fixture.pet', '1.0.0', registry)
         self.assertEqual(len(library.list_packages(self.library)), 1)
 
     def test_delete_rejects_reference_lock_contention_and_package_symlink(self):
@@ -275,13 +275,13 @@ class InstallChecks(unittest.TestCase):
         library.import_package(self.pack, self.library)
         registry = self._instance_registry([])
         with reference_lock(registry), self.assertRaisesRegex(library.PackageError, '正在更新'):
-            library.delete_package(self.library, 'local.fixture.dragon', '1.0.0', registry)
-        target = self.library / 'packages/local.fixture.dragon/1.0.0'
+            library.delete_package(self.library, 'local.fixture.pet', '1.0.0', registry)
+        target = self.library / 'packages/local.fixture.pet/1.0.0'
         outside = self.root / 'outside'; outside.mkdir()
         target.rename(self.root / 'real-package')
         target.symlink_to(outside)
         with self.assertRaisesRegex(library.PackageError, '符号链接'):
-            library.delete_package(self.library, 'local.fixture.dragon', '1.0.0', registry)
+            library.delete_package(self.library, 'local.fixture.pet', '1.0.0', registry)
 
     def test_missing_library_list_does_not_create_it(self):
         self.assertEqual(library.list_packages(self.library), [])
@@ -349,7 +349,7 @@ class InstallChecks(unittest.TestCase):
         with self.assertRaises(library.PackageError): library.import_package(self.pack, self.library)
         self.assertFalse(any(outside.iterdir()))
         self.library.unlink(); (self.library / 'packages').mkdir(parents=True)
-        (self.library / 'packages/local.fixture.dragon').symlink_to(outside, target_is_directory=True)
+        (self.library / 'packages/local.fixture.pet').symlink_to(outside, target_is_directory=True)
         with self.assertRaises(library.PackageError): library.import_package(self.pack, self.library)
         self.assertFalse(any(outside.iterdir()))
 
@@ -372,6 +372,52 @@ class InstallChecks(unittest.TestCase):
                                  str(self.library), 'import', str(self.pack)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 1)
         self.assertFalse(json.loads(result.stderr)['ok'])
+
+
+class AuditProductMetadataChecks(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.assets = self.root / 'outputs/白龙桌宠素材'
+        self.assets.mkdir(parents=True)
+        actions = [dict(id='idle' if i == 0 else f'idle-{i}', file=f'fixture-{i}.webp',
+                        durationMs=PIXELS['durationMs']) for i in range(35)]
+        for item in actions:
+            (self.assets / item['file']).write_bytes(PAYLOAD)
+        (self.assets / '素材清单.json').write_text(json.dumps(dict(
+            idle=actions[0], additionalIdleAnimations=actions[1:])))
+        self.metadata = dict(patchVersion='pet.44', upstreamVersion='0.4.1-mac.3',
+                             upstreamArchiveSHA256='c7df79f2b7e3fb90736e3ed8fb21be2fd6f8fe2d3982c494f0ee1c68004ccdb2',
+                             extraAnimations=dict(assets={}, source=dict(repository='local/synthetic', release='fixture',
+                                 archiveSha256='4b636bf1e92a82a798b01be09cbd658cbfc46c548dd1a38acee31368b9c78580')))
+        self.marker = self.root / 'PET_PATCH.json'
+        self.marker.write_text(json.dumps(self.metadata))
+        for name in ('ASSETS.md', 'THIRD_PARTY_NOTICES.md', 'NOTICE.md',
+                     'outputs/dragon-extra-notices/BailongPet/ASSETS.md',
+                     'outputs/dragon-extra-notices/BailongPet/README.md',
+                     'outputs/dragon-extra-notices/BailongPet/先看我-安装说明.txt'):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('Synthetic local test notice; no third-party content.')
+
+    def test_current_product_marker_reports_current_version(self):
+        with patch.object(library, 'probe_webp', return_value=PIXELS):
+            report = library.audit_bailong(self.root)
+        self.assertEqual(report['manifest']['version'], '0.7.11-pet.44')
+        self.assertEqual(report['summary']['actionCount'], 35)
+        self.assertFalse(report['summary']['installed'])
+
+    def test_old_patch_namespace_is_rejected_even_with_new_filename(self):
+        self.metadata['patchVersion'] = 'dragon.43'
+        self.marker.write_text(json.dumps(self.metadata))
+        with self.assertRaisesRegex(library.PackageError, 'pet.N'):
+            library.audit_bailong(self.root)
+
+    def test_old_metadata_filename_is_not_an_alias(self):
+        self.marker.rename(self.root / ('DRAGON' + '_PATCH.json'))
+        with self.assertRaises(library.PackageError):
+            library.audit_bailong(self.root)
 
 
 @unittest.skipUnless(importlib.util.find_spec('PIL'), 'Pillow 未安装，仅跳过真实图像解码检查')

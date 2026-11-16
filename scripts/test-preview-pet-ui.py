@@ -39,7 +39,7 @@ class PreviewTests(unittest.TestCase):
                   and ast.unparse(node.func) == 'QStyleFactory.create']
         self.assertEqual(len(styles), 1)
         self.assertEqual(ast.literal_eval(styles[0].args[0]), 'Fusion')
-        with tempfile.TemporaryDirectory(prefix='dragon-preview-test-') as home:
+        with tempfile.TemporaryDirectory(prefix='pet-preview-test-') as home:
             env = dict(os.environ, HOME=home, BAILONG_DATA_DIR=home,
                        QT_STYLE_OVERRIDE='macOS', QT_QPA_PLATFORM='offscreen',
                        BAILONG_CODEX='/usr/bin/false')
@@ -56,7 +56,7 @@ class PreviewTests(unittest.TestCase):
             self.assertTrue((out / 'card-ui-preview.png').is_file())
 
     def test_refresh_button_survives_repeated_bubble_reuse(self):
-        with tempfile.TemporaryDirectory(prefix='dragon-bubble-test-') as home:
+        with tempfile.TemporaryDirectory(prefix='pet-bubble-test-') as home:
             env = dict(os.environ, HOME=home, BAILONG_DATA_DIR=home,
                        QT_STYLE_OVERRIDE='Fusion', QT_QPA_PLATFORM='offscreen',
                        BAILONG_CODEX='/usr/bin/false')

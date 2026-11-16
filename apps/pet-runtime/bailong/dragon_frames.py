@@ -157,7 +157,7 @@ class AnimationFrameStore:
         self.errors = {}
         self.stats = dict(decoded=0, cache_hits=0, misses=0, stale=0,
                           decode_ms=0.0, peak_bytes=0)
-        self.thread = threading.Thread(target=self._run, name='dragon-webp', daemon=True)
+        self.thread = threading.Thread(target=self._run, name='pet-webp', daemon=True)
         if self.resource_budget is not None:
             self.resource_budget.register(self)
         try:

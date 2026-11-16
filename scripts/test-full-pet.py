@@ -49,38 +49,48 @@ class FullPetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             app,_,_=self.fixture(directory)
             info=app/'Contents/Info.plist'
-            data=plistlib.loads(info.read_bytes());data.update(CFBundleVersion='4',DragonPatchVersion='dragon.1')
+            data=plistlib.loads(info.read_bytes());data.update(CFBundleVersion='4',PetPatchVersion='pet.1')
             info.write_bytes(plistlib.dumps(data))
-            marker=app/'Contents/Resources/DRAGON_PATCH.json'
-            marker.write_text(json.dumps({'patchVersion':'dragon.1','upstreamVersion':'0.4.1-mac.3','bundleVersion':'4'}))
-            self.assertEqual(pet.inspect_app(app,verify_signature=False)['patchVersion'],'dragon.1')
-            marker.write_text(json.dumps({'patchVersion':'dragon.9','upstreamVersion':'0.4.1-mac.3'}))
+            marker=app/'Contents/Resources/PET_PATCH.json'
+            marker.write_text(json.dumps({'patchVersion':'pet.1','upstreamVersion':'0.4.1-mac.3','bundleVersion':'4'}))
+            self.assertEqual(pet.inspect_app(app,verify_signature=False)['patchVersion'],'pet.1')
+            marker.write_text(json.dumps({'patchVersion':'pet.9','upstreamVersion':'0.4.1-mac.3'}))
             with self.assertRaises(ValueError):pet.inspect_app(app,verify_signature=False)
 
     def test_card_menu_build_uses_distinct_patch_version(self):
         with tempfile.TemporaryDirectory() as directory:
             app,_,_=self.fixture(directory)
             info=app/'Contents/Info.plist'
-            data=plistlib.loads(info.read_bytes());data.update(CFBundleVersion='5',DragonPatchVersion='dragon.2')
+            data=plistlib.loads(info.read_bytes());data.update(CFBundleVersion='5',PetPatchVersion='pet.2')
             info.write_bytes(plistlib.dumps(data))
-            marker=app/'Contents/Resources/DRAGON_PATCH.json'
-            marker.write_text(json.dumps({'patchVersion':'dragon.2','upstreamVersion':'0.4.1-mac.3','bundleVersion':'5'}))
-            self.assertEqual(pet.inspect_app(app,verify_signature=False)['patchVersion'],'dragon.2')
-            data['DragonPatchVersion']='dragon.1';info.write_bytes(plistlib.dumps(data))
+            marker=app/'Contents/Resources/PET_PATCH.json'
+            marker.write_text(json.dumps({'patchVersion':'pet.2','upstreamVersion':'0.4.1-mac.3','bundleVersion':'5'}))
+            self.assertEqual(pet.inspect_app(app,verify_signature=False)['patchVersion'],'pet.2')
+            data['PetPatchVersion']='pet.1';info.write_bytes(plistlib.dumps(data))
             with self.assertRaises(ValueError):pet.inspect_app(app,verify_signature=False)
 
     def test_behavior_build_uses_matching_metadata(self):
-        for build,version in [('6','dragon.3'),('7','dragon.4'),('8','dragon.5'),('9','dragon.6'),('10','dragon.7'),('11','dragon.8'),('12','dragon.9'),('13','dragon.10'),('14','dragon.11'),('15','dragon.12'),('16','dragon.13'),('17','dragon.14'),('18','dragon.15'),('19','dragon.16'),('20','dragon.17'),('21','dragon.18'),('22','dragon.19')]:
+        for build,version in [('6','pet.3'),('7','pet.4'),('8','pet.5'),('9','pet.6'),('10','pet.7'),('11','pet.8'),('12','pet.9'),('13','pet.10'),('14','pet.11'),('15','pet.12'),('16','pet.13'),('17','pet.14'),('18','pet.15'),('19','pet.16'),('20','pet.17'),('21','pet.18'),('22','pet.19')]:
             with self.subTest(build=build), tempfile.TemporaryDirectory() as directory:
                 app,_,_=self.fixture(directory)
                 info=app/'Contents/Info.plist'
-                data=plistlib.loads(info.read_bytes());data.update(CFBundleVersion=build,DragonPatchVersion=version)
+                data=plistlib.loads(info.read_bytes());data.update(CFBundleVersion=build,PetPatchVersion=version)
                 info.write_bytes(plistlib.dumps(data))
-                marker=app/'Contents/Resources/DRAGON_PATCH.json'
+                marker=app/'Contents/Resources/PET_PATCH.json'
                 marker.write_text(json.dumps({'patchVersion':version,'upstreamVersion':'0.4.1-mac.3','bundleVersion':build}))
                 self.assertEqual(pet.inspect_app(app,verify_signature=False)['patchVersion'],version)
-                data['DragonPatchVersion']='dragon.2';info.write_bytes(plistlib.dumps(data))
+                data['PetPatchVersion']='pet.2';info.write_bytes(plistlib.dumps(data))
                 with self.assertRaises(ValueError):pet.inspect_app(app,verify_signature=False)
+
+    def test_old_enhanced_bundle_reports_required_current_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app, _, _ = self.fixture(directory)
+            info = app / 'Contents/Info.plist'
+            value = plistlib.loads(info.read_bytes())
+            value.update(CFBundleVersion='37', DragonPatchVersion='dragon.43')
+            info.write_bytes(plistlib.dumps(value))
+            with self.assertRaisesRegex(ValueError, r'build 37.*PetPatchVersion.*PET_PATCH\.json'):
+                pet.inspect_app(app, verify_signature=False)
 
     def test_missing_asset_is_error(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -142,7 +152,7 @@ class FullPetTests(unittest.TestCase):
                 self.assertIn('(deny network*)',command[2])
                 self.assertEqual(env['QT_QPA_PLATFORM'],'offscreen')
                 self.assertEqual(env['BAILONG_CODEX'],'/usr/bin/false')
-                self.assertNotIn('DRAGON_IMAGE_API_KEY',env)
+                self.assertNotIn('PET_IMAGE_API_KEY',env)
                 (Path(env['BAILONG_DATA_DIR'])/'检查报告.json').write_text('{"passed":true,"checks":[]}')
                 return type('Result',(),{'returncode':0,'stdout':'','stderr':''})()
             with patch.object(pet,'LOCAL',Path(directory)/'local'),patch.object(pet,'inspect_app',return_value=details),patch.object(pet.subprocess,'run',side_effect=execute):

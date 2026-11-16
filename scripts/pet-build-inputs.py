@@ -16,14 +16,22 @@ def fingerprints(root=ROOT):
              root / 'scripts/extra-animation-overlay.py', root / 'scripts/prepare-release-animations.py']
     paths += sorted(p for p in (root / 'integrations/bailong').iterdir() if p.is_file())
     paths += [root / 'apps/pet-runtime/bailong' / name for name in
-              ('dragon_frames.py', 'dragon_ui.py', 'dragon_behavior.py', 'dragon_playback.py', 'dragon_tasks.py', 'dragon_quota.py', 'dragon_visibility.py', 'dragon_speech.py')]
+              ('dragon_frames.py', 'dragon_ui.py', 'dragon_behavior.py', 'pet_release_physics.py', 'dragon_playback.py', 'dragon_tasks.py', 'dragon_quota.py', 'dragon_visibility.py', 'dragon_speech.py', 'pet_ai_bubbles.py')]
     paths += [root / 'apps/pet-runtime/pets' / name for name in
-              ('dragon_instances.py', 'dragon_instance_ipc.py', 'dragon_pet_helper.py', 'pet_reference_lock.py', 'pet_library.py', 'pet_sources.py')]
+              ('pet_instances.py', 'pet_instance_ipc.py', 'pet_helper.py', 'pet_reference_lock.py', 'pet_library.py', 'pet_sources.py')]
     return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
 
 
+def check_frozen_modules(listing):
+    required = ('pet_instances', 'pet_instance_ipc', 'pet_helper', 'pet_reference_lock',
+                'pet_library', 'pet_sources', 'pet_release_physics', 'dragon_tasks', 'dragon_quota', 'pet_ai_bubbles')
+    missing = [name for name in required if name not in listing]
+    if missing:
+        raise ValueError('增强辅助程序未冻结素材运行模块：' + ', '.join(missing))
+
+
 def check(app, root=ROOT, require_local_test_font=False):
-    metadata = json.loads((app / 'Contents/Resources/DRAGON_PATCH.json').read_text())
+    metadata = json.loads((app / 'Contents/Resources/PET_PATCH.json').read_text())
     font_hash = metadata.get('localTestFontSHA256')
     if require_local_test_font and font_hash is None:
         raise ValueError('本机增强桌面包必须包含 SSRuanTangTi；请使用 --local-test-font 重建 helper')
@@ -45,9 +53,7 @@ def check(app, root=ROOT, require_local_test_font=False):
             raise ValueError('增强辅助程序缺少冻结可执行文件或 PyInstaller 归档检查器')
         listing = subprocess.run([str(viewer), '-r', '-b', str(executable)],
                                  check=True, capture_output=True, text=True).stdout
-        missing = [name for name in ('pet_reference_lock', 'pet_library', 'pet_sources', 'dragon_tasks', 'dragon_quota') if name not in listing]
-        if missing:
-            raise ValueError('增强辅助程序未冻结素材运行模块：' + ', '.join(missing))
+        check_frozen_modules(listing)
     return metadata
 
 

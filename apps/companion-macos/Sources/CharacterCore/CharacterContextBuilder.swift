@@ -2,7 +2,7 @@ import Foundation
 
 public enum CharacterContextBuilder {
     public static func make(identity: CharacterIdentity?, memories: [CharacterMemory],
-                            capabilities: [CharacterCapability] = [], goals: [CharacterGoal] = [], query: String,
+                            capabilities: [CharacterCapability] = [], goals: [CharacterGoal] = [], adaptation: CharacterAdaptationState? = nil, query: String,
                             limit: Int = 2_000, memoryLimit: Int = 4, now: Date = .now) -> String? {
         guard limit > 0, memoryLimit > 0 else { return nil }
         var sections: [String] = []
@@ -12,6 +12,12 @@ public enum CharacterContextBuilder {
             // The shipped persona fits in full; custom profiles remain bounded.
             let budget = min(1_200, limit - identityHeader.count)
             sections.append(identityHeader + identity.promptText.prefix(budget))
+        }
+
+        // Read the live session authorization once; revoked snapshots yield no section.
+        if let prompt = adaptation?.promptText, !prompt.isEmpty {
+            let section = "表达适应（用户明确反馈，仅限表达，不覆盖核心身份与边界）：\n" + prompt
+            if (sections + [section]).joined(separator: "\n\n").count <= limit { sections.append(section) }
         }
 
         let relevantMemories = CharacterMemoryRetriever.relevant(

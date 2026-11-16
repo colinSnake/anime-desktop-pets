@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SOURCE="$ROOT/build/桌边小崽.app"
 DEST="$HOME/Applications/桌边小崽.app"
-LABEL='local.dragon.codex-companion.watch'
+LABEL='local.anime-desktop-pets.companion.watch'
 AGENT="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
 [[ $# == 0 || ( $# == 1 && ( "$1" == --confirm || "$1" == --dry-run ) ) ]] || { echo 'Usage: install.sh [--dry-run | --confirm]' >&2; exit 2; }
@@ -11,7 +11,7 @@ if [[ "${1:-}" != --confirm ]]; then
   printf 'Dry run only. Would install:\n  %s\n  %s\nRun with --confirm after manual acceptance.\n' "$DEST" "$AGENT"
   exit 0
 fi
-[[ -x "$SOURCE/Contents/MacOS/DragonCompanion" ]] || { echo 'Build first.' >&2; exit 1; }
+[[ -x "$SOURCE/Contents/MacOS/PetCompanion" ]] || { echo 'Build first.' >&2; exit 1; }
 codesign --verify --deep --strict "$SOURCE"
 if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
   echo 'Existing service is loaded. Stop/uninstall it explicitly before upgrading.' >&2; exit 1
@@ -25,7 +25,7 @@ if [[ -e "$AGENT" || -L "$AGENT" ]]; then
   [[ ! -L "$AGENT" ]] || { echo 'Refusing symlink LaunchAgent.' >&2; exit 1; }
   ID=$(/usr/libexec/PlistBuddy -c 'Print :Label' "$AGENT" 2>/dev/null || true)
   EXE=$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$AGENT" 2>/dev/null || true)
-  [[ "$ID" == "$LABEL" && "$EXE" == "$DEST/Contents/MacOS/DragonCompanion" ]] || { echo 'LaunchAgent ownership mismatch; stopped.' >&2; exit 1; }
+  [[ "$ID" == "$LABEL" && "$EXE" == "$DEST/Contents/MacOS/PetCompanion" ]] || { echo 'LaunchAgent ownership mismatch; stopped.' >&2; exit 1; }
 fi
 mkdir -p "$HOME/Applications"
 STAGING="$(mktemp -d "$HOME/Applications/.desk-cub-install.XXXXXX")"
@@ -34,12 +34,12 @@ ditto "$SOURCE" "$STAGING/桌边小崽.app"
 codesign --verify --deep --strict "$STAGING/桌边小崽.app"
 # Same guarded publisher as local builds: rejects unrelated/symlink bundles and restores failed moves.
 python3 "$ROOT/scripts/publish-app-bundle.py" --bundle "$STAGING/桌边小崽.app" --build-dir "$HOME/Applications"
-mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Application Support/DragonCodexCompanion"
-python3 - "$AGENT" "$DEST/Contents/MacOS/DragonCompanion" "$LABEL" <<'PY'
+mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Application Support/AnimeDesktopPets"
+python3 - "$AGENT" "$DEST/Contents/MacOS/PetCompanion" "$LABEL" <<'PY'
 import os,plistlib,sys
 from pathlib import Path
 path,exe,label=sys.argv[1:]
-root=Path.home()/'Library/Application Support/DragonCodexCompanion'
+root=Path.home()/'Library/Application Support/AnimeDesktopPets'
 temporary=Path(path).with_name(Path(path).name+f'.tmp.{os.getpid()}')
 try:
     with temporary.open('xb') as f:

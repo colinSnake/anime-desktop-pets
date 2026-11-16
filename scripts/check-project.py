@@ -10,8 +10,30 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 class ProjectChecks(unittest.TestCase):
+    def test_native_edit_menu_is_installed_before_application_event_loop(self):
+        source = (ROOT/'apps/companion-macos/Sources/PetCompanion/Main.swift').read_text()
+        startup = source.split('private static func runApplication(', 1)[1].split('private static func check(', 1)[0]
+        install = 'if mode != .controlTest { app.mainMenu = ApplicationMenu.makeMainMenu() }'
+        self.assertIn(install, startup)
+        self.assertLess(startup.index(install), startup.index('app.run()'))
+
+    def test_all_multiline_editors_share_hidden_scrollbar_policy(self):
+        source = ROOT/'apps/companion-macos/Sources/CharacterUI'
+        native_editors = [p.name for p in source.glob('*.swift') if 'TextEditor(text:' in p.read_text()
+                          and 'CharacterTextEditor(text:' not in p.read_text()]
+        self.assertEqual(native_editors, ['CharacterTextEditor.swift'])
+        for filename in ['CharacterInputSurface.swift', 'CharacterMemoryComponents.swift',
+                         'CharacterGoalEditorView.swift']:
+            self.assertIn('CharacterTextEditor(text:', (source/filename).read_text())
+        self.assertFalse((source/'CharacterKnowledgeImportView.swift').exists())
+        memory_page = (source/'CharacterMemoryView.swift').read_text()
+        self.assertNotIn('showingImport', memory_page)
+        self.assertNotIn('导入知识文件', memory_page)
+        self.assertEqual(memory_page.count('ScrollView {'), 1)
+        self.assertIn('CharacterTextEditor(text: $text)', (source/'CharacterMemoryComponents.swift').read_text())
+
     def test_normal_start_keeps_workspace_closed_and_status_menu_only_quits(self):
-        source = ROOT/'apps/companion-macos/Sources/DragonCompanion'
+        source = ROOT/'apps/companion-macos/Sources/PetCompanion'
         coordinator = (source/'Coordinator.swift').read_text()
         startup = coordinator.split('    func start() {', 1)[1].split('    private func refreshTaskLease', 1)[0]
         preview = '        if mode == .previewCharacterWindow {\n            openWorkspace(.character)\n            return\n        }'
@@ -23,8 +45,9 @@ class ProjectChecks(unittest.TestCase):
         self.assertIn('statusItem?.button?.action = #selector(statusItemClicked(_:))', coordinator)
         click = coordinator.split('@objc private func statusItemClicked(_ sender: NSStatusBarButton)', 1)[1].split('private func addInteractiveSpeechMenuItem', 1)[0]
         self.assertIn('guard let event = NSApp.currentEvent else {', click)
-        self.assertIn('event=unavailable route=pets', click)
-        self.assertIn('openWorkspace(.pets)', click)
+        self.assertIn('event=unavailable route=current', click)
+        self.assertIn('openWorkspace()', click)
+        self.assertNotIn('openWorkspace(.pets)', click)
         self.assertIn('NSMenu.popUpContextMenu(menu, with: event, for: sender)', click)
         self.assertNotIn('popUpMenu(menu)', coordinator)
         self.assertIn('openWorkspace(.pets)', coordinator)
@@ -36,8 +59,21 @@ class ProjectChecks(unittest.TestCase):
         self.assertIn('正在连接桌宠控制器', coordinator)
         self.assertIn('正在准备语音互动', coordinator)
 
+    def test_workspace_reactivation_preserves_navigation_without_explicit_destination(self):
+        source = ROOT/'apps/companion-macos/Sources/PetCompanion'
+        window = (source/'CompanionWorkspaceWindow.swift').read_text()
+        self.assertIn('func open(_ section: WorkspaceSection? = nil)', window)
+        self.assertIn('shellModel.prepareForPresentation(section)', window)
+        coordinator = (source/'Coordinator.swift').read_text()
+        self.assertIn('func reopenWorkspace()', coordinator)
+        self.assertIn('private func openWorkspace(_ section: WorkspaceSection? = nil)', coordinator)
+        delegate = (source/'Main.swift').read_text()
+        reopen = delegate.split('func applicationShouldHandleReopen', 1)[1].split('func applicationShouldTerminate', 1)[0]
+        self.assertIn('coordinator?.reopenWorkspace()', reopen)
+        self.assertNotIn('.pets', reopen)
+
     def test_workspace_toggle_rows_only_constrain_after_joining_view_hierarchy(self):
-        source = ROOT/'apps/companion-macos/Sources/DragonCompanion'
+        source = ROOT/'apps/companion-macos/Sources/PetCompanion'
         page = (source/'WorkspaceActionPageController.swift').read_text()
         controls = (source/'WorkspaceControls.swift').read_text()
         self.assertIn('Toggle(row.title, isOn: Binding(', page)
@@ -47,7 +83,7 @@ class ProjectChecks(unittest.TestCase):
         self.assertIn('set: { _ in perform() }', controls)
 
     def test_pet_workspace_shows_instances_by_default(self):
-        source = ROOT/'apps/companion-macos/Sources/DragonCompanion'
+        source = ROOT/'apps/companion-macos/Sources/PetCompanion'
         workspace = (source/'CompanionWorkspaceWindow.swift').read_text()
         page = (source/'WorkspacePetsPageController.swift').read_text()
         cards = (source/'WorkspacePetInstanceCard.swift').read_text()
@@ -58,7 +94,8 @@ class ProjectChecks(unittest.TestCase):
         self.assertIn('Text("桌宠控制")', page)
         self.assertIn('Text("我的桌宠")', page)
         self.assertIn('（\\(model.instances.count)）', page)
-        self.assertIn('Label("添加桌宠", systemImage: "plus")', page)
+        self.assertIn('Text("添加桌宠")', page)
+        self.assertNotIn('Label("添加桌宠"', page)
         self.assertIn('.foregroundStyle(Color(nsColor: .labelColor))', page)
         self.assertIn('（\\(model.status)）', page)
         self.assertIn('controlSize(.mini)', (source/'WorkspaceControls.swift').read_text())
@@ -71,10 +108,11 @@ class ProjectChecks(unittest.TestCase):
         self.assertIn('model.actions.cloneInstance(instance.id)', page)
 
     def test_pet_manager_is_compact_and_presented_as_workspace_sheet(self):
-        source = ROOT/'apps/companion-macos/Sources/DragonCompanion'
+        source = ROOT/'apps/companion-macos/Sources/PetCompanion'
         manager = (source/'PetManagerWindow.swift').read_text()
         coordinator = (source/'Coordinator.swift').read_text()
-        self.assertIn('width: 700, height: 420', manager)
+        self.assertIn('window.contentMinSize = PetManagerLayout.minimumContentSize', manager)
+        self.assertIn('window.setContentSize(PetManagerLayout.defaultContentSize)', manager)
         self.assertIn('func open(parentWindow: NSWindow? = nil)', manager)
         self.assertIn('parentWindow.beginSheet(window)', manager)
         self.assertIn('NSHostingController(rootView: PetManagerPage(model: self))', manager)
@@ -111,6 +149,9 @@ class ProjectChecks(unittest.TestCase):
         self.assertIn('windowWillClose(_ notification: Notification)', manager)
         self.assertIn('private var outsideClickMonitor: Any?', manager)
         self.assertIn('parent.endSheet(window, returnCode: .cancel)', manager)
+        stop = coordinator.split('func stop()', 1)[1].split('func finishStopping', 1)[0]
+        self.assertIn('petManagerWindow?.dismissManager()', stop)
+        self.assertLess(stop.index('petManagerWindow?.dismissManager()'), stop.index('dismissPetRuntime()'))
         row = (source/'PetManagerSourceCard.swift').read_text()
         self.assertIn('struct PetManagerSourceCard: View', row)
         self.assertIn('Button(action: select)', row)
@@ -121,13 +162,15 @@ class ProjectChecks(unittest.TestCase):
 
 
     def test_pet_candidate_cards_prepare_covers_without_blocking_scan_or_import(self):
-        source = ROOT/'apps/companion-macos/Sources/DragonCompanion'
+        source = ROOT/'apps/companion-macos/Sources/PetCompanion'
         manager = (source/'PetManagerWindow.swift').read_text()
         card = (source/'PetManagerSourceCard.swift').read_text()
         archive = (source/'PetCoverArchive.swift').read_text()
         self.assertIn('LazyVGrid(columns:', manager)
         self.assertIn('.adaptive(minimum: PetManagerSourceCard.width, maximum: PetManagerSourceCard.width)', manager)
-        self.assertIn('static let width: CGFloat = 160', card)
+        self.assertIn('static let width: CGFloat = 140', card)
+        self.assertIn('static let coverHeight: CGFloat = 120', card)
+        self.assertIn('.frame(height: Self.coverHeight)', card)
         self.assertIn('.frame(width: Self.width)', card)
         self.assertIn('.strokeBorder(selected ?', card)
         self.assertIn('.padding(2)', manager)
@@ -140,14 +183,22 @@ class ProjectChecks(unittest.TestCase):
         self.assertIn('case .unavailable:', card)
         self.assertIn('Image(decorative: image', card)
         self.assertIn('HStack(alignment: .top, spacing: 6)', card)
-        self.assertIn('.frame(maxWidth: .infinity, alignment: .center)', card)
+        cover_header = card.split('HStack(alignment: .top, spacing: 6)', 1)[1].split('Spacer(minLength: 0)', 1)[0]
+        self.assertIn('Text(source.name)', cover_header)
+        self.assertNotIn('source.version', cover_header)
+        self.assertIn('HStack(alignment: .bottom, spacing: 6)', card)
+        version_row = card.split('HStack(alignment: .bottom, spacing: 6)', 1)[1].split('}', 1)[0]
+        self.assertIn('Text("v\\(source.version)")', version_row)
+        self.assertNotIn('内置桌宠', card)
+        footer = card.split('.disabled(busy)', 1)[1].split('Button(action: reveal)', 1)[0]
+        self.assertNotIn('Text(source.name)', footer)
         self.assertEqual(card.count('Button(action:'), 2, 'Cover selects; only folder action belongs in footer')
         self.assertIn('process.arguments = ["-p", "-P", "", archive.path, member]', archive)
         self.assertIn('result.count <= limit', archive)
         self.assertIn('CGImageSourceCreateThumbnailAtIndex(source, 0', archive)
 
     def test_pet_manager_uses_compact_text_only_actions(self):
-        source = ROOT/'apps/companion-macos/Sources/DragonCompanion'
+        source = ROOT/'apps/companion-macos/Sources/PetCompanion'
         page = (source/'PetManagerWindow.swift').read_text().split('private struct PetManagerPage: View', 1)[1]
         style = (source/'WorkspaceCard.swift').read_text()
         heading = (source/'WorkspaceControls.swift').read_text()
@@ -161,21 +212,24 @@ class ProjectChecks(unittest.TestCase):
         self.assertNotIn('Text("全选")', page)
         self.assertIn('WorkspaceActionButtonStyle(prominent: true, compact: true)', page)
         self.assertIn('.buttonStyle(WorkspaceActionButtonStyle(compact: true))', page)
-        self.assertIn('var compact = false', style)
+        self.assertIn('typealias WorkspaceActionButtonStyle = ManagementActionButtonStyle', style)
+        self.assertIn('typealias WorkspaceControlStyle = ManagementControlStyle', style)
+        style = (ROOT/'apps/companion-macos/Sources/CharacterUI/ManagementActionButtonStyle.swift').read_text()
+        self.assertIn('compact: Bool = false', style)
         self.assertIn('static let compactHeight: CGFloat = 26', style)
-        self.assertIn('.frame(height: compact ? WorkspaceControlStyle.compactHeight : WorkspaceControlStyle.regularHeight)', style)
+        self.assertIn('.frame(height: compact ? ManagementControlStyle.compactHeight : ManagementControlStyle.regularHeight)', style)
         self.assertIn('WorkspaceSearchField(prompt: "搜索名称、版本或路径", text: $model.query)', page)
         self.assertNotIn('.textFieldStyle(.roundedBorder)', page)
         field = (source/'WorkspaceSearchField.swift').read_text()
         self.assertIn('.frame(height: WorkspaceControlStyle.compactHeight)', field)
         self.assertIn('WorkspaceControlStyle.borderColor(for: colorScheme)', field)
-        self.assertIn('WorkspaceControlStyle.borderColor(for: colorScheme)', style)
+        self.assertIn('ManagementControlStyle.borderColor(for: colorScheme)', style)
         self.assertIn('.focused($focused)', field)
         pets = (source/'WorkspacePetsPageController.swift').read_text()
         self.assertIn('.buttonStyle(WorkspaceActionButtonStyle(compact: true)).disabled(!model.canAdd)', pets)
 
     def test_startup_cover_keeps_painting_and_avoids_letterboxing(self):
-        host = ROOT/'apps/companion-macos/Sources/DragonCompanion'
+        host = ROOT/'apps/companion-macos/Sources/PetCompanion'
         player = (host/'BootPlayer.swift').read_text()
         coordinator = (host/'Coordinator.swift').read_text()
         self.assertIn('preservesTargetActivation ? .resizeAspectFill : .resizeAspect', player)
@@ -208,9 +262,9 @@ class ProjectChecks(unittest.TestCase):
     def test_monorepo_application_boundaries(self):
         host = ROOT / 'apps/companion-macos'
         runtime = ROOT / 'apps/pet-runtime'
-        for path in (host/'Package.swift', host/'Sources/DragonCore',
-                     host/'Sources/DragonCompanion', host/'Tests/DragonCoreTests',
-                     runtime/'bailong/dragon_frames.py', runtime/'pets/dragon_pet_helper.py',
+        for path in (host/'Package.swift', host/'Sources/PetCore',
+                     host/'Sources/PetCompanion', host/'Tests/PetCoreTests',
+                     runtime/'bailong/dragon_frames.py', runtime/'pets/pet_helper.py',
                      runtime/'pets/pet_library.py', ROOT/'integrations/bailong/upstream-files.json'):
             self.assertTrue(path.exists(), str(path))
         for old in ('Package.swift', 'Sources', 'Tests', 'integrations/pets'):
@@ -227,7 +281,7 @@ class ProjectChecks(unittest.TestCase):
         self.assertNotIn('LSUIElement', script, 'the host must appear as a regular Dock application')
 
     def test_friendly_copy_keeps_persistent_identity(self):
-        source = ROOT/'apps/companion-macos/Sources/DragonCompanion'
+        source = ROOT/'apps/companion-macos/Sources/PetCompanion'
         copy = (source/'AppCopy.swift').read_text()
         self.assertIn('static let name = "桌边小崽"', copy)
         self.assertIn('让喜欢的角色，陪在桌边。', copy)
@@ -237,24 +291,26 @@ class ProjectChecks(unittest.TestCase):
             self.assertIn(key, coordinator)
         for path in source.glob('*.swift'):
             self.assertNotIn('伴侣', path.read_text())
-        self.assertIn('AnimeDesktopPets', (source/'Runtime.swift').read_text())
-        self.assertIn('DragonCodexCompanion', (source/'Runtime.swift').read_text())
+        runtime = (source/'Runtime.swift').read_text()
+        self.assertIn('AnimeDesktopPets', runtime)
+        self.assertNotIn('createSymbolicLink', runtime)
+        self.assertNotIn('moveItem', runtime)
         build = (ROOT/'scripts/build.sh').read_text()
-        self.assertIn("CFBundleIdentifier='local.dragon.codex-companion'", build)
+        self.assertIn("CFBundleIdentifier='local.anime-desktop-pets.companion'", build)
         self.assertIn('build/桌边小崽.app', build)
         self.assertIn("CFBundleName='桌边小崽', CFBundleDisplayName='桌边小崽'", build)
-        self.assertIn("CFBundleShortVersionString='0.7.11', CFBundleVersion='31'", build)
+        self.assertIn("CFBundleShortVersionString='0.7.11', CFBundleVersion='32'", build)
         self.assertIn('scripts/publish-app-bundle.py', build)
 
     def test_external_catalog_validation_never_blocks_appkit_main_actor(self):
-        controller = (ROOT/'apps/companion-macos/Sources/DragonCompanion/PetController.swift').read_text()
+        controller = (ROOT/'apps/companion-macos/Sources/PetCompanion/PetController.swift').read_text()
         self.assertIn('Task.detached(priority: .utility)', controller)
         self.assertIn('descriptorLoadTask == nil', controller)
         self.assertIn('guard self.desiredVisible else { return }', controller)
         self.assertIn('private func launchExternal(_ descriptor: ExternalPetDescriptor)', controller)
 
     def test_pet_menu_uses_truthful_lifecycle_actions(self):
-        source = ROOT/'apps/companion-macos/Sources/DragonCompanion'
+        source = ROOT/'apps/companion-macos/Sources/PetCompanion'
         coordinator = (source/'Coordinator.swift').read_text()
         workspace = (source/'CompanionWorkspaceWindow.swift').read_text()
         pet_controller = (source/'PetController.swift').read_text()
@@ -279,7 +335,7 @@ class ProjectChecks(unittest.TestCase):
         self.assertNotIn('允许同步 Codex 窗口尺寸', coordinator)
 
     def test_workspace_theme_and_navigation_use_consistent_controls(self):
-        source = ROOT/'apps/companion-macos/Sources/DragonCompanion'
+        source = ROOT/'apps/companion-macos/Sources/PetCompanion'
         workspace = (source/'CompanionWorkspaceWindow.swift').read_text()
         shell = (source/'WorkspaceShellView.swift').read_text()
         navigation = (source/'WorkspaceNavigation.swift').read_text()
@@ -298,7 +354,7 @@ class ProjectChecks(unittest.TestCase):
         self.assertIn('UserDefaults.standard.set(next.rawValue, forKey: "workspaceTheme")', shell)
         self.assertIn('struct WorkspaceNavigationButton: View', navigation)
         self.assertIn('.accessibilityAddTraits(selected ? .isSelected : [])', navigation)
-        self.assertIn('LinearGradient(colors:', navigation)
+        self.assertIn('CharacterBrandStyle.selectionGradient(for: colorScheme)', navigation)
         controls = (source/'WorkspaceControls.swift').read_text()
         self.assertIn('.labelsHidden().toggleStyle(.switch).controlSize(.mini).tint(Color(nsColor: WorkspacePalette.accent))', controls)
         self.assertIn('enum WorkspacePalette', controls)
@@ -310,14 +366,22 @@ class ProjectChecks(unittest.TestCase):
         pet_card = (source/'WorkspacePetInstanceCard.swift').read_text()
         self.assertIn('struct WorkspacePetInstanceCard: View', pet_card)
         self.assertIn('Text(instance.name)', pet_card)
-        self.assertIn('Label("创建分身"', pet_card)
+        self.assertIn('Text("创建分身")', pet_card)
+        self.assertNotIn('Label("创建分身"', pet_card)
         self.assertIn('if instance.isClone', pet_card)
-        self.assertIn('Label("删除实例"', pet_card)
+        self.assertIn('Text("删除实例")', pet_card)
+        self.assertNotIn('Label("删除实例"', pet_card)
+        self.assertIn('.frame(height: 124)', pet_card)
+        self.assertIn('.frame(height: 26)', pet_card)
+        self.assertIn('.font(.system(size: 10, weight: .medium))', pet_card)
         self.assertIn('.disabled(!instance.canDelete)', pet_card)
+        self.assertIn('GridItem(.adaptive(minimum: 160, maximum: 220)', pets_page)
+        self.assertIn('Text("添加桌宠")', pets_page)
+        self.assertNotIn('Label("添加桌宠"', pets_page)
         self.assertIn('confirmDeleteManagedPet(instanceID: id)', (source/'Coordinator.swift').read_text())
 
     def test_workspace_canvas_and_cards_use_shared_theme_surfaces(self):
-        source = ROOT/'apps/companion-macos/Sources/DragonCompanion'
+        source = ROOT/'apps/companion-macos/Sources/PetCompanion'
         character = ROOT/'apps/companion-macos/Sources/CharacterUI'
         palette = (character/'ManagementSurfacePalette.swift').read_text()
         self.assertIn('public static let canvas = surface("ManagementCanvas", light: .white', palette)
@@ -339,7 +403,7 @@ class ProjectChecks(unittest.TestCase):
         self.assertIn('Color(nsColor: WorkspacePalette.input)', card)
 
     def test_workspace_sidebar_groups_are_fixed_and_live_tabs_are_distinct(self):
-        source = ROOT/'apps/companion-macos/Sources/DragonCompanion'
+        source = ROOT/'apps/companion-macos/Sources/PetCompanion'
         workspace = (source/'CompanionWorkspaceWindow.swift').read_text()
         shell = (source/'WorkspaceShellView.swift').read_text()
         sections = (source/'WorkspaceSection.swift').read_text()
@@ -376,9 +440,39 @@ class ProjectChecks(unittest.TestCase):
         identity = (ROOT/'apps/companion-macos/Sources/CharacterUI/CharacterIdentityView.swift').read_text()
         self.assertIn('.padding(.horizontal, 20)', identity)
         self.assertIn('.padding(.vertical, 12)', identity)
+        self.assertNotIn('LazyVGrid(', identity)
+        self.assertIn('DisclosureGroup("基础设定"', identity)
+        self.assertIn('CharacterIdentityEditor(', identity)
+        for field in ['name', 'personality', 'speakingStyle', 'relationship']:
+            self.assertIn('$model.identity.' + field, identity)
+        for field in ['role', 'background', 'values', 'motivations', 'knowledgeScope', 'boundaries']:
+            self.assertNotIn('$model.identity.' + field, identity)
+        self.assertIn('Text("身份")', identity)
+        self.assertIn('Button("保存身份", action: model.saveIdentity)', identity)
+        self.assertNotIn('Text(hint)', identity)
+        shell = (source/'WorkspaceShellView.swift').read_text()
+        self.assertIn('model.selected != .character', shell)
+
+    def test_identity_and_chat_share_input_focus_and_use_profile_name(self):
+        source = ROOT/'apps/companion-macos/Sources/CharacterUI'
+        editor = (source/'CharacterInputSurface.swift').read_text()
+        composer = (source/'CharacterChatComposer.swift').read_text()
+        welcome = (source/'CharacterChatWelcomeView.swift').read_text()
+        chat = (source/'CharacterChatView.swift').read_text()
+        self.assertIn('TextEditor(text: $text)', editor)
+        self.assertIn('.modifier(CharacterInputSurface(isFocused: isFocused))', editor)
+        self.assertIn('.modifier(CharacterInputSurface(isFocused: isFocused, cornerRadius: 20))', composer)
+        self.assertIn('CharacterBrandStyle.focusGradient', editor)
+        self.assertIn('.tint(CharacterBrandStyle.cursor)', editor)
+        self.assertIn('.onExitCommand { isFocused = false }', editor)
+        self.assertIn('CharacterChatWelcomeView(name: model.identity.displayName)', chat)
+        self.assertIn('model.identity.displayName', composer)
+        self.assertIn('\\(name)', welcome)
+        for file in source.glob('*.swift'):
+            self.assertNotIn('龙妹', file.read_text(), str(file))
 
     def test_model_key_status_does_not_read_secret_or_prompt_on_page_open(self):
-        source = ROOT/'apps/companion-macos/Sources/DragonCompanion'
+        source = ROOT/'apps/companion-macos/Sources/PetCompanion'
         model = (source/'ModelManagerWindow.swift').read_text()
         provider = (source/'ModelProvider.swift').read_text()
         self.assertIn('hasSavedKey = keyStore.hasValue()', model)
@@ -393,7 +487,7 @@ class ProjectChecks(unittest.TestCase):
         self.assertIn('status == errSecSuccess || status == errSecInteractionNotAllowed', provider)
 
     def test_model_settings_keeps_system_effects_out_of_swiftui_view(self):
-        model = (ROOT/'apps/companion-macos/Sources/DragonCompanion/ModelManagerWindow.swift').read_text()
+        model = (ROOT/'apps/companion-macos/Sources/PetCompanion/ModelManagerWindow.swift').read_text()
         controller, page = model.split('private struct ModelManagerPage: View', 1)
         self.assertIn('final class ModelManagerWindow: NSViewController, ObservableObject', controller)
         self.assertIn('try store.save(next)', controller)
@@ -405,7 +499,7 @@ class ProjectChecks(unittest.TestCase):
         self.assertNotIn('ModelProviderClient(', page)
 
     def test_workspace_retains_native_window_host_and_swiftui_feature_pages(self):
-        source = ROOT/'apps/companion-macos/Sources/DragonCompanion'
+        source = ROOT/'apps/companion-macos/Sources/PetCompanion'
         workspace = (source/'CompanionWorkspaceWindow.swift').read_text()
         self.assertIn('final class CompanionWorkspaceWindow: NSWindowController', workspace)
         self.assertIn('window.titleVisibility = .hidden', workspace)
@@ -416,7 +510,7 @@ class ProjectChecks(unittest.TestCase):
         self.assertIn('applyCompactOverlayScrollbars(in: hostingController.view)', character)
 
     def test_management_pages_do_not_construct_appkit_layout_controls(self):
-        source = ROOT/'apps/companion-macos/Sources/DragonCompanion'
+        source = ROOT/'apps/companion-macos/Sources/PetCompanion'
         page_files = (
             'WorkspaceShellView.swift', 'WorkspaceNavigation.swift', 'WorkspaceControls.swift',
             'WorkspacePetsPageController.swift', 'WorkspacePetInstanceCard.swift',
@@ -435,15 +529,15 @@ class ProjectChecks(unittest.TestCase):
                       (source/'PetManagerWindow.swift').read_text())
 
     def test_data_folder_menu_matches_opened_directory(self):
-        coordinator = (ROOT/'apps/companion-macos/Sources/DragonCompanion/Coordinator.swift').read_text()
-        workspace = (ROOT/'apps/companion-macos/Sources/DragonCompanion/CompanionWorkspaceWindow.swift').read_text()
+        coordinator = (ROOT/'apps/companion-macos/Sources/PetCompanion/Coordinator.swift').read_text()
+        workspace = (ROOT/'apps/companion-macos/Sources/PetCompanion/CompanionWorkspaceWindow.swift').read_text()
         self.assertIn('.init("打开数据文件夹", symbol: "folder", run: actions.openData)', workspace)
         self.assertIn('openData: { [weak self] in self?.openSettings() }', coordinator)
         self.assertIn('private func openSettings() { NSWorkspace.shared.open(runtime.state) }', coordinator)
         self.assertNotIn('打开配置文件夹', coordinator)
 
     def test_pet_manager_is_nested_and_uses_existing_helper(self):
-        host = ROOT/'apps/companion-macos/Sources/DragonCompanion'
+        host = ROOT/'apps/companion-macos/Sources/PetCompanion'
         coordinator = (host/'Coordinator.swift').read_text()
         rebuild = coordinator.split('private func rebuildMenu()', 1)[1].split('func menuNeedsUpdate', 1)[0]
         management = coordinator.split('private func petManagementMenu()', 1)[1].split('@objc private func showPet', 1)[0]
@@ -474,7 +568,9 @@ class ProjectChecks(unittest.TestCase):
         self.assertNotIn('NSStackView', window)
         row = (host/'PetManagerSourceCard.swift').read_text()
         self.assertIn('struct PetManagerSourceCard: View', row)
-        self.assertIn('source.builtin ? "内置桌宠" : "v\\(source.version)"', row)
+        self.assertNotIn('内置桌宠', row)
+        self.assertIn('Text(source.name)', row)
+        self.assertIn('Text("v\\(source.version)")', row)
         self.assertNotIn('Image(systemName:', row)
         self.assertNotRegex(row, r'\bLabel\(')
         self.assertIn('Text("查看目录")', row)

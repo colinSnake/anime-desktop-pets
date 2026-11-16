@@ -23,8 +23,8 @@ SOURCE = ROOT.parent.parent / 'github/codex-pet/bailong-desktop-pet-macos'
 STAGE = LOCAL / 'generated-source'
 APP = LOCAL / 'dist/BailongPet.app'
 PYTHON = LOCAL / 'venv/bin/python'
-VERSION = 'dragon.43'
-BUNDLE_VERSION = '37'
+VERSION = 'pet.44'
+BUNDLE_VERSION = '38'
 LOCAL_TEST_FONT_SHA256 = '5f5099a065b5eb3ba55e9bd293af7707fdbd7858bf99d9381b7c6319445c2e62'
 
 
@@ -46,16 +46,24 @@ def stage(source, bundle_assets=False, local_test_font=None):
             raise ValueError('上游源码与固定基线不符，停止打补丁：' + name)
     if STAGE.exists():
         # 仅删除脚本持有的私有生成目录，绝不删除源仓库。
-        if not (STAGE / '.dragon-generated').is_file():
+        if not (STAGE / '.pet-generated').is_file():
             raise ValueError('暂存目录不属于此脚本')
         shutil.rmtree(STAGE)
     STAGE.mkdir(parents=True)
-    (STAGE / '.dragon-generated').write_text('generated local source\n')
+    (STAGE / '.pet-generated').write_text('generated local source\n')
     for folder in ('app', 'macos', 'licenses', 'upstream-notices'):
         shutil.copytree(source / folder, STAGE / folder,
                         ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     for name in ('ASSETS.md', 'MACOS.txt', 'NOTICE.md', 'THIRD_PARTY_NOTICES.md', 'BUILD_INFO.json'):
         shutil.copy2(source / name, STAGE / name)
+    # 抛掷算法的第三方MIT声明随helper一起分发；不替换上游已有声明。
+    shutil.copy2(OVERLAY / 'dsh-pet-LICENSE.txt', STAGE / 'licenses/dsh-pet-LICENSE.txt')
+    notices = STAGE / 'THIRD_PARTY_NOTICES.md'
+    with notices.open('a') as output:
+        output.write('\n\n## dsh-pet 抛掷物理算法\n\n'
+                     'Copyright (c) 2026 PC2005-cloud. MIT License.\n'
+                     '改编基线：8ad3d957f83052d332f0d0f09e90993e9756d2ec。\n'
+                     '完整声明见 licenses/dsh-pet-LICENSE.txt。\n')
     from importlib.util import spec_from_file_location, module_from_spec
     spec = spec_from_file_location('extra_overlay', ROOT / 'scripts/extra-animation-overlay.py')
     overlay = module_from_spec(spec); spec.loader.exec_module(overlay)
@@ -70,9 +78,9 @@ def stage(source, bundle_assets=False, local_test_font=None):
     for relative in ('macos/BailongPet.spec', 'app/selftest.py'):
         path = STAGE / relative
         text = path.read_text()
-        text = text.replace('@DRAGON_PATCH_VERSION@', VERSION)
-        text = text.replace('@DRAGON_BUNDLE_VERSION@', BUNDLE_VERSION)
-        if '@DRAGON_' in text:
+        text = text.replace('@PET_PATCH_VERSION@', VERSION)
+        text = text.replace('@PET_BUNDLE_VERSION@', BUNDLE_VERSION)
+        if '@PET_' in text:
             raise ValueError(f'增强版版本占位符未解析：{relative}')
         path.write_text(text)
     pet_source = STAGE / 'app/pet.py'
@@ -83,9 +91,9 @@ def stage(source, bundle_assets=False, local_test_font=None):
     pet_source.write_text(pet_text.replace(
         default_assets,
         "ASSETS=Path(os.environ.get('BAILONG_ASSETS_DIR', ROOT/'outputs/白龙桌宠素材')).expanduser().resolve()", 1))
-    for name in ('dragon_frames.py', 'dragon_ui.py', 'dragon_behavior.py', 'dragon_playback.py', 'dragon_tasks.py', 'dragon_quota.py', 'dragon_visibility.py', 'dragon_speech.py'):
+    for name in ('dragon_frames.py', 'dragon_ui.py', 'dragon_behavior.py', 'pet_release_physics.py', 'dragon_playback.py', 'dragon_tasks.py', 'dragon_quota.py', 'dragon_visibility.py', 'dragon_speech.py', 'pet_ai_bubbles.py'):
         shutil.copy2(RUNTIME_BAILONG / name, STAGE / 'app' / name)
-    for name in ('dragon_instances.py', 'dragon_instance_ipc.py', 'dragon_pet_helper.py', 'pet_reference_lock.py', 'pet_library.py', 'pet_sources.py'):
+    for name in ('pet_instances.py', 'pet_instance_ipc.py', 'pet_helper.py', 'pet_reference_lock.py', 'pet_library.py', 'pet_sources.py'):
         shutil.copy2(RUNTIME_PETS / name, STAGE / 'app' / name)
     local_font_sha256 = None
     if local_test_font is not None:
@@ -112,7 +120,7 @@ def stage(source, bundle_assets=False, local_test_font=None):
                     "        from pet_sources import main as sources_main\n"
                     "        return sources_main()\n"
                     "    if '--multi-profile' in sys.argv:\n"
-                    "        from dragon_pet_helper import main as multi_main\n"
+                    "        from pet_helper import main as multi_main\n"
                     "        return multi_main()\n")
         pet_entry.write_text(pet_text.replace(marker, dispatch + marker, 1))
     spec = STAGE / 'macos/BailongPet.spec'
@@ -120,10 +128,10 @@ def stage(source, bundle_assets=False, local_test_font=None):
     spec_text = spec_text.replace(
         "'animation_frames', 'dragon_frames', 'dragon_ui', 'dragon_behavior', 'dragon_playback', 'desktop_visibility', 'quota'",
         "'animation_frames', 'dragon_frames', 'dragon_ui', 'dragon_behavior', 'dragon_playback', "
-        "'dragon_instances', 'dragon_instance_ipc', 'dragon_pet_helper', 'pet_reference_lock', 'pet_library', 'pet_sources', 'desktop_visibility', 'quota'")
+        "'pet_ai_bubbles', 'pet_instances', 'pet_instance_ipc', 'pet_helper', 'pet_reference_lock', 'pet_library', 'pet_sources', 'desktop_visibility', 'quota'")
     spec_text = spec_text.replace(
         "datas = [(str(root/'outputs'), 'outputs'),",
-        "datas = ([(str(root/'outputs'), 'outputs')] if __import__('os').environ.get('DRAGON_BUNDLE_PET_ASSETS') == '1' else []) + [")
+        "datas = ([(str(root/'outputs'), 'outputs')] if __import__('os').environ.get('PET_BUNDLE_ASSETS') == '1' else []) + [")
     spec.write_text(spec_text)
     input_spec = spec_from_file_location('pet_build_inputs', ROOT / 'scripts/pet-build-inputs.py')
     inputs = module_from_spec(input_spec); input_spec.loader.exec_module(inputs)
@@ -139,7 +147,7 @@ def stage(source, bundle_assets=False, local_test_font=None):
                     releaseCache=json.loads((STAGE / 'outputs/白龙桌宠素材/dragon-release/catalog.json').read_text()),
                     assetOverlaySHA256=digest(ROOT / 'scripts/extra-animation-overlay.py'),
                     files={p.name: digest(p) for p in sorted(OVERLAY.iterdir()) if p.is_file()})
-    (STAGE / 'DRAGON_PATCH.json').write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + '\n')
+    (STAGE / 'PET_PATCH.json').write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + '\n')
     return metadata
 
 
@@ -149,7 +157,7 @@ def build(source, bundle_assets=False, local_test_font=None):
         raise ValueError('缺少专用构建虚拟环境，参见 docs/桌宠增强与性能构建.md')
     env = os.environ.copy()
     env['PYINSTALLER_CONFIG_DIR'] = str(LOCAL / 'pyinstaller-cache')
-    env['DRAGON_BUNDLE_PET_ASSETS'] = '1' if bundle_assets else '0'
+    env['PET_BUNDLE_ASSETS'] = '1' if bundle_assets else '0'
     if APP.exists():
         archive = LOCAL / 'previous' / time.strftime('%Y%m%d-%H%M%S')
         archive.mkdir(parents=True, exist_ok=False)
@@ -159,8 +167,8 @@ def build(source, bundle_assets=False, local_test_font=None):
                     str(STAGE / 'macos/BailongPet.spec')], env=env, check=True)
     subprocess.run(['/usr/bin/chflags', '-R', 'nohidden', str(APP)], check=True)
     subprocess.run(['/usr/bin/codesign', '--verify', '--deep', '--strict', str(APP)], check=True)
-    if os.environ.get('DRAGON_SKIP_BUILD_CLEANUP') == '1':
-        print('Skipped helper archive cleanup (DRAGON_SKIP_BUILD_CLEANUP=1).')
+    if os.environ.get('PET_SKIP_BUILD_CLEANUP') == '1':
+        print('Skipped helper archive cleanup (PET_SKIP_BUILD_CLEANUP=1).')
     else:
         subprocess.run([sys.executable, str(ROOT/'scripts/clean-builds.py'), '--helper-archives-only'], check=True)
     print(json.dumps({'app': str(APP), 'patch': metadata['patchVersion'], 'launched': False}, ensure_ascii=False))
@@ -181,7 +189,7 @@ def materialize_git_source(source, revision):
         raise ValueError('--source 必须指向 Git 仓库根目录')
     archive = subprocess.run(['git', '-C', str(source), 'archive', '--format=tar', revision],
                              check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout
-    temporary = tempfile.TemporaryDirectory(prefix='dragon-upstream-')
+    temporary = tempfile.TemporaryDirectory(prefix='pet-upstream-')
     try:
         with tarfile.open(fileobj=io.BytesIO(archive), mode='r:') as bundle:
             bundle.extractall(temporary.name)

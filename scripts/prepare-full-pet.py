@@ -73,7 +73,7 @@ def download(workers=12):
     chunk_size = 2 * 1024 * 1024
     count = (SIZE + chunk_size - 1) // chunk_size
     # 只从 GitHub 官方发布地址获取重定向；不使用第三方镜像。
-    request = urllib.request.Request(URL, method='HEAD', headers={'User-Agent':'DragonCompanion-local-integration'})
+    request = urllib.request.Request(URL, method='HEAD', headers={'User-Agent':'PetCompanion-local-integration'})
     with urllib.request.urlopen(request, timeout=30) as response:
         target = response.geturl()
     done = 0
@@ -87,7 +87,7 @@ def download(workers=12):
         for attempt in range(4):
             try:
                 request = urllib.request.Request(target, headers={
-                    'User-Agent':'DragonCompanion-local-integration', 'Range':f'bytes={begin}-{end}',
+                    'User-Agent':'PetCompanion-local-integration', 'Range':f'bytes={begin}-{end}',
                     'Accept-Encoding':'identity'})
                 with urllib.request.urlopen(request, timeout=45) as response:
                     if response.status != 206 or response.headers.get('Content-Range') != f'bytes {begin}-{end}/{SIZE}':
@@ -127,15 +127,16 @@ def inspect_app(app, verify_signature=True, assets_dir=None):
     if info.get('CFBundleIdentifier') != 'local.bailongpet.macos': raise ValueError('不是预期的白龙 Mac 应用')
     build_version = info.get('CFBundleVersion')
     patch_version = None
-    declared_patch = info.get('DragonPatchVersion')
-    if isinstance(declared_patch, str) and declared_patch.startswith('dragon.'):
-        metadata = json.loads((app / 'Contents/Resources/DRAGON_PATCH.json').read_text())
+    declared_patch = info.get('PetPatchVersion')
+    if isinstance(declared_patch, str) and declared_patch.startswith('pet.'):
+        metadata = json.loads((app / 'Contents/Resources/PET_PATCH.json').read_text())
         if (metadata.get('patchVersion') != declared_patch or metadata.get('upstreamVersion') != VERSION or
                 metadata.get('bundleVersion') != str(build_version)):
             raise ValueError('增强版补丁元数据不匹配')
         patch_version = declared_patch
     elif build_version != '3':
-        raise ValueError('当前适配仅验证固定 mac.3 或带匹配来源标记的 Dragon 增强版')
+        raise ValueError(f'helper build {build_version} 缺少当前增强版来源标记 PetPatchVersion / PET_PATCH.json；'
+                         '旧标识不兼容，请先从固定源码带 --local-test-font 重建 helper，再运行 scripts/build.sh --enhanced-pet')
     executable_name = info.get('CFBundleExecutable')
     if not isinstance(executable_name,str) or Path(executable_name).name != executable_name or executable_name in ('.','..'):
         raise ValueError('可执行文件名称无效')
@@ -203,7 +204,7 @@ def self_test(app, assets_dir=None):
     details = inspect_app(app, assets_dir=assets_dir)
     reports = LOCAL / 'reports' / time.strftime('full-pet-%Y%m%d-%H%M%S')
     reports.mkdir(parents=True,exist_ok=False)
-    with tempfile.TemporaryDirectory(prefix='dragon-pet-test-',dir='/tmp') as home:
+    with tempfile.TemporaryDirectory(prefix='pet-window-test-',dir='/tmp') as home:
         env = {'PATH':'/usr/bin:/bin:/usr/sbin:/sbin','HOME':home,'TMPDIR':home,
                'LANG':'zh_CN.UTF-8','QT_QPA_PLATFORM':'offscreen',
                'BAILONG_DATA_DIR':str(reports),'BAILONG_CODEX':'/usr/bin/false'}

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication
 
 from dragon_ui import reduced_motion
 from dragon_playback import release_clip
+from pet_release_physics import DRAG_FRICTION, ReleaseSpring, estimate_release_velocity
 
 
 @dataclass(frozen=True)
@@ -99,158 +100,6 @@ class ClipMotion:
         rise = self.height * math.sin(math.pi * t) ** 2
         return round(self.origin[0] + self.travel * smooth), round(self.origin[1] - rise)
 
-
-@dataclass
-class ReleaseSpring:
-    """屏幕尺度的抛掷轨迹：重力积分、上下边界反弹与逐次能量衰减。"""
-    x: float
-    y: float
-    vx: float
-    vy: float
-    left: float
-    right: float
-    top: float
-    bottom: float
-    gravity: float = 1600.
-    restitution: float = .78
-    settled: bool = False
-    bounces: int = 0
-    top_bounces: int = 0
-    bottom_bounces: int = 0
-    grounded: bool = False
-    elapsed: float = 0.
-    _remainder: float = 0.
-    _finish_at: float | None = None
-    _finish_y: float = 0.
-    _finish_bottom: float = 0.
-
-    STEP = 1. / 240.
-    REST_SPEED = 72.
-    REST_TANGENT = 15.
-    GROUND_FRICTION = 2.5
-    CONTACT_FRICTION = .12
-    DRAG_FRICTION = 4.
-    RESTITUTION = .62
-
-    @classmethod
-    def launch(cls, origin, velocity, bounds):
-        x, y = origin
-        left, top, right, bottom = bounds
-        gravity = 1600.
-        right, bottom = max(left, right), max(top, bottom)
-        return cls(float(x), float(y), max(-1200., min(1200., velocity[0])),
-                   max(-1200., min(1200., velocity[1])),
-                   float(left), float(right), float(top), float(bottom), gravity,
-                   cls.RESTITUTION)
-
-    def apply_contact_friction(self, tangent_velocity, normal_impact):
-        """Bound tangential impulse by the normal impulse at a solid surface."""
-        impulse = self.CONTACT_FRICTION * (1. + self.restitution) * abs(normal_impact)
-        return math.copysign(max(0., abs(tangent_velocity) - impulse), tangent_velocity)
-
-    def advance(self, seconds):
-        if self.settled or seconds <= 0:
-            return
-        remaining = min(float(seconds), 12.) + self._remainder
-        steps = int(remaining / self.STEP)
-        self._remainder = remaining - steps * self.STEP
-        for _ in range(steps):
-            dt = self.STEP
-            self.elapsed += dt
-            if self.elapsed >= 8.:
-                # 兜底在预算内平滑收敛，禁止12秒时从半空直接写到底部。
-                if self._finish_at is None or self._finish_bottom != self.bottom:
-                    self._finish_at = self.elapsed
-                    self._finish_y, self._finish_bottom = self.y, self.bottom
-                u = min(1., (self.elapsed - self._finish_at) / 1.2)
-                eased = u * u * (3. - 2. * u)
-                self.y = self._finish_y + (self.bottom - self._finish_y) * eased
-                self.vy = (self.bottom - self._finish_y) * 6. * u * (1. - u) / 1.2
-                self.vx *= math.exp(-4. * dt)
-                self.x = max(self.left, min(self.right, self.x + self.vx * dt))
-                if u >= 1.:
-                    self.vx = self.vy = 0.
-                    self.settled = True
-                    break
-                continue
-            if self.grounded:
-                self.y = self.bottom
-                self.vy = 0.
-                self.vx *= math.exp(-self.GROUND_FRICTION * dt)
-            else:
-                self.vy += self.gravity * dt
-            self.x += self.vx * dt
-            if not self.grounded:
-                self.y += self.vy * dt
-            if self.x < self.left:
-                self.x = self.left
-                self.vx = abs(self.vx) * self.restitution
-            elif self.x > self.right:
-                self.x = self.right
-                self.vx = -abs(self.vx) * self.restitution
-            if self.y < self.top:
-                self.y = self.top
-                self.vy = abs(self.vy) * self.restitution
-                self.bounces += 1
-                self.top_bounces += 1
-            elif self.y > self.bottom:
-                self.y = self.bottom
-                impact = abs(self.vy)
-                self.vx = self.apply_contact_friction(self.vx, impact)
-                self.bounces += 1
-                self.bottom_bounces += 1
-                if impact * self.restitution < self.REST_SPEED:
-                    self.vy = 0.
-                    self.grounded = True
-                else:
-                    self.vy = -impact * self.restitution
-                    self.grounded = False
-            if self.grounded and abs(self.vx) < self.REST_TANGENT:
-                self.vx = 0.
-                self.settled = True
-            if self.settled:
-                break
-
-    def position(self):
-        return round(self.x), round(self.y)
-
-    def update_bounds(self, bounds):
-        """Adapt a live trajectory to screen/work-area changes without teleporting."""
-        left, top, right, bottom = map(float, bounds)
-        right = max(left, right)
-        bottom = max(top, bottom)
-        self.left, self.right, self.top, self.bottom = left, right, top, bottom
-        # Dock 隐藏或切换屏幕后地面下移，不能在旧地面悬停。
-        if self.settled and self.y < bottom:
-            self.settled = False
-            self.vy = 0.
-            self.grounded = False
-        elif self.grounded and self.y < bottom:
-            self.grounded = False
-            self.vy = 0.
-        if self.x < left:
-            self.x = left
-            self.vx = abs(self.vx) * self.restitution
-        elif self.x > right:
-            self.x = right
-            self.vx = -abs(self.vx) * self.restitution
-        if self.y < top:
-            self.y = top
-            self.vy = abs(self.vy) * self.restitution
-            self.bounces += 1
-            self.top_bounces += 1
-        elif self.y > bottom:
-            self.y = bottom
-            impact = abs(self.vy)
-            self.bounces += 1
-            self.bottom_bounces += 1
-            self.vx = self.apply_contact_friction(self.vx, impact)
-            if impact * self.restitution < self.REST_SPEED:
-                self.vy = 0.
-                self.grounded = True
-            else:
-                self.vy = -impact * self.restitution
-                self.grounded = False
 
 
 class AutonomousBehavior:
@@ -559,7 +408,7 @@ class AutonomousBehavior:
                 choices = [text for text in self.IDLE_GREETINGS if text != self.last_greeting]
                 text = self.rng.choice(choices or self.IDLE_GREETINGS)
                 self.last_greeting = text
-                self.pet.say(text, ms=4500)
+                self.pet.say(self._choose_idle_line(text), ms=4500)
                 self.next_greeting_at = now + self.rng.uniform(*self.GREETING_REPEAT_DELAY)
             else:
                 self.next_greeting_at = now + self.rng.uniform(15., 25.)
@@ -600,6 +449,17 @@ class AutonomousBehavior:
                     return True
         return self.perform_action(preview=preview)
 
+    def _choose_idle_line(self, line, *, scheduled=False):
+        # 仅审核过的通用陪伴文案可替换；动作说明/完成宣告必须保持原文。
+        generic = self.IDLE_GREETINGS + (
+            '主人来啦！今天也一起把小事做好吧。',
+            '今日份喜欢，已经送到主人的桌面啦。',
+        )
+        client = getattr(self.pet, 'ai_bubbles', None)
+        if client is None or (scheduled and line not in generic):
+            return line
+        return client.choose('idle', line)
+
     def _perform_action_unchecked(self):
         previous = self.pet.current.get('id') if self.pet.current else None
         item = self.next_action(previous)
@@ -610,7 +470,7 @@ class AutonomousBehavior:
         # 自主调度动作也沿用互动气泡语音开关；没有台词的素材只播放动画。
         line = item.get('line', '')
         if not getattr(self, '_suppress_scheduled_speech', False) and line:
-            self.pet.say(line, ms=4000)
+            self.pet.say(self._choose_idle_line(line, scheduled=True), ms=4000)
         return True
 
     def _perform_action(self, *, preview=False):
@@ -748,7 +608,7 @@ class AutonomousBehavior:
         pause = now - end
         if pause >= self.DRAG_STOP_INTERVAL:
             return 0., 0.
-        decay = math.exp(-ReleaseSpring.DRAG_FRICTION * pause)
+        decay = math.exp(-DRAG_FRICTION * pause)
         return slope(1) * decay, slope(2) * decay
 
     def drag_animation(self):
@@ -805,7 +665,12 @@ class AutonomousBehavior:
             return False
         now = self.clock()
         samples = [sample for sample in self.drag_samples if 0 <= now - sample[0] <= .15]
-        vx, vy = self.drag_velocity(.15, now)
+        velocity = estimate_release_velocity(
+            self.drag_samples, now, min_speed=self.RELEASE_MIN_SPEED,
+            stale_after=self.DRAG_STOP_INTERVAL)
+        if velocity is None:
+            return False
+        vx, vy = velocity
         distance = self.drag_distance
         if distance == 0. and len(samples) >= 2:
             distance = math.hypot(samples[-1][1] - samples[0][1],

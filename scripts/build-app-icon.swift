@@ -143,27 +143,17 @@ struct Shape {
     }
 }
 
-// “伴星窗口”：App 产品标识，不是白龙角色头像。不含官方平台标志、聊天入口或角色素材。
+// “角语”：用户选择的 B 方案，双角外轮廓与中央对话菱形。
+// 将原 64pt SVG 的坐标统一映射为 x = 64 + 14x、y = 50 + 14y，保持左右对称。
 let shapes: [Shape] = [
-    // 柔白外框包住青蓝—粉紫渐层，呼应截图的配色而非镜头图形。
     Shape(.box(CGRect(x: 64, y: 64, width: 896, height: 896), 200), "pearl"),
     Shape(.box(CGRect(x: 66, y: 66, width: 892, height: 892), 198), stroke: "#E0E2EF", width: 2),
     Shape(.box(CGRect(x: 144, y: 144, width: 736, height: 736), 142), "sky"),
     Shape(.box(CGRect(x: 144, y: 144, width: 736, height: 736), 142), "cyanGlow"),
     Shape(.box(CGRect(x: 144, y: 144, width: 736, height: 736), 142), "peachGlow"),
     Shape(.box(CGRect(x: 144, y: 144, width: 736, height: 736), 142), "lilacGlow"),
-    // 紫灰窗口在明亮背景上仍能被辨认；白色伴星保持主视觉。
-    Shape(.box(CGRect(x: 224, y: 328, width: 576, height: 400), 86), "#5D5594", opacity: 0.14),
-    Shape(.box(CGRect(x: 224, y: 302, width: 576, height: 400), 86), "#FFFFFF", opacity: 0.18),
-    Shape(.box(CGRect(x: 224, y: 302, width: 576, height: 400), 86), stroke: "#49446E", width: 42),
-    Shape(.path("M 250 406 L 394 406"), stroke: "#49446E", width: 18, opacity: 0.65),
-    Shape(.box(CGRect(x: 408, y: 764, width: 208, height: 36), 18), "#49446E"),
-    // 四瓣圆润伴星从窗口边缘探出；不同于动物头部、月牙或平台商标。
-    Shape(.path("M 575 267 C 595 267 605 284 614 319 L 645 423 L 749 454 C 784 463 801 473 801 493 C 801 513 784 523 749 532 L 645 563 L 614 667 C 605 702 595 719 575 719 C 555 719 545 702 536 667 L 505 563 L 401 532 C 366 523 349 513 349 493 C 349 473 366 463 401 454 L 505 423 L 536 319 C 545 284 555 267 575 267 Z"), "#5F5192", opacity: 0.22),
-    Shape(.path("M 575 247 C 591 247 600 263 609 295 L 640 403 L 748 434 C 780 443 796 452 796 468 C 796 484 780 493 748 502 L 640 533 L 609 641 C 600 673 591 689 575 689 C 559 689 550 673 541 641 L 510 533 L 402 502 C 370 493 354 484 354 468 C 354 452 370 443 402 434 L 510 403 L 541 295 C 550 263 559 247 575 247 Z"), "starlight"),
-    // 以一个小暖色伴星表现多实例，不使用眼睛/聊天气泡或具体动物特征。
-    Shape(.oval(CGRect(x: 737, y: 219, width: 84, height: 84)), "#64568F", opacity: 0.18),
-    Shape(.oval(CGRect(x: 737, y: 205, width: 84, height: 84)), "#FFF2CD"),
+    Shape(.path("M 218 218 L 470 358 L 414 456 L 316 400 L 344 582 L 512 680 L 680 582 L 708 400 L 610 456 L 554 358 L 806 218 L 778 638 L 512 806 L 246 638 L 218 218 Z"), "starlight"),
+    Shape(.path("M 414 526 L 512 582 L 610 526 L 512 470 L 414 526 Z"), "#FFF2CD"),
 ]
 
 func png(side: Int) -> Data {
@@ -194,8 +184,8 @@ func main() throws {
     let defs = "<defs>\n" + gradients.keys.sorted().map { gradients[$0]!.svg(id: $0) }.joined(separator: "\n") + "\n</defs>"
     let svg = """
     <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
-    <title id="title">Anime Desktop Pets — 伴星窗口</title>
-    <desc id="desc">柔白圆角外框、青蓝粉紫渐层、紫灰桌面窗口、白色伴星与奶油色卫星。不代表白龙或官方 AI 平台。</desc>
+    <title id="title">桌边小崽 — 角语</title>
+    <desc id="desc">柔白圆角底座、青蓝粉紫渐层、对称的柔白双角折线与奶油色对话菱形。桌边小崽独立应用标识。</desc>
     \(defs)
     \(shapes.map(\.svg).joined(separator: "\n"))
     </svg>

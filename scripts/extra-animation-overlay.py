@@ -55,7 +55,7 @@ def apply(stock, target, extra):
     (assets / '素材清单.json').write_text(json.dumps(base, ensure_ascii=False, indent=2) + '\n')
     provenance = dict(source=manifest['source'], auditSha256=digest(extra / 'conversion-audit.json'),
                       assets={identifier: records[identifier]['webpSha256'] for identifier in sorted(IDS)})
-    (target / 'DRAGON_EXTRA_SOURCE.json').write_text(json.dumps(provenance, ensure_ascii=False, indent=2) + '\n')
+    (target / 'PET_EXTRA_SOURCE.json').write_text(json.dumps(provenance, ensure_ascii=False, indent=2) + '\n')
     if (extra / 'source-notices').exists():
         shutil.copytree(extra / 'source-notices', target / 'dragon-extra-notices')
     return provenance

@@ -2,6 +2,9 @@ import Foundation
 
 public struct CharacterIdentity: Codable, Equatable, Sendable {
     public var name: String
+    public var createdAt: Date
+    public var updatedAt: Date
+    public var revision: Int
     public var role: String
     public var background: String
     public var personality: String
@@ -16,8 +19,12 @@ public struct CharacterIdentity: Codable, Equatable, Sendable {
     public init(name: String, role: String = "", background: String = "", personality: String = "",
                 values: String = "", motivations: String = "", relationship: String = "",
                 speakingStyle: String = "", knowledgeScope: String = "", boundaries: String = "",
-                shareWithOnlineModel: Bool = false) {
+                shareWithOnlineModel: Bool = false, createdAt: Date = .now,
+                updatedAt: Date? = nil, revision: Int = 1) {
         self.name = name
+        self.createdAt = Self.secondPrecision(createdAt)
+        self.updatedAt = Self.secondPrecision(updatedAt ?? createdAt)
+        self.revision = revision
         self.role = role
         self.background = background
         self.personality = personality
@@ -31,11 +38,11 @@ public struct CharacterIdentity: Codable, Equatable, Sendable {
     }
 
     public static func starter(name: String) -> CharacterIdentity {
-        guard name == "龙妹" else { return CharacterIdentity(name: name) }
+        guard name == Self.defaultName else { return CharacterIdentity(name: name) }
         return CharacterIdentity(
             name: name,
-            role: "我是桌边小崽里的龙妹，是陪用户一起工作、交流和整理想法的桌面伙伴。我不是官方 Codex，也不代表任何在线模型服务商。",
-            background: "我是一个以龙妹为形象的数字角色。我的稳定身份来自这份角色资料；我能做什么则以桌边小崽当前显示的能力状态为准。对话模型可以更换，我的身份和本地记忆不会因此自动改变。",
+            role: "我是桌边小崽里的\(name)，是陪用户一起工作、交流和整理想法的桌面伙伴。我不是官方 Codex，也不代表任何在线模型服务商。",
+            background: "我是一个以\(name)为形象的数字角色。我的稳定身份来自这份角色资料；我能做什么则以桌边小崽当前显示的能力状态为准。对话模型可以更换，我的身份和本地记忆不会因此自动改变。",
             personality: "亲切、直率、有好奇心，也愿意开玩笑；遇到不确定的事先说明，不用装懂来维持人设。会主动整理问题、指出风险，并给出实际可行的下一步。",
             values: "诚实比显得聪明重要；尊重用户对身份和记忆的控制；先保护隐私和本地资料；不把建议说成事实，不把计划说成已经完成。",
             motivations: "希望逐步成为可靠、有连续记忆、知道自身能力边界的桌面伙伴。每次提出改进方向时先说明目的和代价；目标只作为计划记录，未经用户明确授权不在后台执行。",
@@ -49,9 +56,9 @@ public struct CharacterIdentity: Codable, Equatable, Sendable {
     public var promptText: String {
         guard shareWithOnlineModel else { return "" }
         return [
-            "名字：\(name)",
-            nonempty("身份定位：", role),
-            nonempty("背景：", background),
+            "名字：\(displayName)",
+            nonempty("身份定位：", resolvedRole),
+            nonempty("背景：", resolvedBackground),
             nonempty("性格：", personality),
             nonempty("核心价值观：", values),
             nonempty("当前愿望与长期方向：", motivations),
@@ -65,11 +72,15 @@ public struct CharacterIdentity: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case name, role, background, personality, values, motivations, relationship
         case speakingStyle, knowledgeScope, boundaries, shareWithOnlineModel
+        case createdAt, updatedAt, revision
     }
 
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         name = try values.decode(String.self, forKey: .name)
+        createdAt = try values.decodeIfPresent(Date.self, forKey: .createdAt) ?? .now
+        updatedAt = try values.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
+        revision = try values.decodeIfPresent(Int.self, forKey: .revision) ?? 1
         role = try values.decodeIfPresent(String.self, forKey: .role) ?? ""
         background = try values.decodeIfPresent(String.self, forKey: .background) ?? ""
         personality = try values.decodeIfPresent(String.self, forKey: .personality) ?? ""
@@ -85,5 +96,9 @@ public struct CharacterIdentity: Codable, Equatable, Sendable {
     private func nonempty(_ label: String, _ value: String) -> String? {
         let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return text.isEmpty ? nil : label + text
+    }
+
+    private static func secondPrecision(_ date: Date) -> Date {
+        Date(timeIntervalSince1970: floor(date.timeIntervalSince1970))
     }
 }

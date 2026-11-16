@@ -29,10 +29,14 @@ public struct CharacterWorkspaceView: View {
     public init(store: CharacterMemoryStore, defaultName: String,
                 capabilities: [CharacterCapability],
                 suggestGoal: ((String, String) async throws -> CharacterGoalDraft)? = nil,
-                chat: ((String, [CharacterChatTurn]) async throws -> String)? = nil,
+                chat: ((String, [CharacterChatTurn], CharacterChatModelSelection?) async throws -> String)? = nil,
+                reviewMemories: (([CharacterChatTurn], CharacterChatModelSelection?) async throws -> [CharacterMemorySuggestion])? = nil,
+                chatModels: (() throws -> CharacterChatModelCatalog?)? = nil,
+                discoverChatModels: ((String) async throws -> CharacterChatModelCatalog)? = nil,
                 navigation: CharacterWorkspaceNavigation? = nil) {
         _model = StateObject(wrappedValue: CharacterWorkspaceModel(store: store, defaultName: defaultName,
-                                                                   suggestGoal: suggestGoal, chat: chat))
+                                                                   suggestGoal: suggestGoal, chat: chat, reviewMemories: reviewMemories, chatModels: chatModels,
+                                                                   discoverChatModels: discoverChatModels))
         _navigation = ObservedObject(wrappedValue: navigation ?? CharacterWorkspaceNavigation())
         self.capabilities = capabilities
     }

@@ -34,7 +34,7 @@ def main():
     if not 2 <= args.switches <= 20 or not .5 <= args.interval <= 10:
         parser.error('switches must be 2–20 and interval must be 0.5–10 seconds')
 
-    with tempfile.TemporaryDirectory(prefix='dragon-multi-bench-') as home:
+    with tempfile.TemporaryDirectory(prefix='pet-multi-bench-') as home:
         os.environ.update(HOME=home, BAILONG_DATA_DIR=home, QT_QPA_PLATFORM='offscreen',
                           BAILONG_CODEX='/usr/bin/false')
         sys.path.insert(0, str(ROOT / 'apps/pet-runtime/bailong'))

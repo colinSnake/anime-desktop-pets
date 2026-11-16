@@ -11,7 +11,7 @@ class VisibilityControl(QObject):
     def __init__(self, pet):
         super().__init__(pet)
         self.pet = pet
-        self.path = Path(QDir.tempPath()) / f'dragon-pet-{os.getuid()}-{os.getpid()}.sock'
+        self.path = Path(QDir.tempPath()) / f'pet-window-{os.getuid()}-{os.getpid()}.sock'
         self.server = QLocalServer(self)
         self.server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
         self.server.setMaxPendingConnections(8)
@@ -82,5 +82,5 @@ class VisibilityControl(QObject):
 def attach_visibility_control(pet):
     # Multi-pet Adapter has a separate typed controller. The dedicated endpoint
     # is enabled only by a host launching a supported single-pet helper.
-    if os.environ.get('DRAGON_WINDOW_CONTROL') != '1': return None
+    if os.environ.get('PET_WINDOW_CONTROL') != '1': return None
     return VisibilityControl(pet)

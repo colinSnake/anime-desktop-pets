@@ -169,7 +169,7 @@ def prepare(paths, library, builtin=None):
             path = Path(value).expanduser()
             require(not path.is_symlink(), '桌宠路径不能是链接')
             if builtin and path.resolve() == builtin:
-                from dragon_instances import asset_identity
+                from pet_instances import asset_identity
                 result = asset_identity(builtin)
             else:
                 result = import_source(path, library)

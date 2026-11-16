@@ -6,7 +6,14 @@
 
 构建与验证流程见 `docs/桌宠增强与性能构建.md`（仓库根目录）。上游版权和素材授权声明保持原样。
 
+2026-11-14命名迁移：当前源码使用 `pet.44` / build38、`PET_PATCH.json` 和 `PetPatchVersion`；通用多宠模块为 `pet_instances`、`pet_instance_ipc`、`pet_helper`。不提供旧标识兼容入口，必须重建helper后再构建宿主；角色层 `dragon_*.py` 仍保留。下文版本名为历史记录，不改写。
+
 `apps/pet-runtime/bailong/dragon_behavior.py` 负责低频动作决策、可中断轨迹和拖拽松手动量，复用播放器 tick；不读取 Codex 数据。
+
+松手估速和抛体积分现委托 `apps/pet-runtime/bailong/pet_release_physics.py`，改编自
+`dsh-pet` 提交 `8ad3d957f83052d332f0d0f09e90993e9756d2ec` 的纯物理算法。
+`dsh-pet-LICENSE.txt` 保留原 MIT 版权声明；构建时复制进 helper 的 `licenses/`，并追加第三方说明。
+模块和声明均纳入构建输入指纹。本轮源码调整尚未打包或安装，已运行的 helper 不会自动更新。
 
 0.6.11 / `dragon.22`：拖拽释放需同时达到 24px 位移和 280px/s 合速度才触发弹跳/抛掷；普通轻拖停在放手位置。拖动姿态判断限制为每 50ms 一次，降低高频鼠标事件下的重复计算。
 

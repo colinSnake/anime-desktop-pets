@@ -11,18 +11,24 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-HOME = tempfile.TemporaryDirectory(prefix='dragon-real-adapter-')
-os.environ.update(HOME=HOME.name, BAILONG_DATA_DIR=HOME.name, QT_QPA_PLATFORM='offscreen', BAILONG_CODEX='/usr/bin/false')
+HOME = tempfile.TemporaryDirectory(prefix='pet-real-adapter-')
+# 导入真实Pet之前清除调用方的任务/素材入口，具体用例需要时只在局部设置合成路径。
+for key in ('PET_TASK_LEASE', 'BAILONG_PET_LIBRARY_DIR', 'BAILONG_ASSETS_DIR'):
+    os.environ.pop(key, None)
+os.environ.update(HOME=HOME.name, BAILONG_DATA_DIR=HOME.name,
+                  CODEX_HOME=str(Path(HOME.name) / 'synthetic-codex'),
+                  QT_QPA_PLATFORM='offscreen', QT_STYLE_OVERRIDE='Fusion', BAILONG_CODEX='/usr/bin/false')
 sys.path[:0] = [str(ROOT / 'apps/pet-runtime/pets'), str(ROOT / 'apps/pet-runtime/bailong'), str(ROOT / '.local/pet-build/generated-source/app')]
 from PIL import Image
 from PySide6.QtCore import QCoreApplication, QEvent, QTimer, QPoint, QPointF, Qt
 from PySide6.QtWidgets import QApplication, QLabel
-from dragon_instances import InstanceController, InstanceStore
-from dragon_pet_helper import _factory
+from pet_instances import InstanceController, InstanceStore
+from pet_helper import _factory
 import pet
 import dragon_ui
 
 APP = QApplication.instance() or QApplication([])
+APP.setStyle('Fusion')
 APP.setQuitOnLastWindowClosed(False)
 dragon_ui._MESSAGE_FONT_CHECKED = True
 dragon_ui._MESSAGE_FONT_FAMILY = 'SSRuanTangTi'
@@ -457,7 +463,7 @@ class RealAdapterTests(unittest.TestCase):
                            '{"type":"event_msg","payload":{"type":"task_started","turn_id":"test"}}\n')
         monitor = None
         try:
-            with patch.dict(os.environ, DRAGON_TASK_LEASE=str(lease), CODEX_HOME=str(self.root / 'codex')):
+            with patch.dict(os.environ, PET_TASK_LEASE=str(lease), CODEX_HOME=str(self.root / 'codex')):
                 first = self.start()
                 monitor = attach_task_follower(first)
                 with patch.object(first.behavior, 'motion_reduced', return_value=False):
@@ -475,7 +481,7 @@ class RealAdapterTests(unittest.TestCase):
                 monitor.close()
                 # Await only this bounded fixture worker before deleting its files.
                 monitor.executor.shutdown(wait=True)
-                del APP._dragon_task_monitor
+                del APP._pet_task_monitor
 
     def test_real_first_frame_ready_and_instance_settings_are_isolated(self):
         first = self.start(); second = self.start('second')
@@ -585,6 +591,38 @@ class RealAdapterTests(unittest.TestCase):
                             Qt.KeyboardModifier.NoModifier)
         window.mouseReleaseEvent(release)
         return initial_sample
+
+    def test_diagonal_qt_flick_uses_soft_speed_and_keeps_task_gate(self):
+        from PySide6.QtGui import QMouseEvent
+        window = self.start()
+        window.manifest['movementAnimations'] = [dict(window.idles[0], id='move03',
+            sourceFacing='right', moveStartMs=0, moveStopMs=250)]
+        area = APP.primaryScreen().availableGeometry()
+        window.move(area.center()-QPoint(window.width()//2, window.height()//2))
+        now = [100.]
+        window.behavior.clock = lambda: now[0]
+        window.task_active = True
+        local = QPointF(20, 20)
+        global_pos = QPointF(window.pos()+QPoint(20, 20))
+        window.mousePressEvent(QMouseEvent(QEvent.Type.MouseButtonPress, local, global_pos,
+            Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+        now[0] += .1
+        delta = QPointF(60, -80)
+        window.mouseMoveEvent(QMouseEvent(QEvent.Type.MouseMove, local+delta, global_pos+delta,
+            Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+        window.mouseReleaseEvent(QMouseEvent(QEvent.Type.MouseButtonRelease, local+delta, global_pos+delta,
+            Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
+        spring = window.behavior.release_spring
+        self.assertIsNotNone(spring)
+        self.assertAlmostEqual(spring.vx, 523.8753226625524, places=5)
+        self.assertAlmostEqual(spring.vy, -698.5004302167367, places=5)
+        self.assertTrue(window.task_active)
+        position = spring.position()
+        now[0] += .05
+        window.behavior.tick()
+        self.assertIs(window.behavior.release_spring, spring)
+        self.assertNotEqual(spring.position(), position)
+        self.assertTrue(window.task_active)
 
     def test_release_position_save_does_not_cancel_flick_or_reset_pose_clock(self):
         window=self.start()

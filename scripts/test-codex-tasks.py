@@ -24,7 +24,7 @@ def meta(source='vscode'):
 
 class TaskReaderTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix='dragon-task-fixture-')
+        self.tmp = tempfile.TemporaryDirectory(prefix='pet-task-fixture-')
         self.home = Path(self.tmp.name)
         self.now = 1793664000.
         self.reader = RolloutReader(self.home, lambda: self.now)

@@ -1,6 +1,6 @@
 --- a/app/pet.py
 +++ b/app/pet.py
-@@ -7,10 +7,16 @@
+@@ -7,10 +7,17 @@
  from PySide6.QtGui import QImage, QPixmap, QPainter, QRegion, QCursor, QIcon
  from PySide6.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QProgressBar, QMenu, QMessageBox, QProgressDialog, QPushButton, QSystemTrayIcon, QTextBrowser
  from PySide6.QtNetwork import QLocalServer, QLocalSocket
@@ -15,11 +15,12 @@
 +from dragon_visibility import attach_visibility_control
 +from dragon_tasks import attach_task_follower, show_work_feedback
 +from dragon_speech import SpeechCueClient
++from pet_ai_bubbles import PetAIBubbleClient
 +from dragon_playback import PresentationClock, pose_pixmap, pose_bridge, blend_pose, transition_profile, calibrate_flight_sizes, canvas_padding
  
  ROOT=resource_root()
  STATE=data_root()
-@@ -33,7 +37,7 @@
+@@ -33,7 +40,7 @@
          try: self.ready.emit(quota_windows(read_quota(cancel=self.cancel)))
          except Exception as error: self.failed.emit(str(error))
  
@@ -28,7 +29,7 @@
      def __init__(self):
          super().__init__(None, FLAGS)
          self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-@@ -89,26 +93,34 @@
+@@ -89,26 +96,35 @@
          self.adjustSize();self.show()
  
  class Pet(QWidget):
@@ -53,6 +54,7 @@
 +        self.presentation=None;self.bridge_source=None;self.pose_bridge=None;self.displayed_canvas=None
 +        self.pose_bridge_ready=False
 +        self.speech_cue=SpeechCueClient()
++        self.ai_bubbles=PetAIBubbleClient()
 -        self.bubble=Bubble();self.generation=0;self.worker=None;self.quota_inflight=False;self.dragging=False;self.last_click=None
 +        self.bubble=Bubble();self.bubble.speech_callback=self.speak_bubble;self.generation=0;self.worker=None;self.quota_inflight=False;self.dragging=False;self.last_click=None
 -        self.chat=None
@@ -70,7 +72,7 @@
          self.work_slots=self.manifest.get('workAnimations',[])[:6]
          self.click_timer=QTimer(self);self.click_timer.setTimerType(Qt.TimerType.PreciseTimer);self.click_timer.setSingleShot(True);self.click_timer.setInterval(250);self.click_timer.timeout.connect(self.single_click)
          self.bubble_timer=QTimer(self);self.bubble_timer.setSingleShot(True);self.bubble_timer.timeout.connect(self.dismiss_bubble)
-@@ -117,7 +128,7 @@
+@@ -117,7 +133,7 @@
          self.move(self.constrained_position(QPoint(area.right()-360,area.bottom()-340)))
          for screen in QApplication.screens():self.watch_screen(screen)
          QApplication.instance().screenAdded.connect(self.watch_screen)
@@ -79,7 +81,7 @@
          self.idle()
          # On macOS, pin lightweight animation handles while frames share a bounded
          # cache. Other platforms keep the original preloading behavior.
-@@ -140,13 +151,15 @@
+@@ -140,13 +156,15 @@
          self.visibility_timer=QTimer(self);self.visibility_timer.setInterval(500)
          self.visibility_timer.timeout.connect(self.check_fullscreen)
          if QApplication.platformName()!='offscreen':self.visibility_timer.start()
@@ -96,7 +98,7 @@
          self.setWindowIcon(icon)
          self.tray=QSystemTrayIcon(icon,self);self.tray.setToolTip('GPT白龙娘桌宠')
          self.tray_menu=self.context_menu();self.tray.setContextMenu(self.tray_menu)
-@@ -154,6 +166,7 @@
+@@ -154,6 +172,7 @@
          self.tray.activated.connect(self.tray_activated)
          if QSystemTrayIcon.isSystemTrayAvailable():self.tray.show()
      def refresh_tray_menu(self):
@@ -104,7 +106,7 @@
          # Rebuild through the same factory used by the pet's right-click menu.
          fresh=self.context_menu()
          self.tray_menu.clear()
-@@ -174,10 +187,6 @@
+@@ -174,10 +193,6 @@
 -        if self.speech_hidden() and not getattr(self.bubble,'is_task_progress',False) and self.bubble.isVisible():self.bubble.hide()
 +        if self.speech_hidden() and not getattr(self.bubble,'is_task_progress',False) and not getattr(self.bubble,'is_followed_work',False) and not getattr(self.bubble,'is_speech_reply',False) and self.bubble.isVisible():self.bubble.hide()
          if self.dialogue_hidden():
@@ -116,7 +118,7 @@
      def set_auto_hide_fullscreen(self,enabled):
          self.auto_hide_fullscreen=enabled
          self.settings.setValue('autoHideFullscreen',enabled)
-@@ -188,14 +197,15 @@
+@@ -188,14 +203,15 @@
              self.say('主人，托盘暂时没准备好，我先留在这里陪你。');return
          self.manual_hidden=hidden;self.apply_visibility()
      def apply_visibility(self):
@@ -133,7 +135,7 @@
              self.ensure_on_screen();self.show();self.tick.start()
              self.sync_dialogue_visibility()
          if hasattr(self,'tray'):
-@@ -211,7 +221,6 @@
+@@ -211,7 +227,6 @@
              self.fullscreen_hidden=state;self.apply_visibility()
          if self.desktop_hidden():
              self.bubble.hide()
@@ -141,7 +143,7 @@
          self.sync_dialogue_visibility()
      def constrained_position(self,position,pointer=None):
          screens=QApplication.screens()
-@@ -219,27 +228,26 @@
+@@ -219,27 +234,26 @@
          # contain empty gaps or permit half the pet to hang off a monitor.
          screen=QApplication.screenAt(pointer) if pointer is not None else None
          def constrain(area):
@@ -177,7 +179,7 @@
      def asset_path(self,item):
          # Optional playbackFile allows future formats without changing the manifest's video source.
          return ASSETS/(item.get('playbackFile') or item['file'].replace('.webm','.webp'))
-@@ -275,11 +283,28 @@
+@@ -275,11 +289,28 @@
          self.cache[key]=frames
          while len(self.cache)>2:self.cache.popitem(last=False)
          return frames
@@ -208,7 +210,7 @@
      def idle(self):
          if self.task_active:
              work=self.regular_work_animations()
-@@ -292,7 +316,8 @@
+@@ -292,7 +323,8 @@
              self.last_task_group=mode
              self.play(random.choice(pool),mode)
              return
@@ -218,7 +220,7 @@
          self.play(item,'idle')
      def regular_work_animations(self):
          return [v for v in self.work_slots if v and v['id']!='work01' and self.asset_path(v).is_file()]
-@@ -316,38 +341,82 @@
+@@ -316,38 +348,82 @@
          # dither the soft character edges and damage transparent rendering.
          self.update()
      def animate(self):
@@ -320,7 +322,7 @@
          width,height=self.bubble.width(),self.bubble.height();gap=12
          if not getattr(self.bubble,'is_quota_result',False):
              x=max(area.left(),min(pet.center().x()-width//2,area.right()-width+1))
-@@ -366,9 +435,6 @@
+@@ -366,9 +442,6 @@
              y=max(area.top(),min(y,area.bottom()-height+1))
              overlap=pet.intersected(QRect(x,y,width,height))
              score=max(0,overlap.width())*max(0,overlap.height())
@@ -330,7 +332,7 @@
              positions.append((score,x,y))
          _,x,y=min(positions,key=lambda item:item[0]);self.bubble.move(x,y)
      def say(self,text,ms=4000):
-@@ -388,7 +454,7 @@
+@@ -388,7 +461,7 @@
          if getattr(self.bubble,'is_task_progress',False) and self.bubble.isVisible():
              view=self.bubble.result_view;bar=view.verticalScrollBar()
              bottom=bar.value()>=bar.maximum()-8;old=bar.value()
@@ -339,7 +341,7 @@
              bar.setValue(bar.maximum() if bottom else min(old,bar.maximum()))
          else:
              self.bubble.task_result(title,text,details);self.bubble.is_task_progress=True
-@@ -399,22 +465,8 @@
+@@ -399,22 +472,8 @@
          if celebration:self.play(celebration,'task-celebration')
          # Play directly so the celebration's interaction line is never shown.
          self.task_result('主人，完成啦！',text,details)
@@ -363,7 +365,7 @@
          action=menu.addAction('显示桌宠' if self.manual_hidden or self.fullscreen_hidden else '隐藏桌宠')
          action.triggered.connect(lambda checked=False:self.set_manual_hidden(not self.manual_hidden if not self.fullscreen_hidden else False))
          if self.fullscreen_hidden:
-@@ -422,25 +474,74 @@
+@@ -422,25 +481,74 @@
          menu.addSeparator()
          automatic=menu.addAction('全屏时自动隐藏');automatic.setCheckable(True)
          automatic.setChecked(self.auto_hide_fullscreen);automatic.toggled.connect(self.set_auto_hide_fullscreen)
@@ -448,7 +450,7 @@
      def preview_idle(self,item):
          self.click_timer.stop();self.last_click=None;self.generation+=1;self.play(item,'idle')
      def play_click_sound(self):
-@@ -483,15 +583,18 @@
+@@ -483,15 +591,18 @@
          self.quota_inflight=False
          if self.speech_hidden():return
          if self.quota_generation!=self.generation:return
@@ -469,7 +471,7 @@
              self.press_pos=event.globalPosition().toPoint();self.origin=self.pos();self.dragging=False
      def mouseDoubleClickEvent(self,event):
          # Qt may emit this before mousePressEvent for the second physical press.
-@@ -502,24 +605,25 @@
+@@ -502,24 +613,26 @@
              if delta.manhattanLength()>8 and not self.dragging:
                  self.dragging=True;self.click_timer.stop();self.last_click=None;self.generation+=1
                  self.bubble_timer.stop();self.bubble.hide()
@@ -496,13 +498,14 @@
          else:self.last_click=now;self.click_timer.start()
      def closeEvent(self,event):
 +        self.speech_cue.close()
++        self.ai_bubbles.close()
 -        if self.chat and not self.chat.shutdown():
 -            event.ignore();QTimer.singleShot(500,self.close);return
 +        self.behavior.close()
          self.tick.stop();self.visibility_timer.stop();self.tray.hide();self.bubble.close()
          if self.frame_store:self.frame_store.close()
          if self.worker and self.worker.isRunning():self.worker.cancel.set();self.worker.wait(3000)
-@@ -577,7 +680,7 @@
+@@ -577,7 +690,7 @@
                  from desktop_visibility import mac_window_status
                  native_status=mac_window_status(int(pet.winId()))
                  native_visible=native_status.get('isVisible',native_visible)

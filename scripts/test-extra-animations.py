@@ -155,7 +155,7 @@ class OverlayChecks(unittest.TestCase):
         self.assertEqual(merged['variants'], self.base['variants'])
         self.assertEqual(len(list((self.target / '白龙桌宠素材/dragon-extra').glob('*.webp'))), 10)
         self.assertEqual((self.target / 'retained.txt').read_text(), 'stock preserved')
-        self.assertTrue((self.target / 'DRAGON_EXTRA_SOURCE.json').is_file())
+        self.assertTrue((self.target / 'PET_EXTRA_SOURCE.json').is_file())
 
     def test_corrupt_file_rejected_before_copy(self):
         (self.extra / 'idle03.webp').write_bytes(b'bad')

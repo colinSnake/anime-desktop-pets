@@ -8,7 +8,7 @@ import plistlib
 import time
 
 APP_NAME = '桌边小崽.app'
-BUNDLE_ID = 'local.dragon.codex-companion'
+BUNDLE_ID = 'local.anime-desktop-pets.companion'
 
 
 def require_owned(path):

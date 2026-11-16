@@ -12,13 +12,13 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-HOME = tempfile.TemporaryDirectory(prefix='dragon-multipet-home-')
+HOME = tempfile.TemporaryDirectory(prefix='pet-multipet-home-')
 os.environ.update(HOME=HOME.name, BAILONG_DATA_DIR=HOME.name, QT_QPA_PLATFORM='offscreen', BAILONG_CODEX='/usr/bin/false')
 sys.path[:0] = [str(ROOT / 'apps/pet-runtime/pets'), str(ROOT / 'apps/pet-runtime/bailong')]
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, QTimer, Signal
 from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QApplication, QWidget
-from dragon_instances import InstanceController, InstanceError, InstanceStore, preferences, validate_registry
+from pet_instances import InstanceController, InstanceError, InstanceStore, preferences, validate_registry
 from pet_reference_lock import ReferenceLockError, reference_lock
 
 APP = QApplication.instance() or QApplication([])
@@ -236,7 +236,7 @@ class StoreChecks(unittest.TestCase):
     def test_same_lock_rejected_by_real_second_process(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = InstanceStore(tmp)
-            code = 'from dragon_instances import InstanceStore; import sys; InstanceStore(sys.argv[1])'
+            code = 'from pet_instances import InstanceStore; import sys; InstanceStore(sys.argv[1])'
             try:
                 result = subprocess.run([sys.executable, '-c', code, tmp], env=dict(os.environ, PYTHONPATH=str(ROOT / 'apps/pet-runtime/pets')),
                                         capture_output=True, text=True, timeout=5)
@@ -251,7 +251,7 @@ class StoreChecks(unittest.TestCase):
             try:
                 data = dict(schemaVersion=1, instances=[definition('first')]); store.save(data)
                 before = store.path.read_bytes()
-                with patch('dragon_instances.os.replace', side_effect=OSError('disk full')):
+                with patch('pet_instances.os.replace', side_effect=OSError('disk full')):
                     with self.assertRaises(OSError): store.save(dict(schemaVersion=1, instances=[]))
                 self.assertEqual(store.path.read_bytes(), before)
                 self.assertFalse(list(Path(tmp).glob('.instances-*')))

@@ -12,6 +12,9 @@ enum CharacterMarkdownCodec {
         let id: String
         let kind: CharacterMemoryKind
         let createdAt: Date
+        let updatedAt: Date?
+        let confirmedAt: Date?
+        let revision: Int?
         let source: String
         let citation: String?
         let version: String?
@@ -23,6 +26,9 @@ enum CharacterMarkdownCodec {
     private struct IdentityMetadata: Codable, Sendable {
         let schema: Int
         let shareWithOnlineModel: Bool
+        let createdAt: Date?
+        let updatedAt: Date?
+        let revision: Int?
     }
 
     private struct GoalMetadata: Codable, Sendable {
@@ -34,7 +40,9 @@ enum CharacterMarkdownCodec {
     }
 
     static func encode(identity: CharacterIdentity) throws -> Data {
-        let metadata = IdentityMetadata(schema: 1, shareWithOnlineModel: identity.shareWithOnlineModel)
+        let metadata = IdentityMetadata(schema: 2, shareWithOnlineModel: identity.shareWithOnlineModel,
+                                        createdAt: identity.createdAt, updatedAt: identity.updatedAt,
+                                        revision: identity.revision)
         let frontMatter = try encodeFrontMatter(metadata)
         let markdown = """
         ---
@@ -76,8 +84,10 @@ enum CharacterMarkdownCodec {
     static func decodeIdentity(_ data: Data) throws -> CharacterIdentity {
         let markdown = try decodeUTF8(data)
         let (metadataData, body) = try split(markdown)
-        let metadata = try JSONDecoder().decode(IdentityMetadata.self, from: metadataData)
-        guard metadata.schema == 1,
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let metadata = try decoder.decode(IdentityMetadata.self, from: metadataData)
+        guard (1...2).contains(metadata.schema), (metadata.revision ?? 1) > 0,
               let heading = body.split(separator: "\n", omittingEmptySubsequences: true).first,
               heading.hasPrefix("# ") else { throw CharacterMemoryStoreError.invalidRecord }
         let name = String(heading.dropFirst(2)).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -91,12 +101,16 @@ enum CharacterMarkdownCodec {
                                  speakingStyle: section("表达方式", in: body),
                                  knowledgeScope: section("知识与擅长边界", in: body),
                                  boundaries: section("边界", in: body),
-                                 shareWithOnlineModel: metadata.shareWithOnlineModel)
+                                 shareWithOnlineModel: metadata.shareWithOnlineModel,
+                                 createdAt: metadata.createdAt ?? .now,
+                                 updatedAt: metadata.updatedAt ?? metadata.createdAt ?? .now,
+                                 revision: metadata.revision ?? 1)
     }
 
     static func encode(memory: CharacterMemory) throws -> Data {
-        let metadata = MemoryMetadata(schema: 3, id: memory.id, kind: memory.kind,
-                                      createdAt: memory.createdAt, source: memory.source,
+        let metadata = MemoryMetadata(schema: 4, id: memory.id, kind: memory.kind,
+                                      createdAt: memory.createdAt, updatedAt: memory.updatedAt,
+                                      confirmedAt: memory.confirmedAt, revision: memory.revision, source: memory.source,
                                       citation: memory.citation.isEmpty ? nil : memory.citation,
                                       version: memory.version.isEmpty ? nil : memory.version, expiresAt: memory.expiresAt,
                                       status: memory.status, shareWithOnlineModel: memory.shareWithOnlineModel)
@@ -111,15 +125,19 @@ enum CharacterMarkdownCodec {
         decoder.dateDecodingStrategy = .iso8601
         let metadata = try decoder.decode(MemoryMetadata.self, from: metadataData)
         let text = body.trimmingCharacters(in: .newlines)
-        guard (1...3).contains(metadata.schema), metadata.id == expectedID,
+        guard (1...4).contains(metadata.schema), metadata.id == expectedID,
               metadata.id.range(of: "^[A-Fa-f0-9-]{16,64}$", options: .regularExpression) != nil,
+              (metadata.revision ?? 1) > 0,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.count <= 1_000 else {
             throw CharacterMemoryStoreError.invalidRecord
         }
         return CharacterMemory(id: metadata.id, kind: metadata.kind, text: text,
                                createdAt: metadata.createdAt, source: metadata.source,
                                citation: metadata.citation ?? "", version: metadata.version ?? "",
-                               status: metadata.status, shareWithOnlineModel: metadata.shareWithOnlineModel, expiresAt: metadata.expiresAt)
+                               status: metadata.status, shareWithOnlineModel: metadata.shareWithOnlineModel,
+                               expiresAt: metadata.expiresAt, updatedAt: metadata.updatedAt ?? metadata.createdAt,
+                               confirmedAt: metadata.confirmedAt ?? (metadata.status == .confirmed ? metadata.createdAt : nil),
+                               revision: metadata.revision ?? 1)
     }
 
     static func encode(goal: CharacterGoal) throws -> Data {

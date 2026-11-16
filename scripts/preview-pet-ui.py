@@ -6,7 +6,7 @@ root=Path(__file__).resolve().parents[1]
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--output-dir',type=Path,default=root/'.local/pet-build/previews/cards')
 out=parser.parse_args().output_dir;out.mkdir(parents=True,exist_ok=True)
-with tempfile.TemporaryDirectory(prefix='dragon-card-preview-') as home:
+with tempfile.TemporaryDirectory(prefix='pet-card-preview-') as home:
  os.environ.update(HOME=home,BAILONG_DATA_DIR=home,QT_QPA_PLATFORM='offscreen',QT_STYLE_OVERRIDE='Fusion',BAILONG_CODEX='/usr/bin/false')
  sys.path[:0]=[str(root/'apps/pet-runtime/bailong'),str(root/'.local/pet-build/generated-source/app')]
  from PySide6.QtWidgets import QApplication,QStyleFactory

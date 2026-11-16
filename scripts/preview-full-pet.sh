@@ -10,7 +10,7 @@ result=json.load(sys.stdin)
 if result.get("petBackend")!="external" or result.get("petActions") not in (25,35):
     raise SystemExit("当前不是完整 25/35 动作构建。请先准备资源、重新构建，并检查用户 companion.json 是否仍选择 native。")
 '
-STATE="$(python3 -c 'import os;from pathlib import Path;print(Path(os.environ.get("DRAGON_DATA_DIR","~/Library/Application Support/AnimeDesktopPets")).expanduser())')"
+STATE="$(python3 -c 'import os;from pathlib import Path;print(Path(os.environ.get("PET_DATA_DIR","~/Library/Application Support/AnimeDesktopPets")).expanduser())')"
 if [[ -S "$STATE/control.sock" ]]; then
   echo '退出当前桌边小崽应用实例后切换预览；不会退出 Codex。'
   "$ROOT/scripts/petctl.sh" --quit

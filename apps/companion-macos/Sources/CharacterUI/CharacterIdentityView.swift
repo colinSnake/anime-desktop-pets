@@ -3,50 +3,97 @@ import SwiftUI
 struct CharacterIdentityView: View {
     @ObservedObject var model: CharacterWorkspaceModel
     @State private var showingCompletion = false
+    @State private var showingFoundation = false
+    @State private var showingHistory = false
 
     var body: some View {
-        Form {
-            Section {
-                Text("身份资料默认只保存在本机；允许分享后才会进入在线模型请求。")
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .center, spacing: 16) {
+                Text("身份")
+                    .font(.system(size: 24, weight: .semibold))
+                    .accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 12)
+                Button("保存身份", action: model.saveIdentity)
+                    .buttonStyle(CharacterIdentitySaveButtonStyle())
+                    .disabled(!model.canSaveIdentity)
+            }
+            .padding(.bottom, 18)
+            if !model.status.isEmpty {
+                Text(model.status)
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                if !model.identityCompletionFields.isEmpty {
-                    Button("预览龙妹默认设定并补齐空白") { showingCompletion = true }
-                        .disabled(!model.canSaveIdentity)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.bottom, 12)
+            }
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 20) {
+                    CharacterIdentityEditor(title: "名称", text: $model.identity.name)
+                    CharacterIdentityEditor(title: "性格", text: $model.identity.personality)
+                    CharacterIdentityEditor(title: "表达方式", text: $model.identity.speakingStyle)
+                    CharacterIdentityEditor(title: "与你的关系", text: $model.identity.relationship)
+
+                    DisclosureGroup("基础设定", isExpanded: $showingFoundation) {
+                        VStack(alignment: .leading, spacing: 16) {
+                            readOnlyField("身份定位", value: model.identity.resolvedRole)
+                            readOnlyField("背景", value: model.identity.resolvedBackground)
+                            readOnlyField("核心价值", value: model.identity.values)
+                            readOnlyField("愿望与方向", value: model.identity.motivations)
+                            readOnlyField("知识范围", value: model.identity.knowledgeScope)
+                            readOnlyField("行为边界", value: model.identity.boundaries)
+                            if !model.identityCompletionFields.isEmpty {
+                                Button("预览并补齐空白设定") { showingCompletion = true }
+                                    .disabled(!model.canSaveIdentity)
+                            }
+                        }
+                        .padding(.top, 12)
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("身份资料默认只保存在本机；允许分享后才会进入在线模型请求。")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Toggle("允许在线模型使用这份身份资料", isOn: $model.identity.shareWithOnlineModel)
+                    }
+
+                    CharacterAdaptationView(model: model)
+
+                    if model.identity.revision > 1 || !model.identityHistory.isEmpty {
+                        DisclosureGroup("身份修订记录（最近10版）", isExpanded: $showingHistory) {
+                            if !model.identityHistoryError.isEmpty {
+                                Text("读取身份历史失败：\(model.identityHistoryError)")
+                                    .font(.caption).foregroundStyle(.red)
+                            } else if model.identityHistory.isEmpty {
+                                Text("暂无可恢复的身份版本。")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            } else {
+                                ForEach(model.identityHistory.sorted { $0.revision > $1.revision }, id: \.revision) { version in
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        HStack {
+                                            Text("版本 \(version.revision) · \(version.updatedAt.formatted(date: .abbreviated, time: .shortened))")
+                                                .font(.caption.weight(.medium))
+                                            Spacer()
+                                            Button("恢复此版") { model.restoreIdentityRevision(version.revision) }
+                                                .buttonStyle(.borderless)
+                                        }
+                                        identityHistoryField("名称", version.name)
+                                        identityHistoryField("性格", version.personality)
+                                        identityHistoryField("表达方式", version.speakingStyle)
+                                        identityHistoryField("与你的关系", version.relationship)
+                                    }
+                                    .padding(.vertical, 8)
+                                    if version.revision != model.identityHistory.map(\.revision).max() {
+                                        Divider()
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
-                TextField("名称", text: $model.identity.name)
-                identityField("身份定位", hint: "它是谁、在这里扮演什么角色", text: $model.identity.role, height: 64)
-                identityField("背景", hint: "重要经历与设定", text: $model.identity.background, height: 88)
-            } header: {
-                Text("基本资料")
-            }
-            Section("性格与表达") {
-                identityField("性格", hint: "稳定的性格特点和相处方式", text: $model.identity.personality)
-                identityField("表达方式", hint: "语气、节奏和偏好的表达风格", text: $model.identity.speakingStyle)
-            }
-            Section("价值与关系") {
-                identityField("核心价值", hint: "遇到选择时优先坚持什么", text: $model.identity.values)
-                identityField("愿望与方向", hint: "希望持续做好什么", text: $model.identity.motivations)
-                identityField("与用户的关系", hint: "如何理解彼此", text: $model.identity.relationship)
-            }
-            Section("知识与边界") {
-                identityField("知识范围", hint: "知道什么、不确定什么", text: $model.identity.knowledgeScope)
-                identityField("行为边界", hint: "不能假装知道或执行的事", text: $model.identity.boundaries)
-            }
-            Section("隐私") {
-                Toggle("允许在线模型使用这份身份资料", isOn: $model.identity.shareWithOnlineModel)
-            }
-            Section {
-                HStack(spacing: 12) {
-                    Button("保存身份", action: model.saveIdentity)
-                        .disabled(!model.canSaveIdentity)
-                    Text(model.status).font(.callout).foregroundStyle(.secondary)
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .listRowBackground(CharacterUIStyle.cardBackground)
-        .formStyle(.grouped)
-        .scrollContentBackground(.hidden)
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
         .sheet(isPresented: $showingCompletion) {
@@ -71,18 +118,43 @@ struct CharacterIdentityView: View {
         }
     }
 
-    private func identityField(_ title: String, hint: String, text: Binding<String>, height: CGFloat = 72) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
+    private func readOnlyField(_ title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.body.weight(.medium))
-            Text(hint).font(.caption).foregroundStyle(.secondary)
-            TextEditor(text: text)
-                .font(.body)
-                .frame(minHeight: height, maxHeight: height)
-                .scrollContentBackground(.hidden)
-                .padding(5)
-                .background(CharacterUIStyle.input, in: RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(CharacterUIStyle.border, lineWidth: 0.5))
+            Text(value.isEmpty ? "未设置" : value)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func identityHistoryField(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(value.isEmpty ? "未设置" : value)
+                .font(.callout).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+private struct CharacterIdentitySaveButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.colorScheme) private var colorScheme
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 12)
+            .frame(height: 26)
+            .background(CharacterUIStyle.input, in: RoundedRectangle(cornerRadius: 7))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7)
+                    .strokeBorder(colorScheme == .dark ? Color.white.opacity(0.30) : Color.black.opacity(0.22), lineWidth: 1)
+            }
+            .opacity(isEnabled ? (configuration.isPressed ? 0.82 : 1) : 0.6)
     }
 }

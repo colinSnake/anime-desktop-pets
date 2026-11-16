@@ -21,9 +21,15 @@ class BuildInputsTests(unittest.TestCase):
         for key in module.fingerprints():
             p = self.root / key; p.parent.mkdir(parents=True, exist_ok=True); p.write_text('synthetic')
         self.app = self.root / 'Helper.app'
-        self.metadata = self.app / 'Contents/Resources/DRAGON_PATCH.json'
+        self.metadata = self.app / 'Contents/Resources/PET_PATCH.json'
         self.metadata.parent.mkdir(parents=True)
         self.metadata.write_text(json.dumps(dict(buildInputs=module.fingerprints(self.root))))
+
+    def test_release_physics_change_invalidates_frozen_helper(self):
+        path = self.root / 'apps/pet-runtime/bailong/pet_release_physics.py'
+        path.write_text('changed throw physics')
+        with self.assertRaisesRegex(ValueError, 'pet_release_physics.py'):
+            module.check(self.app, self.root)
 
     def test_matching_snapshot(self):
         self.assertTrue(module.check(self.app, self.root)['buildInputs'])
@@ -55,9 +61,21 @@ class BuildInputsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '必须包含 SSRuanTangTi'):
             module.check(self.app, self.root, require_local_test_font=True)
 
+    def test_frozen_archive_requires_all_renamed_generic_modules(self):
+        required = ('pet_instances', 'pet_instance_ipc', 'pet_helper', 'pet_reference_lock',
+                    'pet_library', 'pet_sources', 'pet_release_physics', 'dragon_tasks', 'dragon_quota', 'pet_ai_bubbles')
+        module.check_frozen_modules('\n'.join(required))
+        for renamed in required[:3]:
+            with self.subTest(module=renamed):
+                with self.assertRaisesRegex(ValueError, renamed):
+                    module.check_frozen_modules('\n'.join(name for name in required if name != renamed))
+        legacy_listing = 'dragon_instances dragon_instance_ipc dragon_pet_helper ' + ' '.join(required[3:])
+        with self.assertRaisesRegex(ValueError, 'pet_instances'):
+            module.check_frozen_modules(legacy_listing)
+
     def test_clone_module_change_is_detected(self):
-        (self.root / 'apps/pet-runtime/pets/dragon_instance_ipc.py').write_text('clone changed')
-        with self.assertRaisesRegex(ValueError, 'dragon_instance_ipc.py'):
+        (self.root / 'apps/pet-runtime/pets/pet_instance_ipc.py').write_text('clone changed')
+        with self.assertRaisesRegex(ValueError, 'pet_instance_ipc.py'):
             module.check(self.app, self.root)
 
     def test_relocated_playback_module_change_is_detected(self):
@@ -141,7 +159,7 @@ class BuildStagingTests(unittest.TestCase):
             (stock / 'Contents/Resources/outputs').mkdir(parents=True)
             stage = root / 'generated-source'; stage.mkdir()
             sentinel = stage / 'keep.txt'; sentinel.write_text('last valid source')
-            (stage / '.dragon-generated').write_text('generated local source')
+            (stage / '.pet-generated').write_text('generated local source')
             with patch.multiple(self.builder, ROOT=root, STOCK=stock, STAGE=stage):
                 with self.assertRaisesRegex(ValueError, '扩展动作源'):
                     self.builder.stage(root / 'upstream')

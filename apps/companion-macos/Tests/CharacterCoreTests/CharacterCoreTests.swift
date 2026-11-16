@@ -427,7 +427,8 @@ final class CharacterCoreTests: XCTestCase {
         XCTAssertLessThanOrEqual(session.turns.count, CharacterChatSession.maxTurns)
         XCTAssertLessThanOrEqual(session.turns.reduce(0) { $0 + $1.text.count },
                                   CharacterChatSession.maxCharacters)
-        XCTAssertEqual(session.turns.last?.text.count, CharacterChatSession.maxTextCharacters)
+        XCTAssertEqual(session.turns.last?.text.count, 2_000)
+        XCTAssertTrue(session.turns.filter { $0.role == .user }.allSatisfy { $0.text.count == CharacterChatSession.maxTextCharacters })
     }
 
     func testChatInputRejectsEmptyAndOverlongMessagesWithoutTruncating() {

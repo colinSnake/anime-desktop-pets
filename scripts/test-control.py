@@ -12,10 +12,10 @@ import stat
 
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description='隔离测试本地控制接口，不启动 Codex 或桌宠')
-parser.add_argument('--binary',type=Path,default=ROOT/'build/桌边小崽.app/Contents/MacOS/DragonCompanion')
+parser.add_argument('--binary',type=Path,default=ROOT/'build/桌边小崽.app/Contents/MacOS/PetCompanion')
 BIN = parser.parse_args().binary.resolve(strict=True)
-with tempfile.TemporaryDirectory(prefix='dragon-control-', dir='/tmp') as directory:
-    env = dict(os.environ, DRAGON_DATA_DIR=directory)
+with tempfile.TemporaryDirectory(prefix='pet-control-', dir='/tmp') as directory:
+    env = dict(os.environ, PET_DATA_DIR=directory)
     server = subprocess.Popen([str(BIN),'--control-test-server'],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
     def control(command):
         result = subprocess.run([str(BIN),'--'+command],env=env,capture_output=True,text=True,timeout=6)

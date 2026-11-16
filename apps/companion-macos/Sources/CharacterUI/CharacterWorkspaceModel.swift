@@ -6,92 +6,96 @@ import SwiftUI
 @MainActor
 public final class CharacterWorkspaceModel: ObservableObject {
     @Published public var identity: CharacterIdentity
-    @Published public private(set) var memories: [CharacterMemory] = []
+    @Published public private(set) var identityHistory: [CharacterIdentity] = []
+    @Published public private(set) var identityHistoryError = ""
+    @Published public internal(set) var memories: [CharacterMemory] = []
     @Published public private(set) var goals: [CharacterGoal] = []
-    @Published public private(set) var chatTurns: [CharacterChatTurn] = []
-    @Published public private(set) var isChatSending = false
-    @Published public private(set) var failedChatText: String?
+    @Published public internal(set) var chatTurns: [CharacterChatTurn] = []
+    @Published public var chatDraft = ""
+    @Published public internal(set) var chatModelCatalog: CharacterChatModelCatalog?
+    @Published public internal(set) var selectedChatModel: String?
+    @Published public internal(set) var chatModelError = ""
+    @Published public internal(set) var isChatSending = false
+    @Published public internal(set) var failedChatText: String?
+    @Published public internal(set) var chatStatus = ""
     @Published public private(set) var status = ""
+    @Published public internal(set) var automaticReviewEnabled = false
+    @Published public internal(set) var automaticReviewStatus = ""
+
+    @Published public internal(set) var adaptation = CharacterAdaptationState()
+    @Published public internal(set) var adaptationStatus = ""
+    var adaptationTask: Task<Void, Never>?
+    var adaptationGeneration: UUID?
+
+    var chatTask: Task<Void, Never>?
+    var automaticReviewTask: Task<Void, Never>?
+    var automaticReviewSettingsTask: Task<Void, Never>?
+    var automaticReviewSettingsGeneration: UUID?
+    var automaticReviewGeneration = UUID()
+    var unreviewedTurnIDs: [UUID] = []
+    var activeChatAttempt: CharacterChatAttempt?
+    var failedChatAttempt: CharacterChatAttempt?
     @Published public private(set) var canSaveIdentity = false
 
-    private let store: CharacterMemoryStore
+    let store: CharacterMemoryStore
     private let defaultName: String
     public let suggestGoal: ((String, String) async throws -> CharacterGoalDraft)?
-    public let chat: ((String, [CharacterChatTurn]) async throws -> String)?
+    public let chat: ((String, [CharacterChatTurn], CharacterChatModelSelection?) async throws -> String)?
+    public let reviewMemories: (([CharacterChatTurn], CharacterChatModelSelection?) async throws -> [CharacterMemorySuggestion])?
+
+    let chatModels: (() throws -> CharacterChatModelCatalog?)?
+
+    let fetchChatModels: ((String) async throws -> CharacterChatModelCatalog)?
+    @Published public internal(set) var isDiscoveringChatModels = false
+    @Published public internal(set) var chatModelNotice = ""
 
     public init(store: CharacterMemoryStore, defaultName: String,
                 suggestGoal: ((String, String) async throws -> CharacterGoalDraft)? = nil,
-                chat: ((String, [CharacterChatTurn]) async throws -> String)? = nil) {
+                chat: ((String, [CharacterChatTurn], CharacterChatModelSelection?) async throws -> String)? = nil,
+                reviewMemories: (([CharacterChatTurn], CharacterChatModelSelection?) async throws -> [CharacterMemorySuggestion])? = nil,
+                chatModels: (() throws -> CharacterChatModelCatalog?)? = nil,
+                discoverChatModels: ((String) async throws -> CharacterChatModelCatalog)? = nil) {
         self.store = store
         self.defaultName = defaultName
         self.suggestGoal = suggestGoal
         self.chat = chat
+        self.reviewMemories = reviewMemories
+        self.chatModels = chatModels
+        self.fetchChatModels = discoverChatModels
         identity = .starter(name: defaultName)
         refresh()
+    }
+
+    deinit {
+        chatTask?.cancel()
+        automaticReviewTask?.cancel()
     }
 
     public func refresh() {
         Task {
             do {
                 identity = try await store.loadIdentity(defaultName: defaultName)
+                identityHistory = try await store.identityHistory()
+                identityHistoryError = ""
                 memories = try await store.listMemories()
+                let savedAdaptation = try await store.loadAdaptation()
+                if adaptationGeneration == nil { adaptation = savedAdaptation }
+                if let warning = store.adaptationSessionWarning { adaptationStatus = warning }
+                let savedReviewEnabled = try await store.loadAutomaticReviewEnabled()
+                // Refresh is not a new consent action. Never restore a stale
+                // on-disk authorization over this window's explicit choice.
+                if automaticReviewSettingsGeneration == nil {
+                    automaticReviewEnabled = savedReviewEnabled
+                    if !savedReviewEnabled { discardPendingAutomaticReview() }
+                }
                 canSaveIdentity = true
                 status = ""
             } catch {
                 canSaveIdentity = false
                 status = error.localizedDescription
+                identityHistoryError = error.localizedDescription
             }
         }
-    }
-
-
-    public func sendChat(_ rawText: String) {
-        guard let chat, !isChatSending else { return }
-        guard let text = CharacterChatSession.validatedInput(rawText) else {
-            if rawText.trimmingCharacters(in: .whitespacesAndNewlines).count > CharacterChatSession.maxTextCharacters {
-                status = "单条消息最多 \(CharacterChatSession.maxTextCharacters) 个字符，请缩短后重试。"
-            }
-            return
-        }
-        let history = chatTurns
-        failedChatText = nil
-        appendChatTurn(role: .user, text: text)
-        isChatSending = true
-        status = "正在整理角色资料并回复…"
-        Task {
-            do {
-                let reply = try await chat(text, history)
-                let cleanReply = reply.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !cleanReply.isEmpty {
-                    appendChatTurn(role: .assistant, text: cleanReply)
-                }
-                status = ""
-            } catch {
-                failedChatText = text
-                status = error.localizedDescription
-            }
-            isChatSending = false
-        }
-    }
-
-    public func retryFailedChat() {
-        guard let text = failedChatText, !isChatSending else { return }
-        if chatTurns.last?.role == .user, chatTurns.last?.text == text {
-            chatTurns.removeLast()
-        }
-        sendChat(text)
-    }
-
-    private func appendChatTurn(role: CharacterChatRole, text: String) {
-        var session = CharacterChatSession(turns: chatTurns)
-        session.append(role: role, text: text)
-        chatTurns = session.turns
-    }
-
-    public func clearChat() {
-        chatTurns.removeAll()
-        failedChatText = nil
-        status = "本轮聊天已清空；聊天内容不会写入长期记忆。"
     }
 
     public func refreshMemories() {
@@ -99,6 +103,20 @@ public final class CharacterWorkspaceModel: ObservableObject {
             do {
                 memories = try await store.listMemories()
                 status = ""
+            } catch { status = error.localizedDescription }
+        }
+    }
+
+    public func loadMemoryHistory(id: String) async throws -> [CharacterMemory] {
+        try await store.memoryHistory(id: id)
+    }
+
+    public func restoreMemoryRevision(id: String, revision: Int) {
+        Task {
+            do {
+                try await store.restoreMemoryRevision(id: id, revision: revision)
+                memories = try await store.listMemories()
+                status = "已恢复为新待确认版本；请重新核对并授权在线分享。"
             } catch { status = error.localizedDescription }
         }
     }
@@ -168,12 +186,33 @@ public final class CharacterWorkspaceModel: ObservableObject {
 
     public func saveIdentity() {
         guard canSaveIdentity else { return }
-        let snapshot = identity
+        guard let name = identity.validatedName else {
+            status = "名称不能为空，最多80个字符，且不能包含换行。"
+            return
+        }
+        var snapshot = identity
+        snapshot.name = name
         Task {
             do {
                 try await store.saveIdentity(snapshot)
+                identityHistory = try await store.identityHistory()
                 status = "身份资料已保存。"
             } catch {
+                status = error.localizedDescription
+            }
+        }
+    }
+
+    public func restoreIdentityRevision(_ revision: Int) {
+        Task {
+            do {
+                try await store.restoreIdentityRevision(revision: revision)
+                identity = try await store.loadIdentity(defaultName: defaultName)
+                identityHistory = try await store.identityHistory()
+                identityHistoryError = ""
+                status = "已恢复身份版本；在线分享已关闭，请检查后重新授权。"
+            } catch {
+                identityHistoryError = error.localizedDescription
                 status = error.localizedDescription
             }
         }
@@ -200,26 +239,6 @@ public final class CharacterWorkspaceModel: ObservableObject {
             }
         }
         return true
-    }
-
-    public func loadKnowledgeImportText(from url: URL) async throws -> String {
-        let access = url.startAccessingSecurityScopedResource()
-        defer { if access { url.stopAccessingSecurityScopedResource() } }
-        return try await store.loadKnowledgeImportText(from: url)
-    }
-
-    public func importKnowledge(text: String, source: String, citation: String, version: String,
-                                expiresAt: Date?) async -> Bool {
-        do {
-            let result = try await store.importKnowledge(text: text, source: source, citation: citation,
-                                                         version: version, expiresAt: expiresAt)
-            memories = try await store.listMemories()
-            status = "已导入 \(result.imported) 条待审核知识，跳过 \(result.skipped) 条相同知识；在线分享关闭。"
-            return true
-        } catch {
-            status = error.localizedDescription
-            return false
-        }
     }
 
     public func memoryFindings(for memory: CharacterMemory) -> [CharacterMemoryReview.Finding] {

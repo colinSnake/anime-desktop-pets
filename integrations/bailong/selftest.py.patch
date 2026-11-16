@@ -23,7 +23,7 @@
          report.update(version=VERSION,frozen=bool(getattr(sys,'frozen',False)))
          app=QApplication([]);pet=Pet();pet.tick.stop()
 -        items=[pet.manifest['idle']]+pet.manifest.get('additionalIdleAnimations',[])+pet.variants+[pet.manifest[k] for k in ('dragAnimation','landingAnimation','quotaAnimation')]+[v for v in pet.work_slots if v]
-+        report['patchVersion']='@DRAGON_PATCH_VERSION@'
++        report['patchVersion']='@PET_PATCH_VERSION@'
 +        from dragon_tasks import Cursor,TaskSnapshot,apply_task_snapshot
 +        cursor=Cursor((0,0))
 +        cursor.feed(b'{"type":"session_meta","payload":{"source":"vscode"}}\n')

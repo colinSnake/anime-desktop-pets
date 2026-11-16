@@ -6,7 +6,7 @@
           (str(root/'THIRD_PARTY_NOTICES.md'), '.'),
 -         (str(root/'BUILD_INFO.json'), '.')]
 +         (str(root/'BUILD_INFO.json'), '.'),
-+         (str(root/'DRAGON_PATCH.json'), '.')] + (
++         (str(root/'PET_PATCH.json'), '.')] + (
 +         [(str(root/'app/fonts/上首软糖体.ttf'), 'fonts'),
 +          (str(root/'app/fonts/FONT-LOCAL-TEST-NOTICE.txt'), 'fonts')]
 +         if (root/'app/fonts/上首软糖体.ttf').is_file() else [])
@@ -24,9 +24,9 @@
               bundle_identifier='local.bailongpet.macos', version='0.4.1',
 -             info_plist={'CFBundleDisplayName': '白龙桌宠',
 -                         'CFBundleVersion': '3',
-+             info_plist={'CFBundleDisplayName': '白龙桌宠 · Dragon 增强版',
-+                         'CFBundleVersion': '@DRAGON_BUNDLE_VERSION@',
-+                         'DragonPatchVersion': '@DRAGON_PATCH_VERSION@',
++             info_plist={'CFBundleDisplayName': '白龙桌宠 · 桌边小崽增强版',
++                         'CFBundleVersion': '@PET_BUNDLE_VERSION@',
++                         'PetPatchVersion': '@PET_PATCH_VERSION@',
                           'LSUIElement': True,
                           'NSHighResolutionCapable': True,
                           'LSMinimumSystemVersion': '12.0'})
