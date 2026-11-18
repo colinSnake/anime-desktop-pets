@@ -1,0 +1,52 @@
+.model-page { display: grid; gap: 14px; min-width: 0; }
+.model-page .page-heading { margin-bottom: 0; }
+.model-page :is(p, strong, code) { overflow-wrap: anywhere; }
+.model-overview, .model-connection, .model-empty { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+.model-overview { padding: 14px 16px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; }
+.model-overview h2, .model-catalog-heading h3 { margin: 0; font-size: 14px; }
+.model-overview p { margin: 4px 0 0; }
+.model-note, .model-saved, .model-overview p { color: var(--muted); font-size: 12px; line-height: 1.55; }
+.model-note, .model-alert { margin: 0; }
+.model-alert { color: var(--danger); font-size: 13px; }
+.model-list, .model-entry-list { display: grid; gap: 10px; min-width: 0; }
+.model-empty { margin: 0; padding: 24px 16px; color: var(--muted); }
+.model-connection-top { padding: 6px 12px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 4px 10px; }
+.model-connection-top h2 { margin: 0; min-width: 0; font-size: 14px; }
+.model-disclosure { display: flex; align-items: center; min-height: var(--card-control-height); min-width: 0; text-align: left; gap: 8px; border: 0; background: var(--transparent); color: inherit; cursor: pointer; padding: 4px; font: inherit; }
+.model-disclosure code, .model-disclosure small { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; }
+.model-chevron { color: var(--accent); }
+.model-chips, .model-actions { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+.model-chip { padding: 2px 7px; border: 1px solid var(--line); border-radius: 16px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.model-chip.accent { color: var(--accent); }
+.model-connection-body { border-top: 1px solid var(--line); padding: 12px 16px; }
+.model-connection-body:not([hidden]), .model-entry-body:not([hidden]), .model-fieldset { display: grid; gap: 11px; }
+.model-saved p { margin: 0; }
+.model-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 12px; }
+.model-field { min-width: 0; display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+.model-page .button, .model-field :is(input, select) { height: var(--card-control-height); min-height: var(--card-control-height); box-sizing: border-box; }
+.model-page .button { font-size: 12px; padding: 0 11px; }
+.model-field :is(input, select) { width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: inherit; padding: 0 8px; font: inherit; }
+.model-field :is(input, select):focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.model-fieldset { border: 0; min-inline-size: 0; margin: 0; padding: 0; }
+.model-custom { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
+.model-custom summary { cursor: pointer; font-size: 12px; min-height: 24px; }
+.model-custom .model-note { margin: 7px 0 0; }
+.model-inline { padding: 10px; border: 1px solid var(--line); border-radius: 8px; display: grid; gap: 8px; font-size: 12px; min-width: 0; }
+.model-inline p { margin: 0; line-height: 1.5; }
+.model-inline .button { justify-self: start; }
+.model-overview .model-inline { flex-basis: 100%; }
+.model-check { display: flex; align-items: center; gap: 7px; }
+.model-catalog-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; align-items: center; }
+.model-local-default { max-width: 360px; }
+.model-entry { border: 1px solid var(--line); border-radius: 8px; padding: 4px 7px; min-width: 0; }
+.model-entry .model-disclosure { width: 100%; font-size: 13px; }
+.model-entry .model-disclosure .model-chip { margin-inline-start: auto; }
+.model-entry-body { padding: 7px; border-top: 1px solid var(--line); }
+.model-footer { padding-top: 8px; border-top: 1px solid var(--line); }
+.model-footer > .model-inline, .model-test-result { flex-basis: 100%; overflow-wrap: anywhere; }
+.model-add { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+@media (max-width: 920px) { .model-grid { grid-template-columns: minmax(0, 1fr); } }
+
+.model-discovery-action { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.model-candidates { list-style: none; max-height: 235px; overflow: auto; margin: 0; padding: 3px; display: grid; gap: 6px; }
+.model-candidates .model-check { min-height: 26px; }

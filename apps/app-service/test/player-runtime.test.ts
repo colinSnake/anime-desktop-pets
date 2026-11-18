@@ -7,11 +7,11 @@ import { PlayerRuntime } from "../src/player-runtime.ts";
 
 const python = process.env.PET_PYTHON || (process.platform === "win32" ? "python" : "python3");
 const guardianPath = resolve("apps/runtime-bridge/guardian.py");
-async function fixture(mode = "ready") {
+async function fixture(mode = "ready", speech?: ConstructorParameters<typeof PlayerRuntime>[0]["speech"]) {
   const root = await mkdtemp(join(tmpdir(), "pet-player-test-"));
   const workerPath = join(root, `${mode}.py`);
   await copyFile(resolve("apps/app-service/test/fixtures/player-fixture.py"), workerPath);
-  const runtime = new PlayerRuntime({ python, guardianPath, workerPath, platform: "darwin", timeoutMs: 1500,
+  const runtime = new PlayerRuntime({ python, guardianPath, workerPath, platform: "darwin", timeoutMs: 1500, speech,
     config: { source: root, assets: root, profileRoot: join(root, "sessions") } });
   return { root, runtime, cleanup: async () => { await runtime.close(); await rm(root, { recursive: true, force: true }); } };
 }
@@ -55,6 +55,30 @@ test("display commands are bounded, confirmed, and do not replace the owned runt
     assert.equal(await runtime.setVisible(false), true);
     assert.equal(await runtime.applyDisplayPreferences({ size: 500, hideInFullscreen: false }), false);
     assert.equal(runtime.snapshot().status, "running");
+  } finally { await cleanup(); }
+});
+test("only running visible owned players submit speech events without consuming command replies", async () => {
+  const cues: { source: symbol; text: string; eligible: () => boolean }[] = [];
+  const cancelled = new Set<symbol>();
+  const { runtime, cleanup } = await fixture("bubble-speech", {
+    offer: (source, text, eligible) => { cues.push({ source, text, eligible }); },
+    cancelSource: async source => { cancelled.add(source); },
+  });
+  try {
+    assert.equal((await runtime.start()).status, "running");
+    assert.equal(await runtime.applyDisplayPreferences({ size: 320, hideInFullscreen: true }), true);
+    assert.equal(cues[0]?.eligible(), true);
+    assert.equal(await runtime.setVisible(false), true);
+    assert.equal(cues[0]?.eligible(), false);
+    assert.equal(await runtime.applyDisplayPreferences({ size: 300, hideInFullscreen: false }), true);
+    assert.equal((await runtime.stop()).status, "stopped");
+    assert.deepEqual(cues.map(cue => cue.text), ["apply"]);
+    assert.equal(cancelled.has(cues[0]!.source), true);
+    assert.equal(cues[0]?.eligible(), false);
+    assert.equal((await runtime.start()).status, "running");
+    assert.equal(await runtime.applyDisplayPreferences({ size: 280, hideInFullscreen: false }), true);
+    assert.notEqual(cues[0]?.source, cues[1]?.source);
+    assert.equal(cues[0]?.eligible(), false);
   } finally { await cleanup(); }
 });
 test("explicit startup passes only a complete saved position pair to the owned worker", async () => {
@@ -280,4 +304,40 @@ test('stop cancels an in-flight behavior application; a late running ACK cannot 
   assert.equal((await stop).status,'stopped');
   assert.equal(runtime.snapshot().status,'stopped');assert.equal(runtime.pid,undefined);
  } finally {await cleanup();}
+});
+
+test('task animation coalesces updates separately from foreground and confirmed stop', async () => {
+  const { root, runtime, cleanup } = await fixture('task-animation');
+  try {
+    assert.equal((await runtime.start()).status, 'running');
+    const work = { state: 'working' as const, startSerial: 7, expiresAt: Date.now() + 6000 };
+    runtime.applyTaskAnimation(work);
+    const display = runtime.applyDisplayPreferences({ size: 300, hideInFullscreen: false });
+    runtime.applyTaskAnimation({ ...work, startSerial: 8 });
+    runtime.applyTaskAnimation({ state: 'disabled', startSerial: 0, expiresAt: 0 });
+    assert.equal(await display, true);
+    // Guarded fixture flushes each frame to disk; the second task can only run after the first ack.
+    const profile = join(root, 'sessions', (await readdir(join(root, 'sessions')))[0]!);
+    let frames: { command: string; task?: { state: string; startSerial: number } }[] = [];
+    for (let i = 0; i < 100 && frames.length < 3; i++) {
+      frames = (await readFile(join(profile, 'task-frames.jsonl'), 'utf8')).trim().split('\n').map(row => JSON.parse(row));
+      if (frames.length < 3) await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.deepEqual(frames.map(value => [value.command, value.task?.state, value.task?.startSerial]), [
+      ['task-animation', 'working', 7], ['apply', undefined, undefined], ['task-animation', 'disabled', 0],
+    ]);
+    runtime.applyTaskAnimation(work);
+    assert.equal((await runtime.stop()).status, 'stopped');
+  } finally { await cleanup(); }
+});
+
+test('an unacknowledged task update does not hold the foreground or stop slot', async () => {
+  const { runtime, cleanup } = await fixture('task-no-ack');
+  try {
+    assert.equal((await runtime.start()).status, 'running');
+    runtime.applyTaskAnimation({ state: 'working', startSerial: 1, expiresAt: Date.now() + 6000 });
+    runtime.applyTaskAnimation({ state: 'disabled', startSerial: 0, expiresAt: 0 });
+    assert.equal(await runtime.applyBehaviorPreferences({ scheduledActivity: true, movement: true }), true);
+    assert.equal((await runtime.stop()).status, 'stopped');
+  } finally { await cleanup(); }
 });

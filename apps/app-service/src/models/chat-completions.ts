@@ -1,4 +1,4 @@
-import { argumentsObject, array, call, discovered, invalidResponse, object, recalled, reply, snapshotInput, string, usage } from './common.ts';
+import { modelUserText, argumentsObject, array, call, discoveryItems, discovered, invalidResponse, object, recalled, reply, snapshotInput, string, usage } from './common.ts';
 import type { JsonObject, ProtocolAdapter } from './types.ts';
 export const chatCompletions: ProtocolAdapter = {
   encode(route, original) {
@@ -6,7 +6,7 @@ export const chatCompletions: ProtocolAdapter = {
     const messages: JsonObject[] = input.system ? [{ role: 'system', content: input.system }] : [];
     for (const m of input.messages) {
       if (m.role === 'tool') messages.push({ role: 'tool', tool_call_id: m.toolCallID, content: m.text });
-      else if (m.role === 'user') messages.push({ role: 'user', content: m.text });
+      else if (m.role === 'user') messages.push({ role: 'user', content: modelUserText(input, m) });
       else {
         const data = recalled(m, route);
         messages.push({ role: 'assistant', content: m.text || null,
@@ -27,5 +27,5 @@ export const chatCompletions: ProtocolAdapter = {
     return reply(route, text, calls, choice.finish_reason === 'length' ? 'length' : choice.finish_reason === 'content_filter' || m.refusal ? 'refused' : choice.finish_reason === 'tool_calls' ? 'tools' : 'end', usage(root.usage, 'prompt_tokens', 'completion_tokens'), m.reasoning_content === undefined ? undefined : string(m.reasoning_content));
   },
   discovery() { return { path: '/models', headers: {} }; },
-  decodeDiscovery(raw) { const root = object(raw); return { models: array(root.data).map(v => discovered(v)), ...(root.has_more === true ? { truncated: true } : {}) }; },
+  decodeDiscovery(raw, firstPage) { const root = object(raw), { items, truncated } = discoveryItems(root.data, firstPage); return { models: items.map(v => discovered(v)), ...(truncated || root.has_more === true ? { truncated: true } : {}) }; },
 };

@@ -42,6 +42,10 @@ export type Snapshot = {
   player?: PlayerSnapshot;
 };
 export interface DesktopBridge {
+  characters?: import("./characters.ts").CharactersBridge;
+  speech?: import("./speech.ts").SpeechBridge;
+  onlineChat?: import("./online-chat.ts").OnlineChatBridge;
+  models?: import("./models.ts").ModelsBridge;
   pets?: import("./pets.ts").PetsBridge;
   snapshot(): Promise<Snapshot>;
   probeRuntime(): Promise<Snapshot>;

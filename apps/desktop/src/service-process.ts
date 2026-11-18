@@ -1,7 +1,19 @@
+import { isTaskFollowingState, type TaskFollowingState } from '../../app-service/src/codex-task-following.ts';
+import { probeError, type ModelProbeInput, type ModelProbeReply } from '../../../packages/contracts/src/model-probe.ts';
+import { chatUnavailable, requestChatModels, requestOnlineChat } from './chat-transport.ts';
+import type { ChatListResult, ChatSendResult, OnlineChatInput } from '../../../packages/contracts/src/online-chat.ts';
+import { recordRoutes, type RecordAction } from '../../../packages/contracts/src/character-records.ts';
+import type { IdentityWriteAction } from '../../../packages/contracts/src/characters.ts';
+import { identityUnavailable, identityWriteUnknown, requestIdentity, writeIdentity, requestCharacterRecords, requestKnowledgeSearch, requestLocalChatContext } from './character-transport.ts';
+import { isSpeechResult, type SpeechResult } from "../../../packages/contracts/src/speech.ts";
+import { discoveryError } from '../../app-service/src/models/discovery-contract.ts';
+import type { ModelDiscoveryInput, ModelDiscoveryReply } from '../../../packages/contracts/src/models.ts';
+import { interruptedModelRequest, requestModelDiscovery, requestModelManagement, requestModelProbe } from "./model-transport.ts";
+import { managementError, type ModelAction, type ModelBridgeResult, type ModelInputs } from "../../app-service/src/models/management-contract.ts";
 import { requestPets } from "./pet-transport.ts";
 import type { PetMethod } from "./pet-ipc.ts";
 import type { CatalogEntry, PetResult } from "../../../packages/contracts/src/pets.ts";
-import { isPackageImportResult, type PackageImportResult } from "../../../packages/contracts/src/pets.ts";
+import { isPackageImportResult, shape, type PackageImportResult } from "../../../packages/contracts/src/pets.ts";
 import { randomBytes } from "node:crypto";
 import {
   isSnapshot,
@@ -25,9 +37,14 @@ export class ServiceProcess {
   private closed = false;
   private hasExited = false;
   private exitCode?: number;
+  private taskFollowingState: TaskFollowingState = 'off';
   constructor(
     private factory: () => ServiceTransport,
     private options: {
+      modelsRoot?: string;
+      taskFollowingHome?: string;
+      onTaskFollowingState?: (state: TaskFollowingState) => void;
+      speech?: { python: string; model: string; worker: string };
       workspace?: { root: string; catalog: CatalogEntry[]; packageToolPath?: string };
       workerPath: string;
       guardianPath: string;
@@ -69,11 +86,17 @@ export class ServiceProcess {
         this.exitCode = code;
         this.hasExited = true;
         this.port = undefined;
+        this.publishTaskFollowing('off');
         fail();
         didExit();
       });
       transport.onMessage((message) => {
-        if (finished || this.closed) return;
+        if (this.closed) return;
+        if (finished) {
+          if (this.port && this.options.taskFollowingHome && shape(message, ['type', 'state']) &&
+              message.type === 'codex-task-following-state' && isTaskFollowingState(message.state)) this.publishTaskFollowing(message.state);
+          return;
+        }
         if (typeof message !== "object" || message === null) {
           fail();
           return;
@@ -103,6 +126,9 @@ export class ServiceProcess {
           python: this.options.python,
           player: this.options.player,
           workspace: this.options.workspace,
+          modelsRoot: this.options.modelsRoot,
+          speech: this.options.speech,
+          taskFollowingHome: this.options.taskFollowingHome,
         });
       } catch {
         fail();
@@ -135,6 +161,62 @@ export class ServiceProcess {
       throw new Error("service_unavailable");
     }
   }
+  async readIdentity(input: unknown) {
+    const port = this.port;
+    if (this.closed || !port) return identityUnavailable;
+    const result = await requestIdentity({ port, token: this.token }, input);
+    return this.closed || this.port !== port ? identityUnavailable : result;
+  }
+  async writeIdentity(action: IdentityWriteAction, input: unknown) {
+    const port = this.port;
+    if (this.closed || !port) return identityUnavailable;
+    const result = await writeIdentity({ port, token: this.token }, action, input);
+    return this.closed || this.port !== port ? identityWriteUnknown : result;
+  }
+  async characterRecords(action: RecordAction, input: unknown) {
+    const port = this.port;
+    if (this.closed || !port) return identityUnavailable;
+    const result = await requestCharacterRecords({ port, token: this.token }, action, input);
+    return this.closed || this.port !== port ? recordRoutes[action].method === 'GET' ? identityUnavailable : identityWriteUnknown : result;
+  }
+  async searchKnowledge(input: unknown) {
+    const port = this.port;
+    if (this.closed || !port) return identityUnavailable;
+    const result = await requestKnowledgeSearch({ port, token: this.token }, input);
+    return this.closed || this.port !== port ? identityUnavailable : result;
+  }
+  async localChatContext(input: unknown) {
+    const port = this.port;
+    if (this.closed || !port) return identityUnavailable;
+    const result = await requestLocalChatContext({ port, token: this.token }, input);
+    return this.closed || this.port !== port ? identityUnavailable : result;
+  }
+  async listChatModels(): Promise<ChatListResult> {
+    const port = this.port;
+    if (this.closed || !port || !this.options.modelsRoot) return chatUnavailable;
+    const result = await requestChatModels({ port, token: this.token });
+    return this.closed || this.port !== port ? chatUnavailable : result;
+  }
+  async sendOnlineChat(input: OnlineChatInput, signal: AbortSignal): Promise<ChatSendResult> {
+    const port = this.port;
+    if (this.closed || !port || !this.options.modelsRoot) return chatUnavailable;
+    const result = await requestOnlineChat({ port, token: this.token }, input, signal);
+    return this.closed || this.port !== port ? chatUnavailable : result;
+  }
+  async speechRequest(method: 'status' | 'reference' | 'clear-reference' | 'enable' | 'disable', data?: unknown): Promise<SpeechResult> {
+    const unavailable = { ok: false, error: 'unavailable' } as const;
+    if (this.closed || !this.port) return unavailable;
+    const url = `http://127.0.0.1:${this.port}/v1/speech/bubbles${method === 'status' ? '' : `/${method}`}`;
+    try {
+      const response = await fetch(url, {
+        method: method === 'status' ? 'GET' : 'POST', redirect: 'error', signal: AbortSignal.timeout(6500),
+        headers: { authorization: `Bearer ${this.token}`, ...(method !== 'status' ? { 'content-type': 'application/json' } : {}) },
+        body: method === 'status' ? undefined : JSON.stringify(data ?? {}),
+      });
+      const value: unknown = await response.json();
+      return response.ok && isSpeechResult(value) && !this.closed && this.port ? value : unavailable;
+    } catch { return unavailable; }
+  }
   async petRequest(method: PetMethod, input?: unknown): Promise<PetResult> {
     if (this.closed || !this.port) return {ok:false,error:"unavailable"};
     const result = await requestPets({ base: `http://127.0.0.1:${this.port}`, token: this.token }, method, input);
@@ -153,6 +235,40 @@ export class ServiceProcess {
       return this.closed || !this.port ? { ok: false, error: 'unavailable' } : value;
     } catch { return { ok: false, error: 'unavailable' }; }
   }
+  // Trusted main-process entrypoints only; intentionally not registered as IPC.
+  listModels(): Promise<ModelBridgeResult> { return this.modelRequest('list', undefined); }
+  saveModelConnection(input: ModelInputs['save']): Promise<ModelBridgeResult> { return this.modelRequest('save', input); }
+  setModelDefault(input: ModelInputs['default']): Promise<ModelBridgeResult> { return this.modelRequest('default', input); }
+  removeModelConnection(input: ModelInputs['remove']): Promise<ModelBridgeResult> { return this.modelRequest('remove', input); }
+  async discoverModels(input: ModelDiscoveryInput, signal: AbortSignal): Promise<ModelDiscoveryReply> {
+    const port = this.port;
+    if (this.closed || !port || !this.options.modelsRoot) return discoveryError('unavailable');
+    const result = await requestModelDiscovery({ port, token: this.token }, input, signal);
+    return this.closed || this.port !== port ? discoveryError('unavailable') : result;
+  }
+  async testModelConnection(input: ModelProbeInput, signal: AbortSignal): Promise<ModelProbeReply> {
+    const port = this.port;
+    if (this.closed || !port || !this.options.modelsRoot) return probeError('unavailable');
+    const result = await requestModelProbe({ port, token: this.token }, input, signal);
+    return this.closed || this.port !== port ? probeError('unavailable') : result;
+  }
+  private async modelRequest<M extends ModelAction>(method: M, input: ModelInputs[M]): Promise<ModelBridgeResult> {
+    const port = this.port;
+    if (this.closed || !port || !this.options.modelsRoot) return managementError('unavailable');
+    const result = await requestModelManagement({ port, token: this.token }, method, input);
+    return this.closed || this.port !== port ? interruptedModelRequest(method) : result;
+  }
+  // Only the native main process can submit this fixed command to its owned utility process.
+  setTaskFollowing(enabled: boolean): boolean {
+    if (this.closed || !this.port || !this.transport || !this.options.taskFollowingHome || typeof enabled !== 'boolean') return false;
+    try { this.transport.send({ type: 'codex-task-following', enabled }); return true; }
+    catch { this.publishTaskFollowing('off'); return false; }
+  }
+  private publishTaskFollowing(state: TaskFollowingState): void {
+    if (this.taskFollowingState === state) return;
+    this.taskFollowingState = state;
+    try { this.options.onTaskFollowingState?.(state); } catch { /* Status presentation cannot interrupt cleanup. */ }
+  }
   private checkCleanup() {
     if (typeof this.exitCode === "number" && this.exitCode !== 0) throw new Error("service_cleanup_failed");
   }
@@ -161,6 +277,7 @@ export class ServiceProcess {
     this.closed = true;
     this.port = undefined;
     this.abortStart?.();
+    this.publishTaskFollowing('off');
     this.closing = (async () => {
       if (!this.transport) return;
       if (this.hasExited) { this.checkCleanup(); return; }

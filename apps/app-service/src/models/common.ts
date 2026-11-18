@@ -78,9 +78,11 @@ export function reply(route: ModelRoute, text: string, calls: ToolCall[], stop: 
 export function snapshotInput(route: ModelRoute, input: ModelInput): ModelInput {
   try {
     const top = object(input);
-    if (Object.keys(top).some(k => !['system', 'messages', 'tools'].includes(k))) throw 0;
+    if (Object.keys(top).some(k => !['system', 'messages', 'tools', 'referenceData'].includes(k))) throw 0;
     const messages = array(input.messages, 12);
     if (!messages.length || (input.system !== undefined && string(input.system, 16_384).length === 0)) throw 0;
+    const referenceData = input.referenceData === undefined ? undefined : jsonObject(input.referenceData);
+    if (referenceData && (route.purpose !== 'text-chat' || Buffer.byteLength(JSON.stringify(referenceData)) > 6144 || object(messages.at(-1)).role !== 'user')) throw 0;
     const tools = input.tools === undefined ? [] : array(input.tools, 16).map(value => {
       const tool = object(value);
       if (Object.keys(tool).some(k => !['name', 'description', 'parameters'].includes(k))) throw 0;
@@ -119,16 +121,27 @@ export function snapshotInput(route: ModelRoute, input: ModelInput): ModelInput 
     });
     if (pending.size) throw 0;
     if ((tools.length || cloned.some(m => m.role === 'assistant' && m.toolCalls?.length)) && route.tools !== 'supported') throw new ModelError('tools_unavailable');
-    return { messages: cloned, ...(input.system === undefined ? {} : { system: input.system }), ...(tools.length ? { tools } : {}) };
+    return { messages: cloned, ...(input.system === undefined ? {} : { system: input.system }), ...(tools.length ? { tools } : {}), ...(referenceData ? { referenceData } : {}) };
   } catch (error) {
     if (error instanceof ModelError && error.code === 'tools_unavailable') throw error;
     throw new ModelError('invalid_request');
   }
 }
+/** Keep untrusted reference data at user priority in all protocol adapters. */
+export function modelUserText(input: ModelInput, message: ModelMessage): string {
+  return input.referenceData && input.messages.at(-1) === message
+    ? JSON.stringify({ question: message.text, characterContext: input.referenceData }) : message.text;
+}
 export function discoveryPath(base: string, cursor: string | undefined, key: string, first: string): string {
   const params = new URLSearchParams(first);
   if (cursor !== undefined) params.set(key, token(cursor, 1024));
   return `${base}?${params}`;
+}
+/** Public first-page callers may safely truncate the already byte-bounded payload. */
+export function discoveryItems(value: unknown, firstPage = false): { items: unknown[]; truncated: boolean } {
+  if (!firstPage) return { items: array(value), truncated: false };
+  if (!Array.isArray(value)) return invalidResponse();
+  return { items: value.slice(0, 256), truncated: value.length > 256 };
 }
 export function discovered(value: unknown, label = 'id', name = 'id') {
   const m = object(value), id = token(m[label], 256);

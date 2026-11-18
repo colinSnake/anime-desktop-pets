@@ -48,3 +48,30 @@ test('input counter exposes rather than silently truncates overlong drafts',()=>
  assert.match(html,/1201\/1200/);assert.match(html,/aria-invalid="true"/);
  assert.equal(c.getSnapshot().session.draft.length,1201);
 });
+
+test('chat labels local queries and answers while keeping model selection and ordinary send disabled', async () => {
+ const c = new ChatWorkspaceController(undefined, { localChatContext: async ({ petID }) => ({ ok: true, petID, text: '合成身份' }) });
+ c.syncCharacters([{ id: 'pet-one', name: '合成角色' }]);
+ c.edit('一般问题');
+ assert.match(render(c), /<button[^>]*disabled=""[^>]*aria-label="发送消息"/);
+ assert.match(render(c), /查看目标进度/);
+ c.edit('你是谁？');
+ assert.match(render(c), /<button(?:(?!disabled)[^>])*aria-label="查询本机资料"/);
+ assert.match(render(c), /<button[^>]*chat-model-toggle[^>]*disabled=""/);
+ await c.send();
+ assert.match(render(c), /本机资料回复/);
+ assert.match(render(c), /合成身份/);
+});
+
+test('online composer identifies the selected connection and discloses that sending may incur charges', async () => {
+ const c = new ChatWorkspaceController(undefined, undefined, { list: async () => ({ ok: true, models: [{
+  route: { connectionID: 'first', modelEntryID: 'one', fingerprint: 'a'.repeat(64) }, connectionName: '合成连接', modelName: '合成模型', ready: true, isDefault: true,
+ }] }), send: async () => ({ ok: false, error: 'unavailable' }), cancel: async () => {} });
+ c.syncCharacters([{ id: 'pet-one', name: '龙妹' }]); await c.refreshModels(); c.edit('合成问题');
+ const html = render(c);
+ assert.match(html, /合成模型 · 合成连接/); assert.match(html, /可能产生费用/);
+ assert.doesNotMatch(html, /disabled=""[^>]*aria-label="发送消息"/);
+ c.edit('👨‍👩‍👧‍👦'.repeat(800));
+ assert.match(render(c), /超出字节上限/);
+ assert.match(render(c), /disabled=""[^>]*aria-label="发送消息"/);
+});

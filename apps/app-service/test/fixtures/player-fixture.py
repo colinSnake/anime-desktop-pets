@@ -47,8 +47,17 @@ else:
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
             while True:
                 time.sleep(.1)
+        if mode == 'task-no-ack' and request['command'] == 'task-animation':
+            continue
+        if mode == 'task-animation':
+            with Path(config['profile'], 'task-frames.jsonl').open('a') as output:
+                output.write(json.dumps({key: request[key] for key in ('command', 'task') if key in request}) + '\n')
+            if request['command'] == 'task-animation':
+                time.sleep(.06)
         if request['command'] == 'apply-behavior':
             Path(config['profile'], 'behavior-command.json').write_text(json.dumps(request['preferences']))
+        if mode == 'bubble-speech':
+            print(json.dumps(dict(version=3, event='bubble-speech', text=request['command']), separators=(',', ':')), flush=True)
         send(request['id'], 'stopped' if request['command'] == 'stop' else 'running')
         if request['command'] == 'stop':
             break

@@ -6,7 +6,7 @@ import sys
 import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from player_protocol import parse_bootstrap, parse_request, position_event, read_frame, reply, stopped_event
+from player_protocol import bubble_speech_event, parse_bootstrap, parse_request, position_event, read_frame, reply, stopped_event
 
 
 def main():
@@ -30,12 +30,25 @@ def main():
     app.setQuitOnLastWindowClosed(False)
     if os.environ.get('QT_QPA_PLATFORM') == 'offscreen':
         app.setStyle('Fusion')
-    adapter = PlayerAdapter(bootstrap['config'], cover_png=cover_png)
     incoming = queue.Queue(maxsize=1)
     eof = threading.Event()
     phase = 'starting'
     stop_id = None
     startup_pending = True
+
+    def bubble_spoken(text):
+        if phase != 'running' or eof.is_set():
+            return
+        try:
+            line = bubble_speech_event(text)
+        except ValueError:
+            return
+        try:
+            output.write(line); output.flush()
+        except (BrokenPipeError, OSError):
+            eof.set()
+
+    adapter = PlayerAdapter(bootstrap['config'], cover_png=cover_png, on_speech=bubble_spoken)
 
     def send(request_id, state):
         try:
@@ -117,6 +130,8 @@ def main():
                 send(request['id'], 'running' if phase == 'running' and adapter.apply_display_preferences(request['preferences']) else 'error')
             elif request['command'] == 'apply-behavior':
                 send(request['id'], 'running' if phase == 'running' and adapter.apply_behavior_preferences(request['preferences']) else 'error')
+            elif request['command'] == 'task-animation':
+                send(request['id'], 'running' if phase == 'running' and not eof.is_set() and adapter.apply_task_animation(request['task']) else 'error')
             elif request['command'] in ('show', 'hide'):
                 visible = request['command'] == 'show'
                 send(request['id'], 'running' if phase == 'running' and adapter.set_visible(visible) else 'error')

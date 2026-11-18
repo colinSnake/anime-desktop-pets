@@ -1,11 +1,11 @@
-import { argumentsObject, array, call, discovered, invalidResponse, object, recalled, reply, snapshotInput, string, token, usage } from './common.ts';
+import { modelUserText, argumentsObject, array, call, discoveryItems, discovered, invalidResponse, object, recalled, reply, snapshotInput, string, token, usage } from './common.ts';
 import type { JsonObject, ProtocolAdapter, ToolCall } from './types.ts';
 export const responses: ProtocolAdapter = {
   encode(route, original) {
     const input = snapshotInput(route, original), items: JsonObject[] = [];
     for (const m of input.messages) {
       if (m.role === 'tool') items.push({ type: 'function_call_output', call_id: m.toolCallID, output: m.text });
-      else if (m.role === 'user') items.push({ role: 'user', content: [{ type: 'input_text', text: m.text }] });
+      else if (m.role === 'user') items.push({ role: 'user', content: [{ type: 'input_text', text: modelUserText(input, m) }] });
       else {
         const data = recalled(m, route);
         if (Array.isArray(data)) items.push(...data as JsonObject[]);
@@ -49,5 +49,5 @@ export const responses: ProtocolAdapter = {
     return reply(route, text, calls, refused ? 'refused' : root.status === 'incomplete' ? 'length' : calls.length ? 'tools' : 'end', usage(root.usage, 'input_tokens', 'output_tokens'), replay);
   },
   discovery() { return { path: '/models', headers: {} }; },
-  decodeDiscovery(raw) { const root = object(raw); return { models: array(root.data).map(v => discovered(v)), ...(root.has_more === true ? { truncated: true } : {}) }; },
+  decodeDiscovery(raw, firstPage) { const root = object(raw), { items, truncated } = discoveryItems(root.data, firstPage); return { models: items.map(v => discovered(v)), ...(truncated || root.has_more === true ? { truncated: true } : {}) }; },
 };

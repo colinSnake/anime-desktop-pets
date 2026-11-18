@@ -1,8 +1,16 @@
+import { CodexTaskFollowing } from './codex-task-following.ts';
+import { CodexTaskReaderProcess } from './codex-task-reader-process.ts';
+import { readCodexPresence } from './codex-presence.ts';
+import { CharacterRepository } from "./characters/repository.ts";
+import { BubbleSpeech } from "./speech/bubble-speech.ts";
+import { isSpeechRuntimeConfig, LocalBubbleSpeechBackend } from "./speech/process-backend.ts";
 /** 由 Electron utility process 或测试 Node fork 引导；不提供公共 CLI 服务。 */
+import { ModelManagement } from "./models/management.ts";
+import { MacKeychainBackend } from "./models/mac-keychain.ts";
 import { PetWorkspace } from "./pet-workspace.ts";
 import { catalogEntry, shape, type CatalogEntry } from "../../../packages/contracts/src/pets.ts";
 import { PetLifecycle } from "./pet-lifecycle.ts";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { createService } from "./server.ts";
 import { PlayerRuntime, validPlayerConfig } from "./player-runtime.ts";
 import { PythonRuntime } from "./python-runtime.ts";
@@ -33,6 +41,7 @@ const send = (value: unknown) => {
 let service: ReturnType<typeof createService> | undefined;
 let booting: Promise<void> | undefined;
 let stopping = false;
+let taskFollowing: CodexTaskFollowing | undefined;
 const bootstrapTimer = setTimeout(() => {
   void stop();
 }, 5000);
@@ -41,11 +50,13 @@ bootstrapTimer.unref();
 async function stop() {
   if (stopping) return;
   stopping = true;
+  taskFollowing?.setEnabled(false);
   clearTimeout(bootstrapTimer);
   let exitCode = 0;
   try {
     await booting?.catch(() => {});
-    await service?.close();
+    const cleanup = await Promise.allSettled([taskFollowing?.close(), service?.close()]);
+    if (cleanup.some(result => result.status === 'rejected')) exitCode = 1;
   } catch {
     exitCode = 1; // Propagate unconfirmed cleanup without private exception text.
   } finally {
@@ -62,6 +73,10 @@ function message(value: unknown) {
     void stop();
     return;
   }
+  if (input.type === 'codex-task-following') {
+    if (!stopping && shape(input, ['type', 'enabled']) && typeof input.enabled === 'boolean') taskFollowing?.setEnabled(input.enabled);
+    return;
+  }
   if (booting || stopping) return;
   if (
     input.type !== "bootstrap" ||
@@ -73,8 +88,12 @@ function message(value: unknown) {
     typeof input.workerPath !== "string" ||
     !isAbsolute(input.workerPath) ||
     (input.python !== undefined && typeof input.python !== "string") ||
+    (input.speech !== undefined && !isSpeechRuntimeConfig(input.speech)) ||
     (input.player !== undefined && !validPlayerBootstrap(input.player)) ||
-    (input.workspace !== undefined && !validWorkspaceBootstrap(input.workspace))
+    (input.workspace !== undefined && !validWorkspaceBootstrap(input.workspace)) ||
+    (input.taskFollowingHome !== undefined && (typeof input.taskFollowingHome !== 'string' ||
+      !isAbsolute(input.taskFollowingHome) || input.taskFollowingHome.includes('\0') || Buffer.byteLength(input.taskFollowingHome) > 3072)) ||
+    (input.modelsRoot !== undefined && (typeof input.modelsRoot !== "string" || input.modelsRoot.length > 4096 || input.modelsRoot.includes("\0") || !isAbsolute(input.modelsRoot)))
   ) {
     void stop();
     return;
@@ -82,14 +101,22 @@ function message(value: unknown) {
   clearTimeout(bootstrapTimer);
   const { token, workerPath, guardianPath, python } = input;
   booting = (async () => {
+    const speech = process.platform === 'darwin' && process.arch === 'arm64' && isSpeechRuntimeConfig(input.speech)
+      ? new BubbleSpeech(new LocalBubbleSpeechBackend({ ...input.speech, guardian: guardianPath })) : undefined;
+    let workspace: PetWorkspace | undefined;
+    const playerSpeech = speech && {
+      offer: (source: symbol, text: string, eligible: () => boolean) => speech.offer(source, text, () => workspace?.canStartOwnedPlayer() === true && eligible()),
+      cancelSource: (source: symbol) => speech.cancelSource(source),
+    };
     const player = new PlayerRuntime({
+      speech: playerSpeech,
       workerPath: (input.player as PlayerBootstrap | undefined)?.workerPath ?? workerPath,
       guardianPath,
       python: python as string | undefined,
       config: (input.player as PlayerBootstrap | undefined)?.config,
     });
-    const workspace = input.workspace ? await (async () => {
-      const workspaceOptions = input.workspace as WorkspaceBootstrap;
+    const workspaceOptions = input.workspace as WorkspaceBootstrap | undefined;
+    workspace = workspaceOptions ? await (async () => {
       const packageImporter = workspaceOptions.packageToolPath ? new PetPackageImporter({
         root: workspaceOptions.root, scriptPath: workspaceOptions.packageToolPath, python: python as string | undefined,
       }) : undefined;
@@ -104,20 +131,49 @@ function message(value: unknown) {
           pet.package.id === "local.development.longmei" && pet.package.version === "0.0.0-dev",
         create: pet => {
           const configured = input.player as PlayerBootstrap;
-          return new PlayerRuntime({ guardianPath, workerPath: configured.workerPath, python: python as string | undefined,
+          return new PlayerRuntime({ speech: playerSpeech, guardianPath, workerPath: configured.workerPath, python: python as string | undefined,
             config: { ...configured.config!, profileRoot: join(configured.config!.profileRoot, "instances", pet.id) },
             initialPreferences: { size: pet.preferences.size, hideInFullscreen: pet.preferences.hideInFullscreen, scheduledActivity: pet.preferences.scheduledActivity, movement: pet.preferences.movement,
               ...(pet.preferences.x !== undefined && pet.preferences.y !== undefined ? { x: pet.preferences.x, y: pet.preferences.y } : {}) } });
         },
       });
-      return new PetWorkspace({ ...workspaceOptions, catalog, importOne: packageImporter?.importOne.bind(packageImporter), lifecycle, stopAdditional: async () => {
-        const status = player.snapshot().status;
-        if (["unconfigured", "blocked", "stopped"].includes(status)) return true;
-        return (await player.stop()).status === "stopped";
-      } });
+      return new PetWorkspace({ ...workspaceOptions, catalog, importOne: packageImporter?.importOne.bind(packageImporter), lifecycle,
+        onPauseRequested: () => { taskFollowing?.setEnabled(false); void speech?.pause().catch(() => {}); },
+        stopAdditional: async () => {
+          const status = player.snapshot().status;
+          const outcomes = await Promise.allSettled([
+            ['unconfigured', 'blocked', 'stopped'].includes(status) ? Promise.resolve(true) : player.stop().then(result => result.status === 'stopped'),
+            speech?.pause().then(() => true) ?? Promise.resolve(true),
+          ]);
+          return outcomes.every(result => result.status === 'fulfilled' && result.value);
+        },
+      });
     })() : undefined;
+    if (process.platform === 'darwin' && workspace && typeof input.taskFollowingHome === 'string') {
+      const runtimeDirectory = dirname(workerPath);
+      const reader = new CodexTaskReaderProcess({ home: input.taskFollowingHome, guardian: guardianPath,
+        worker: join(runtimeDirectory, 'task_reader_worker.py'), python: python as string | undefined });
+      taskFollowing = new CodexTaskFollowing({ lease: workspace.taskLease,
+        probe: signal => readCodexPresence(dirname(runtimeDirectory), undefined, signal),
+        read: signal => reader.sample(signal), closeReader: () => reader.close(),
+        pose: snapshot => workspace?.updateTaskAnimation(snapshot),
+        changed: state => {
+          if (!stopping) {
+            try { send({ type: 'codex-task-following-state', state }); } catch { void stop(); }
+          }
+        },
+      });
+    }
+    // Only the compiled CommonJS entry has a packaged native helper. Source-only
+    // diagnostics can exercise management without enabling credential operations.
+    const keychain = typeof __dirname === "string" ? new MacKeychainBackend(join(__dirname, "model-keychain")) : undefined;
+    const models = process.platform === "darwin" && typeof input.modelsRoot === "string"
+      ? new ModelManagement(input.modelsRoot, keychain) : undefined;
     service = createService({
       token,
+      models,
+      speech,
+      characters: process.platform === "darwin" && workspaceOptions ? new CharacterRepository(join(workspaceOptions.root, "characters")) : undefined,
       workspace,
       player,
       runtime: new PythonRuntime({

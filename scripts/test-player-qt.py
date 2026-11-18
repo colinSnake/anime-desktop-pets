@@ -33,7 +33,12 @@ class PlayerQtTests(unittest.TestCase):
         from PIL import Image
         frames = [Image.new('RGBA', (32, 32), (50 + i * 50, 80, 80, 200)) for i in range(3)]
         frames[0].save(cls.assets / 'idle.webp', save_all=True, append_images=frames[1:], duration=100, loop=0, lossless=True)
-        (cls.assets / '素材清单.json').write_text(json.dumps(dict(idle=dict(id='idle', file='idle.webp', durationMs=300, name='synthetic'), variants=[])))
+        work = [dict(id=f'work0{i}', file=f'work0{i}.webp', durationMs=300, name='synthetic') for i in (1, 2)]
+        for index, action in enumerate(work):
+            ordered = frames[index:] + frames[:index]
+            ordered[0].save(cls.assets / action['file'], save_all=True, append_images=ordered[1:], duration=100, loop=0, lossless=True)
+        # Prepared pet.py captures ASSETS on import in this single test process.
+        (cls.assets / '素材清单.json').write_text(json.dumps(dict(idle=dict(id='idle', file='idle.webp', durationMs=300, name='synthetic'), variants=[], workAnimations=work)))
         from PySide6.QtWidgets import QApplication
         cls.app = QApplication.instance() or QApplication([])
         cls.app.setStyle('Fusion'); cls.app.setQuitOnLastWindowClosed(False)
@@ -77,6 +82,28 @@ class PlayerQtTests(unittest.TestCase):
             self.assertEqual(self.app.windowIcon().cacheKey(), previous)
         finally:
             adapter.stop(); self.spin(lambda: adapter._stopped)
+
+    def test_visible_bubble_forwards_only_prepared_interaction_cue(self):
+        received, events = [], []
+        adapter = PlayerAdapter(dict(self.config, profile=tempfile.mkdtemp(prefix='speech-', dir=self.root)), on_speech=received.append)
+        try:
+            adapter.begin(lambda: events.append('ready'), lambda: events.append('failed'), lambda: events.append('stopped'))
+            self.spin(lambda: bool(events))
+            self.assertEqual(events, ['ready'])
+            adapter.pet.say('合成  桌宠气泡')
+            adapter.pet.bubble.flush_speech()
+            self.assertEqual(received, ['合成 桌宠气泡'])
+            adapter.pet.say('不朗读的气泡', speak=False)
+            adapter.pet.bubble.flush_speech()
+            # The owned player has no tray, so the prepared source refuses
+            # manual hide. Exercise actual hiding through its fullscreen state.
+            adapter.pet.fullscreen_hidden = True
+            adapter.pet.apply_visibility()
+            self.assertFalse(adapter.pet.isVisible())
+            adapter.pet.speak_bubble('隐藏时不应朗读')
+            self.assertEqual(received, ['合成 桌宠气泡'])
+        finally:
+            adapter.stop(); self.spin(lambda: 'stopped' in events)
 
     def test_ready_requires_real_frame_and_stop_waits_for_decoder(self):
         events = []
@@ -233,6 +260,11 @@ os._exit(player_worker.main())
                 child.stdin.write(json.dumps(message).encode() + b'\n'); child.stdin.flush()
                 self.assertTrue(__import__('select').select([child.stdout], [], [], 5)[0])
                 self.assertEqual(child.stdout.readline(4097).strip(), reply(request_id, expected).strip(), command)
+            task = dict(state='working', startSerial=3, expiresAt=int(time.time() * 1000) + 6000)
+            message = dict(version=3, session=session, id='2' * 32, command='task-animation', task=task)
+            child.stdin.write(json.dumps(message).encode() + b'\n'); child.stdin.flush()
+            self.assertTrue(__import__('select').select([child.stdout], [], [], 5)[0])
+            self.assertEqual(child.stdout.readline(4097).strip(), reply(message['id'], 'running').strip())
             child.stdin.write(json.dumps(dict(version=3, session=session, id='c' * 32, command='stop')).encode() + b'\n'); child.stdin.flush()
             stdout, stderr = child.communicate(timeout=10)
             self.assertEqual(child.returncode, 0, stderr.decode(errors='replace'))
@@ -240,6 +272,66 @@ os._exit(player_worker.main())
         finally:
             if child.poll() is None: child.kill(); child.communicate(timeout=3)
             for stream in (child.stdin, child.stdout, child.stderr): stream.close()
+
+    def test_task_animation_follows_live_starts_without_replaying_cold_join_or_blocked_short_task(self):
+        config = dict(self.config, profile=tempfile.mkdtemp(prefix='task-', dir=self.root))
+        adapter = PlayerAdapter(config)
+        events = []
+        adapter.begin(lambda: events.append('ready'), lambda: events.append('failed'), lambda: events.append('stopped'))
+
+        def work(serial, duration=6000):
+            return dict(state='working', startSerial=serial, expiresAt=int(time.time() * 1000) + duration)
+
+        def quiet(state):
+            return dict(state=state, startSerial=0, expiresAt=0)
+
+        try:
+            self.spin(lambda: bool(events))
+            self.assertEqual(events, ['ready'])
+            pet = adapter.pet
+            with patch.object(pet, 'desktop_hidden', return_value=False), patch.object(pet.behavior, 'motion_reduced', return_value=False):
+                self.assertTrue(adapter.apply_task_animation(work(0)))
+                self.assertTrue(pet.task_active)
+                self.assertNotEqual(pet.mode, 'work-start')
+                self.assertTrue(adapter.apply_task_animation(work(4)))
+                self.assertEqual(pet.current['id'], 'work01')
+                self.assertTrue(pet.bubble.is_followed_work)
+                self.spin(lambda: not pet.waiting_first_frame)
+                with patch.object(pet, 'task_started', wraps=pet.task_started) as opening:
+                    self.assertTrue(adapter.apply_task_animation(work(4)))
+                    opening.assert_not_called()
+                pet.dragging = True
+                self.assertTrue(adapter.apply_task_animation(quiet('disabled')))
+                self.assertFalse(pet.task_active)
+                self.assertFalse(pet.bubble.is_followed_work)
+                self.assertEqual(pet.mode, 'work-start')  # No pose interruption during drag.
+                self.assertTrue(adapter.apply_task_animation(work(5)))
+                self.assertTrue(adapter.apply_task_animation(quiet('idle')))
+                pet.dragging = False
+                self.spin(lambda: pet.mode == 'idle')
+                self.assertFalse(pet.task_active)
+                with patch.object(pet.behavior, 'motion_reduced', return_value=True):
+                    self.assertTrue(adapter.apply_task_animation(work(6)))
+                    self.assertFalse(pet.task_active)
+                self.spin(lambda: pet.task_active)
+                self.assertNotEqual(pet.mode, 'work-start')
+                self.assertTrue(adapter.apply_task_animation(work(7, duration=250)))
+                self.assertTrue(adapter.apply_task_animation(quiet('unknown')))
+                self.assertTrue(pet.task_active)
+                self.spin(lambda: not pet.task_active)
+                self.assertEqual(pet.mode, 'idle')
+                self.assertTrue(adapter.apply_task_animation(work(8, duration=-10)))
+                self.assertFalse(pet.task_active)
+                pet.say('合成手动气泡', speak=False)
+                self.assertTrue(pet.bubble.isVisible())
+                self.assertFalse(pet.bubble.is_followed_work)
+                self.assertTrue(adapter.apply_task_animation(work(9)))
+                self.assertFalse(pet.task_active)
+                self.assertTrue(adapter.apply_task_animation(quiet('disabled')))
+                self.assertTrue(pet.bubble.isVisible())
+                self.assertIsNone(pet.task_follower)
+        finally:
+            adapter.stop(); self.spin(lambda: 'stopped' in events)
 
     def test_running_worker_eof_reaps_real_qt(self):
         self.run_worker(False, True)

@@ -135,7 +135,7 @@ test("shutdown cancels an in-flight Python probe and reaps the worker before ser
   }
 });
 
-import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { appendFile, copyFile, mkdir, mkdtemp, readdir, readFile, realpath, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -259,4 +259,116 @@ test('fixed pet transport reaches the real isolated service and persists across 
   assert.equal(result.workspace.instances[0]!.phase,'not-connected');
   await service.close();
   assert.deepEqual(await service.petRequest('list'),{ok:false,error:'unavailable'});
+});
+
+test('trusted fixed model methods roundtrip using an isolated profile without requesting credentials', { skip: process.platform !== 'darwin' }, async t => {
+  const { mkdtemp, realpath, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { configuration } = await import('../../app-service/test/fixtures/models.ts');
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'pet-service-models-'));
+  const service = new ServiceProcess(() => transport(fork(resolve('apps/app-service/src/entry.ts'), [], {
+    execArgv: ['--import', 'tsx'], stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+  })), { guardianPath, workerPath: resolve('apps/runtime-bridge/worker.py'), modelsRoot: join(root, 'models') });
+  t.after(async () => { try { await service.close(); } finally { await rm(root,{recursive:true,force:true}); } });
+  await service.start();
+  const { revision: _r, credentialRef: _c, ...connection } = configuration().connections[0]!;
+  const first = await service.listModels(); assert.ok(first.ok); assert.equal(first.configuration.revision,0);
+  const save = await service.saveModelConnection({connection,expectedRevision:0,credential:{kind:'keep'}});
+  assert.ok(save.ok); assert.equal(save.configuration.connections[0]!.credentialState,'missing');
+  const selected = await service.setModelDefault({expectedRevision:1,connectionID:connection.id,entryID:connection.defaultModelEntryID});
+  assert.ok(selected.ok); assert.equal(selected.configuration.defaultConnectionID,connection.id);
+  const removed = await service.removeModelConnection({expectedRevision:1,connectionID:connection.id,replacementDefault:null});
+  assert.ok(removed.ok); assert.deepEqual(removed.configuration.connections,[]);
+  await service.close();
+  assert.deepEqual(await service.listModels(),{version:1,ok:false,error:'unavailable'});
+});
+
+test('macOS task reads require the fixed parent command and only owned pets receive work states', { skip: process.platform !== 'darwin' }, async t => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'pet-task-private-channel-'));
+  const runtime = join(root, 'bundle', 'runtime');
+  const home = join(root, 'home');
+  const day = join(home, '.codex', 'sessions', '2026', '11', '18');
+  await mkdir(day, { recursive: true });
+  await mkdir(runtime, { recursive: true });
+  const playerWorker = join(runtime, 'task-animation.py');
+  const profileRoot = join(root, 'players');
+  const pkg = { id: 'local.development.longmei', version: '0.0.0-dev' };
+  await copyFile('apps/app-service/test/fixtures/player-fixture.py', playerWorker);
+  await Promise.all(['task_reader_worker.py', 'task_reader.py'].map(name => copyFile(`apps/runtime-bridge/${name}`, join(runtime, name))));
+  await copyFile('apps/pet-runtime/bailong/dragon_tasks.py', join(runtime, 'dragon_tasks.py'));
+  await writeFile(join(runtime, '..', 'codex-presence'), '#!/bin/sh\nprintf "running\\n"\n', { mode: 0o700 });
+  await writeFile(join(day, 'rollout-synthetic.jsonl'), [
+    { type: 'session_meta', payload: { source: 'vscode' } },
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'fixture', text: 'never sent' } },
+  ].map(value => JSON.stringify(value)).join('\n') + '\n');
+  let child!: ChildProcess;
+  const states: string[] = [];
+  const service = new ServiceProcess(() => {
+    child = fork(resolve('apps/app-service/src/entry.ts'), [], { execArgv: ['--import', 'tsx'], stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+    return transport(child);
+  }, { guardianPath, workerPath: join(runtime, 'worker.py'), python: process.env.PET_PYTHON, taskFollowingHome: home,
+    workspace: { root: join(root, 'workspace'), catalog: [{ ...pkg, name: 'synthetic', launchable: true }] },
+    player: { workerPath: playerWorker, config: { source: root, assets: root, profileRoot } },
+    onTaskFollowingState: state => states.push(state) });
+  t.after(async () => { try { await service.close(); } finally { await rm(root, { recursive: true, force: true }); } });
+  const settle = () => new Promise(resolve => setTimeout(resolve, 80));
+  const waitForState = async (state: string) => {
+    const deadline = performance.now() + 3500;
+    while (states.at(-1) !== state && performance.now() < deadline) await new Promise(resolve => setTimeout(resolve, 15));
+    assert.equal(states.at(-1), state);
+  };
+  assert.equal(service.setTaskFollowing(true), false);
+  await service.start();
+  const added = await service.petRequest('add', { expectedRevision: 0, package: pkg }); assert.ok(added.ok);
+  const id = added.workspace.instances[0]!.id;
+  const revision = added.workspace.revision;
+  assert.ok((await service.petRequest('start', { expectedRevision: revision, id })).ok);
+  assert.equal((await service.request('start-player')).player?.status, 'running');
+  async function waitFor<T>(read: () => Promise<T | undefined>): Promise<T> {
+    const until = performance.now() + 5000;
+    while (performance.now() < until) {
+      const result = await read();
+      if (result !== undefined) return result;
+      await new Promise(resolve => setTimeout(resolve, 15));
+    }
+    assert.fail('synthetic task delivery timed out');
+  }
+  const ownedRoot = join(profileRoot, 'instances', id);
+  const framePath = await waitFor(async () => {
+    try { const [session] = await readdir(ownedRoot); return session && join(ownedRoot, session, 'task-frames.jsonl'); }
+    catch { return; }
+  });
+  const lastTask = async () => {
+    let text: string;
+    try { text = await readFile(framePath, 'utf8'); } catch { return; }
+    const row = text.trimEnd().split('\n').at(-1);
+    return row ? (JSON.parse(row) as { task?: { state: string; startSerial: number; expiresAt: number } }).task : undefined;
+  };
+  await waitFor(async () => (await lastTask())?.state === 'disabled' ? true : undefined);
+  child.send({ type: 'codex-task-following', enabled: true, path: home });
+  await settle(); assert.deepEqual(states, []);
+  assert.equal(service.setTaskFollowing(true), true);
+  await waitForState('working');
+  const cold = await waitFor(async () => { const task = await lastTask(); return task?.state === 'working' ? task : undefined; });
+  assert.equal(cold.startSerial, 0);
+  await appendFile(join(day, 'rollout-synthetic.jsonl'), JSON.stringify({ type: 'event_msg', payload: { type: 'task_started', turn_id: 'next', text: 'never sent' } }) + '\n');
+  await waitFor(async () => (await lastTask())?.startSerial === 1 ? true : undefined);
+  const diagnostic = (await readdir(profileRoot)).find(name => name.startsWith('session-'))!;
+  await assert.rejects(readFile(join(profileRoot, diagnostic, 'task-frames.jsonl')), { code: 'ENOENT' });
+  assert.equal(service.setTaskFollowing(false), true);
+  await waitFor(async () => (await lastTask())?.state === 'disabled' ? true : undefined);
+  assert.equal(service.setTaskFollowing(true), true);
+  await waitForState('working');
+  assert.ok((await service.petRequest('pause', { expectedRevision: revision })).ok);
+  await waitForState('off');
+  const paused = states.slice();
+  assert.equal(service.setTaskFollowing(true), true);
+  await settle(); assert.deepEqual(states, paused);
+  assert.ok((await service.petRequest('resume', { expectedRevision: revision })).ok);
+  await settle(); assert.deepEqual(states, paused);
+  assert.equal(service.setTaskFollowing(true), true);
+  await waitForState('working');
+  assert.equal(service.setTaskFollowing(false), true);
+  await waitForState('off');
 });

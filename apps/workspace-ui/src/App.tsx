@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import type { DesktopBridge, Snapshot } from '../../../packages/contracts/src/index.ts';
+import { ModelPage } from './ModelPage.tsx';
+import { ModelWorkspaceController } from './model-state.ts';
 import { ChatPage } from './ChatPage.tsx';
 import { ChatWorkspaceController, emptyChatState, type ChatWorkspaceState } from './chat-session.ts';
 import { ThemeToggle } from './ThemeToggle.tsx';
 import { loadSnapshot } from './client.ts';
-import { DiagnosticsView, type DiagnosticProps } from './Diagnostics.tsx';
+import type { DiagnosticProps } from './Diagnostics.tsx';
+import { WorkspaceModules } from './pages/WorkspaceModules.tsx';
 import { PetPage } from './PetPage.tsx';
 import { PetWorkspaceController, emptyPetState, isDraftDirty, petDisplayName, type PetWorkspaceState } from './pet-state.ts';
 import { petErrorMessages } from './pet-client.ts';
@@ -16,21 +19,21 @@ const groups = [
   { name: '设置', pages: [{ id: 'models', label: '模型管理', icon: '⊞' }, { id: 'speech', label: '语音互动', icon: '≋' }, { id: 'live', label: '直播管理', icon: '▻' }, { id: 'advanced', label: '高级', icon: '⚙' }] },
 ] as const;
 type Page = typeof groups[number]['pages'][number]['id'];
-const plannedCopy: Partial<Record<Page, string>> = {
-  identity: '角色的身份、表达风格与边界，将在这里清晰整理。',
-  memory: '记忆的来源、审核与版本，将在这里有序安放。',
-  goals: '能力与目标会依据真实运行时状态展示，不预设可用或已授权。',
-  models: '服务商与模型配置将在后续迁移，当前不会读取密钥或发起在线请求。',
-  speech: '录音、朗读与互动气泡将在后续迁移，当前不会请求麦克风权限。',
-  live: '直播来源与房间设置将在后续迁移，当前没有平台连接。',
-};
-type ViewProps = DiagnosticProps & { petState?: PetWorkspaceState; petController?: PetWorkspaceController; initialPage?: Page; chatState?: ChatWorkspaceState; chatController?: ChatWorkspaceController };
+type ViewProps = DiagnosticProps & { petState?: PetWorkspaceState; petController?: PetWorkspaceController; initialPage?: Page; chatState?: ChatWorkspaceState; chatController?: ChatWorkspaceController; modelController?: ModelWorkspaceController; speech?: DesktopBridge['speech']; characters?: DesktopBridge['characters'] };
 
 /** Kept exported for offline rendering; diagnostics are now explicitly under Advanced. */
-export function WorkspaceView({ petState = emptyPetState, petController, initialPage = 'pets', chatState = emptyChatState, chatController, ...diagnostics }: ViewProps) {
+export function WorkspaceView({ petState = emptyPetState, petController, initialPage = 'pets', chatState = emptyChatState, chatController, modelController, speech, characters, ...diagnostics }: ViewProps) {
   const [page, setPage] = useState<Page>(initialPage);
   const headingRef = useRef<HTMLElement>(null);
-  const changePage = (next: Page) => { setPage(next); requestAnimationFrame(() => headingRef.current?.focus()); };
+  const changePage = (next: Page) => {
+    if (page === 'models' && next !== 'models') modelController?.leave();
+    if (page === 'chat' && next !== 'chat') chatController?.cancel();
+    setPage(next);
+    requestAnimationFrame(() => {
+      headingRef.current?.focus({ preventScroll: true });
+      window.scrollTo({ top: 0, left: 0 });
+    });
+  };
   const deletePet = petState.workspace?.instances.find(pet => pet.id === petState.deleteId);
   const error = petState.error ? petErrorMessages[petState.error] : '';
   const busy = !!petState.operation;
@@ -39,14 +42,16 @@ export function WorkspaceView({ petState = emptyPetState, petController, initial
     <div className="shell-layout" inert={!!petState.deleteId}>
       <a className="skip-link" href="#main">跳到主要内容</a>
       <aside className="sidebar" aria-label="工作区侧栏">
-        <button className="brand" onClick={() => changePage('pets')}><span className="brand-mark" aria-hidden="true">崽</span><span>桌边小崽</span></button>
+        <button className="brand" onClick={() => changePage('pets')}><img className="brand-mark" src="./assets/app-icon.svg" alt="" /><span>桌边小崽</span></button>
         <nav aria-label="工作区导航">{groups.map(group => <section className="nav-group" key={group.name} aria-label={group.name}><h2>{group.name}</h2><ul>{group.pages.map(entry => <li key={entry.id}><button className="nav-item" aria-current={page === entry.id ? 'page' : undefined} onClick={() => changePage(entry.id)}><span className="nav-icon" aria-hidden="true">{entry.icon}</span>{entry.label}{entry.id === 'pets' && <span className="nav-dot" aria-hidden="true" />}</button></li>)}</ul></section>)}</nav>
 
       </aside>
       <main id="main" className={`content${page === 'chat' ? ' content-chat' : ''}`} ref={headingRef} tabIndex={-1}>
         <div className="workspace-topline"><span>工作区 <span aria-hidden="true">/</span> {current.label}</span><div className="workspace-topline-actions"><ThemeToggle theme={petState.workspace?.theme ?? 'system'} disabled={busy || petState.needsRefresh || !petState.workspace || !petController} onChange={theme => { void petController?.setTheme(theme); }} /></div></div>
         <div className={`feedback${error || busy ? ' visible' : ''}`} aria-live="polite" aria-atomic="true">{error ? <p role="alert" className="error">{error}</p> : petState.notice ? <p className="sr-only">{petState.notice}</p> : busy ? <p>{({ load: '正在读取配置', importPackages: '正在导入并校验素材', save: '正在保存配置', add: '正在登记配置', clone: '正在复制配置', delete: '正在删除配置', theme: '正在保存主题', start: '正在请求启动实例', stop: '正在请求停止实例', applyDisplay: '正在应用显示偏好', applyBehavior: '正在应用行为偏好', visibility: '正在调整窗口显隐', pause: '正在暂停自有播放器', resume: '正在解除暂停' } as const)[petState.operation!] ?? '正在处理'}…</p> : null}</div>
-        {page === 'pets' ? <PetPage state={petState} controller={petController} /> : page === 'chat' ? <ChatPage state={chatState} controller={chatController} onOpenModels={() => changePage('models')} /> : page === 'advanced' ? <DiagnosticsView {...diagnostics} linkage={petState.workspace?.linkage ?? 'active'} /> : <><header className="page-heading"><div><h1>{current.label}<span className="heading-dot">.</span></h1></div><span className="badge">尚未迁移</span></header><section className="planned-page"><span className="planned-symbol" aria-hidden="true">{current.icon}</span><h2>功能尚未迁移</h2><p>{plannedCopy[page]}</p></section></>}
+        {page === 'pets' ? <PetPage state={petState} controller={petController} /> : page === 'chat' ? <ChatPage state={chatState} controller={chatController} onOpenModels={() => changePage('models')} /> : page === 'models' ? <ModelPage controller={modelController} /> : null}
+        <WorkspaceModules page={page === 'pets' || page === 'chat' || page === 'models' ? null : page} workspace={petState.workspace} diagnostics={diagnostics} speech={speech} characters={characters}
+          selectedInstance={petState.needsRefresh ? undefined : petState.workspace?.instances.find(pet => pet.id === petState.selectedId)} />
 
       </main>
     </div>
@@ -79,7 +84,8 @@ function Confirmation({ title, children, busy, blocked, error, onCancel, onConfi
 export function App() {
   const [controller] = useState(() => new PetWorkspaceController(window.petDesktop?.pets));
   const petState = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
-  const [chatController] = useState(() => new ChatWorkspaceController());
+  const [chatController] = useState(() => new ChatWorkspaceController(undefined, window.petDesktop?.characters, window.petDesktop?.onlineChat));
+  const [modelController] = useState(() => new ModelWorkspaceController(window.petDesktop?.models));
   const chatState = useSyncExternalStore(chatController.subscribe, chatController.getSnapshot, chatController.getSnapshot);
   useEffect(() => {
     if (petState.workspace) chatController.syncCharacters(petState.workspace.instances.map(pet => ({ id: pet.id, name: petDisplayName(pet, petState.workspace) })));
@@ -124,5 +130,5 @@ export function App() {
     void refresh('snapshot');
     return () => { mounted.current = false; sequence.current++; running.current = false; };
   }, [controller]);
-  return <WorkspaceView chatState={chatState} chatController={chatController} petState={petState} petController={controller} snapshot={snapshot} busy={busy} error={error} onRefresh={() => { void refresh('snapshot'); }} onProbe={() => { void refresh('probe'); }} onStartPlayer={() => { void refresh('start-player'); }} onStopPlayer={() => { void refresh('stop-player'); }} />;
+  return <WorkspaceView speech={window.petDesktop?.speech} characters={window.petDesktop?.characters} modelController={modelController} chatState={chatState} chatController={chatController} petState={petState} petController={controller} snapshot={snapshot} busy={busy} error={error} onRefresh={() => { void refresh('snapshot'); }} onProbe={() => { void refresh('probe'); }} onStartPlayer={() => { void refresh('start-player'); }} onStopPlayer={() => { void refresh('stop-player'); }} />;
 }

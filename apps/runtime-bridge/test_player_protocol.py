@@ -7,7 +7,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from player_protocol import parse_bootstrap, parse_request, position_event, read_frame, reply
+from player_protocol import bubble_speech_event, parse_bootstrap, parse_request, position_event, read_frame, reply
 
 SESSION = 'a' * 64
 ID = 'b' * 32
@@ -22,6 +22,12 @@ class ProtocolTests(unittest.TestCase):
         config = {key: os.path.abspath(key) for key in ('source', 'assets', 'profile')}
         config['preferences'] = dict(size=256, hideInFullscreen=True, scheduledActivity=False, movement=True)
         return frame(command='bootstrap', config=config)
+
+    def test_speech_events_contain_only_bounded_interaction_text(self):
+        self.assertEqual(bubble_speech_event('合成气泡'), '{"version":3,"event":"bubble-speech","text":"合成气泡"}\n'.encode())
+        for value in ('', ' abc', 'a\nb', '字' * 121, 'a\u0080x'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                bubble_speech_event(value)
 
     def test_bootstrap_and_fixed_requests(self):
         value = parse_bootstrap(self.bootstrap())
@@ -132,3 +138,14 @@ class WorkerBoundaryTests(unittest.TestCase):
             result = subprocess.run([sys.executable, '-I', '-B', guardian, *args], capture_output=True, timeout=3)
             self.assertEqual(result.returncode, 1)
             self.assertEqual(result.stdout, b'')
+
+    def test_task_animation_is_session_bound_and_accepts_only_fixed_state_and_deadline(self):
+        working = dict(state='working', startSerial=5, expiresAt=1780000000000)
+        self.assertEqual(parse_request(frame(command='task-animation', task=working), SESSION)['task'], working)
+        for task in [dict(working, body='synthetic'), dict(working, startSerial=True),
+                     dict(working, startSerial=2**53), dict(working, expiresAt=0),
+                     dict(working, state='idle'), dict(working, state='complete')]:
+            with self.subTest(task=task), self.assertRaises(ValueError):
+                parse_request(frame(command='task-animation', task=task), SESSION)
+        with self.assertRaises(ValueError):
+            parse_request(frame(command='task-animation', task=working), 'e' * 64)

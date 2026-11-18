@@ -68,6 +68,13 @@ test("custom protocol serves only bundled index and hashed JS/CSS assets", () =>
     assert.equal(assetPath(url), undefined);
 });
 
+test("workspace branding exposes the one shipped SVG and no other image path", () => {
+  assert.equal(assetPath("pet-app://workspace/assets/app-icon.svg"), "assets/app-icon.svg");
+  for (const path of ["assets/other.svg", "assets/app-icon.png", "branding/app-icon.svg",
+    "assets/app-icon.svg?extra", "assets/app-icon.svg#extra", "assets/%61pp-icon.svg"])
+    assert.equal(assetPath(`pet-app://workspace/${path}`), undefined, path);
+});
+
 test("same-document accessibility anchors do not disable the trusted main-frame bridge", () => {
   const frame = {};
   assert.equal(

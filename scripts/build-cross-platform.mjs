@@ -4,6 +4,16 @@ import { build as buildUI } from 'vite';
 import { mkdir, mkdtemp, copyFile, rename, rm, access } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { stageStartupVideo } from './stage-startup-video.mjs';
+
+async function buildMacHelper(root, source, output) {
+  const arch = process.arch === 'arm64' ? 'arm64' : process.arch === 'x64' ? 'x86_64' : undefined;
+  if (!arch) throw new Error('unsupported_native_build_architecture');
+  await promisify(execFile)('/usr/bin/xcrun', ['--sdk', 'macosx', 'swiftc', '-O', '-target', `${arch}-apple-macosx13.0`,
+    join(root, source), '-o', output], { timeout: 120_000 });
+}
 
 /** 两个包不能一次 rename；普通发布错误时逆序恢复。若恢复也失败则保留备份。 */
 export async function publishBuild(outputs, move = rename) {
@@ -50,8 +60,35 @@ export async function buildCrossPlatform(root, tools = { bundle, buildUI }) {
         packages: 'external', sourcemap: false, logLevel: 'info',
       });
     }
+    if (process.platform === 'darwin') {
+      for (const [source, output, build] of [
+        ['apps/app-service/native/model-keychain.swift', join(service, 'model-keychain'), tools.buildKeychainHelper],
+        ['apps/desktop/native/codex-presence.swift', join(desktop, 'codex-presence'), tools.buildPresenceHelper],
+        ['apps/desktop/native/codex-window-bounds.swift', join(desktop, 'codex-window-bounds'), tools.buildWindowBoundsHelper],
+      ]) {
+        if (build) await build(root, output);
+        else await buildMacHelper(root, source, output);
+        await access(output);
+      }
+      await stageStartupVideo(root, join(desktop, 'startup'));
+      for (const name of ['task_reader.py', 'task_reader_worker.py']) {
+        await copyFile(join(root, 'apps/runtime-bridge', name), join(desktop, 'runtime', name));
+      }
+      await copyFile(join(root, 'apps/pet-runtime/bailong/dragon_tasks.py'), join(desktop, 'runtime', 'dragon_tasks.py'));
+    }
+    const branding = join(desktop, 'branding');
+    await mkdir(branding);
+    for (const icon of ['app-icon.png', 'petStatusTemplate.png', 'petStatusTemplate@2x.png']) {
+      await copyFile(join(root, 'resources', 'branding', icon), join(branding, icon));
+    }
     for (const name of ['worker.py', 'guardian.py', 'player_worker.py', 'player_protocol.py', 'player_adapter.py', 'pet_cover.py']) {
       await copyFile(join(root, 'apps/runtime-bridge', name), join(desktop, 'runtime', name));
+    }
+    const speech = join(desktop, 'runtime', 'speech');
+    await mkdir(speech);
+    await copyFile(join(root, 'apps/runtime-bridge/bubble_speech_worker.py'), join(speech, 'bubble_speech_worker.py'));
+    for (const name of ['stdio_service.py', 'mlx_backend.py', 'protocol.py', 'queueing.py', 'session.py']) {
+      await copyFile(join(root, 'apps/speech-runtime', name), join(speech, name));
     }
     for (const name of ['pet_sources.py', 'pet_library.py', 'pet_reference_lock.py']) {
       await copyFile(join(root, 'apps/pet-runtime/pets', name), join(desktop, 'runtime', name));
@@ -60,6 +97,9 @@ export async function buildCrossPlatform(root, tools = { bundle, buildUI }) {
       configFile: false, root: join(root, 'apps/workspace-ui'), base: './',
       build: { outDir: join(desktop, 'ui'), emptyOutDir: true, sourcemap: false },
     });
+    const uiAssets = join(desktop, 'ui', 'assets');
+    await mkdir(uiAssets, { recursive: true });
+    await copyFile(join(root, 'resources', 'branding', 'app-icon.svg'), join(uiAssets, 'app-icon.svg'));
     for (const path of ['main.cjs', 'preload.cjs', 'ui/index.html', 'runtime/worker.py', 'runtime/guardian.py', 'runtime/player_worker.py', 'runtime/player_protocol.py', 'runtime/player_adapter.py', 'runtime/pet_cover.py', 'runtime/pet_sources.py', 'runtime/pet_library.py', 'runtime/pet_reference_lock.py']) await access(join(desktop, path));
     await access(join(service, 'entry.cjs'));
     await publishBuild([

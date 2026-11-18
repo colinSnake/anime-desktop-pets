@@ -37,6 +37,17 @@ test('one global theme toggle lives in the top-right action group on pets, advan
   }
 });
 
+test('the common workspace header uses the product icon without repeating its accessible name', () => {
+  for (const initialPage of ['pets', 'chat', 'advanced'] as const) {
+    const html = renderToStaticMarkup(createElement(WorkspaceView, {...diagnostics, initialPage}));
+    const brand = html.match(/<button class="brand"[^>]*>.*?<\/button>/)?.[0];
+    assert.ok(brand);
+    assert.match(brand, /<img[^>]*src="\.\/assets\/app-icon\.svg"[^>]*alt=""/);
+    assert.match(brand, /<span>桌边小崽<\/span>/);
+    assert.doesNotMatch(brand, />崽</);
+  }
+});
+
 test('global theme button disables without a connection, on refresh conflicts and while any write is pending', async () => {
   const controller=new PetWorkspaceController(bridge(async()=>({ok:true,workspace})));
   await controller.load();

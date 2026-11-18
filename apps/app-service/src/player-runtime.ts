@@ -2,6 +2,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
+import { invalidCue, parseBubbleEvent } from "./speech/cue.ts";
+import type { TaskAnimation } from "./task-animation.ts";
 import type { BehaviorPreferences } from "../../../packages/contracts/src/pets.ts";
 import type { PlayerController, PlayerSnapshot, PlayerInitialPreferences } from "../../../packages/contracts/src/index.ts";
 
@@ -16,12 +18,16 @@ export function validPlayerConfig(value: unknown): value is PlayerConfig {
 type Session = {
   child: ChildProcessWithoutNullStreams;
   credential: string;
+  speechSource: symbol;
+  speechVisible: boolean;
   buffer: Buffer;
   exited: Promise<void>;
   done: boolean;
   invalid: boolean;
   cleanStopped?: boolean;
   cancelledId?: string;
+  taskPending?: string;
+  taskNext?: TaskAnimation;
   pending?: { id: string; phase: "running" | "stopped"; resolve(ok: boolean): void; reject(): void };
   disposing?: Promise<void>;
   onPosition?: (position: { x: number; y: number }) => void;
@@ -48,6 +54,7 @@ export class PlayerRuntime implements PlayerController {
   constructor(private options: { guardianPath: string; workerPath: string; python?: string;
     config?: PlayerConfig; platform?: NodeJS.Platform; timeoutMs?: number;
     initialPreferences?: PlayerInitialPreferences;
+    speech?: { offer(source: symbol, text: string, eligible: () => boolean): void; cancelSource(source: symbol): Promise<void> };
     onPosition?: (position: { x: number; y: number }) => void }) {
     const status = !options.config ? "unconfigured" : !validPlayerConfig(options.config) ? "error" :
       (options.platform ?? process.platform) !== "darwin" ? "blocked" : "stopped";
@@ -62,7 +69,7 @@ export class PlayerRuntime implements PlayerController {
       blocked: "既有播放器目前仅开放 macOS / Python 3.11+；Windows/Linux 解码与窗口适配尚未开放。",
       stopped: "开发播放器已停止；下次显式启动将使用全新隔离资料目录。",
       starting: "正在启动隔离的开发播放器，等待首个真实动画帧…",
-      running: "开发播放器已显示首帧；账号、聊天、任务、语音和声音均未接入。",
+      running: "开发播放器已显示首帧，正在本工作区的隔离会话中运行。",
       stopping: "正在等待播放器、解码线程和自有进程退出…",
       error: "开发播放器启动、运行或停止失败：请检查环境/协议；强制回收不等于正常清理确认，没有接管旧桌宠。",
     };
@@ -110,7 +117,7 @@ export class PlayerRuntime implements PlayerController {
         ["-I", "-B", "-u", this.options.guardianPath, this.options.workerPath, "--player"],
         { env, shell: false, windowsHide: true, stdio: "pipe" });
       let exited!: () => void;
-      session = { child, credential: randomBytes(32).toString("hex"), buffer: Buffer.alloc(0),
+      session = { child, credential: randomBytes(32).toString("hex"), speechSource: Symbol(), speechVisible: true, buffer: Buffer.alloc(0),
         exited: new Promise(resolve => { exited = resolve; }), done: false, invalid: false,
         onPosition: this.onPosition };
       this.session = session;
@@ -143,7 +150,7 @@ export class PlayerRuntime implements PlayerController {
   }
   private receive(session: Session, chunk: Buffer, fail: () => void) {
     if (session.invalid || session.done || session.disposing) return;
-    // Exactly one outstanding reply, at most 4096 bytes; no unbounded log stream.
+    // One foreground reply and at most one task reply; stdout remains bounded.
     if (session.buffer.length + chunk.length > 4096) { fail(); return; }
     session.buffer = Buffer.concat([session.buffer, chunk]);
     let newline: number;
@@ -158,6 +165,14 @@ export class PlayerRuntime implements PlayerController {
         void this.stop();
         return;
       }
+      const cue = parseBubbleEvent(line);
+      if (cue === invalidCue) { fail(); return; }
+      if (cue !== undefined) {
+        const eligible = () => this.session === session && this.state.status === "running" && !this.closed && !session.invalid &&
+          !session.done && !session.disposing && !session.cleanStopped && session.speechVisible;
+        if (eligible()) this.options.speech?.offer(session.speechSource, cue, eligible);
+        continue;
+      }
       const event = this.parsePositionEvent(line);
       if (event === "invalid") { fail(); return; }
       if (event) {
@@ -169,6 +184,13 @@ export class PlayerRuntime implements PlayerController {
       if (session.cancelledId && [true, false].some(ok => line === JSON.stringify({
         version: 3, id: session.cancelledId, ok, phase: ok ? "running" : "error",
       }))) { session.cancelledId = undefined; continue; }
+      if (session.taskPending && [true, false].some(ok => line === JSON.stringify({
+        version: 3, id: session.taskPending, ok, phase: ok ? "running" : "error",
+      }))) {
+        session.taskPending = undefined;
+        this.flushTaskAnimation(session);
+        continue;
+      }
       const pending = session.pending;
       if (!pending) { fail(); return; }
       const success = line === JSON.stringify({ version: 3, id: pending.id, ok: true, phase: pending.phase });
@@ -232,11 +254,41 @@ export class PlayerRuntime implements PlayerController {
     if (this.state.status !== "running" || typeof visible !== "boolean") return Promise.resolve(false);
     const session = this.session;
     if (!session || session.pending || session.invalid || session.done) return Promise.resolve(false);
-    return this.request(session, visible ? "show" : "hide", "running").catch(() => false);
+    const previous = session.speechVisible;
+    if (!visible) {
+      session.speechVisible = false;
+      void this.options.speech?.cancelSource(session.speechSource).catch(() => {});
+    }
+    return this.request(session, visible ? "show" : "hide", "running").then(ok => {
+      session.speechVisible = ok ? visible : previous;
+      return ok;
+    }, () => { session.speechVisible = previous; return false; });
+  }
+  /** Independent optional lane. An unacknowledged frame never grows a queue or delays stop. */
+  applyTaskAnimation(value: TaskAnimation): void {
+    const session = this.session;
+    if (!session || this.state.status !== "running" || this.closed || session.invalid || session.done || session.cleanStopped || session.disposing) return;
+    const { state, startSerial, expiresAt } = value;
+    if (!["working", "idle", "unknown", "disabled"].includes(state) ||
+        !Number.isSafeInteger(startSerial) || startSerial < 0 || !Number.isSafeInteger(expiresAt) ||
+        (state === "working" ? expiresAt <= 0 : expiresAt !== 0 || startSerial !== 0)) return;
+    session.taskNext = { state, startSerial, expiresAt };
+    this.flushTaskAnimation(session);
+  }
+  private flushTaskAnimation(session: Session): void {
+    if (this.session !== session || this.state.status !== "running" || session.taskPending || !session.taskNext ||
+        session.invalid || session.done || session.cleanStopped || session.disposing || !session.child.stdin.writable) return;
+    const task = session.taskNext;
+    session.taskNext = undefined;
+    // Missing acknowledgement leaves this lane bounded. The Qt side expires stale state independently.
+    const id = session.taskPending = randomBytes(16).toString("hex");
+    session.child.stdin.write(JSON.stringify({ version: 3, session: session.credential, id, command: "task-animation", task }) + "\n");
   }
   private dispose(session: Session): Promise<void> {
     if (session.disposing) return session.disposing;
+    void this.options.speech?.cancelSource(session.speechSource).catch(() => {});
     session.pending?.reject();
+    session.taskNext = undefined;
     session.disposing = (async () => {
       if (!session.done) {
         session.child.stdin.end();
@@ -257,6 +309,8 @@ export class PlayerRuntime implements PlayerController {
     const launching = this.launching;
     ++this.epoch;
     this.state = this.describe("stopping");
+    if (session) session.taskNext = undefined;
+    const audioStopped = session && this.options.speech?.cancelSource(session.speechSource).then(() => true, () => false);
     this.stopping = (async () => {
       let confirmed = !session || session.cleanStopped === true;
       try {
@@ -272,7 +326,7 @@ export class PlayerRuntime implements PlayerController {
         // Wait for path preparation or cancelled bootstrap, not the public
         // start promise (which itself waits for this complete stop result).
         await launching;
-        if (!confirmed) this.cleanupFailed = true;
+        if (!confirmed || (audioStopped && !await audioStopped)) this.cleanupFailed = true;
         this.state = this.describe(this.cleanupFailed ? "error" : "stopped");
       } catch { this.cleanupFailed = true; this.state = this.describe("error"); }
       return this.snapshot();

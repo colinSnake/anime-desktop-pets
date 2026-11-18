@@ -4,8 +4,9 @@ import type { ChatWorkspaceState, ChatWorkspaceController, ChatTurn } from './ch
 const formatter = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
 export const replyTimestamp = (time: number, format = formatter): string => format.format(new Date(time));
 
-/** 保留macOS会话布局；默认无在线适配器，不呈现虚构的聊天记录。 */
+/** 保留 macOS 会话布局及角色隔离。 */
 export function ChatPage({state, controller, onOpenModels}:{state:ChatWorkspaceState;controller?:ChatWorkspaceController;onOpenModels():void}) {
+ useEffect(() => { void controller?.refreshModels(); }, [controller]);
  const {session} = state;
  const name = state.characters.find(character => character.id === state.selectedId)?.name ?? '桌宠';
  const scrollport = useRef<HTMLDivElement>(null);
@@ -28,15 +29,19 @@ export function ChatPage({state, controller, onOpenModels}:{state:ChatWorkspaceS
     <div className="chat-welcome"><svg className="chat-welcome-mark" viewBox="0 0 64 64" aria-hidden="true" fill="currentColor"><path d="M9 35C11 23 20 15 32 16L29 7C38 10 43 15 45 23L53 27C56 28.5 57 31 55 33L49 39L42 38L48 32L39 29C29 26 19 29 9 35Z"/><path d="M12 41C22 34 29 32 37 33L32 39C26 39 20 42 16 46C24 50 33 48 42 43C38 52 29 57 20 54C13 52 9 47 12 41Z"/></svg><h2>今天想和{name}聊点什么？</h2></div>}
   </div>
   <footer className="chat-footer">
-   {session.failed && !session.pending && <div className="chat-failure"><span>上一条消息没有得到回复。</span><button type="button" onClick={() => { void controller?.retry(); }}>重试</button><button type="button" disabled={!!session.draft} onClick={() => controller?.restoreDraft()}>恢复输入</button></div>}
-   <p className="chat-status" role="status" aria-live="polite">{session.status || (!state.selectedId ? '请先在“我的桌宠”中添加一个角色。' : !state.available ? <><span>模型服务尚未接入，草稿会保留。</span><button type="button" onClick={onOpenModels}>前往模型管理</button></> : '')}</p>
+   {session.failed && !session.pending && <div className="chat-failure"><span>上一条消息没有得到回复。</span><button type="button" disabled={state.canRetry === false} onClick={() => { void controller?.retry(); }}>重试</button><button type="button" disabled={!!session.draft} onClick={() => controller?.restoreDraft()}>恢复输入</button></div>}
+   {state.online && state.available && <p className="chat-status">在线发送会将问题、允许携带的同路由历史和获准的角色资料发给所选服务，可能产生费用。</p>}
+   <p className="chat-status" role="status" aria-live="polite">{session.status || (!state.selectedId ? '请先在“我的桌宠”中添加一个角色。' : !state.available ? <>
+    <span>{state.online ? state.modelStatus || (state.session.model ? '此连接缺少 Key，请前往模型管理。' : '请选择一个模型，或在模型管理设置默认模型。') : state.localAvailable ? '本机可查：你是谁、查看目标进度、查角色知识：关键词、查个人记忆：关键词。' : '模型服务尚未接入，草稿会保留。'}</span>
+    <button type="button" onClick={onOpenModels}>前往模型管理</button>{state.online && <button type="button" onClick={() => { void controller?.refreshModels(); }}>刷新模型</button>}
+   </> : '')}</p>
    <ChatComposer state={state} controller={controller} name={name} />
   </footer>
   {session.confirmingClear && <ClearChat onCancel={() => controller?.cancelClear()} onConfirm={() => controller?.confirmClear()} />}
  </section>;
 }
 function ChatMessage({turn}:{turn:ChatTurn}) {
- return <article className={`chat-message chat-message-${turn.role}`} data-turn-id={turn.id} aria-label={turn.role === 'assistant' ? '助手回复' : '你的消息'}><div className="chat-bubble">{turn.text}</div>{turn.role === 'assistant' && <time dateTime={new Date(turn.createdAt).toISOString()} aria-label={`回复时间 ${replyTimestamp(turn.createdAt)}`}>{replyTimestamp(turn.createdAt)}</time>}</article>;
+ return <article className={`chat-message chat-message-${turn.role}`} data-turn-id={turn.id} aria-label={turn.role === 'assistant' ? turn.localOnly ? '本机资料回复' : '助手回复' : '你的消息'}><div className="chat-bubble">{turn.localOnly && turn.role === 'assistant' && <strong className="chat-local-label">本机资料</strong>}{turn.text}</div>{turn.role === 'assistant' && <time dateTime={new Date(turn.createdAt).toISOString()} aria-label={`回复时间 ${replyTimestamp(turn.createdAt)}`}>{replyTimestamp(turn.createdAt)}</time>}</article>;
 }
 function ClearChat({onCancel,onConfirm}:{onCancel():void;onConfirm():void}) {
  const cancel = useRef<HTMLButtonElement>(null);

@@ -41,6 +41,7 @@ export function assetPath(input: string): string | undefined {
     )
       return;
     if (url.pathname === "/index.html") return "index.html";
+    if (url.pathname === "/assets/app-icon.svg") return "assets/app-icon.svg";
     if (/^\/assets\/[a-zA-Z0-9_-]+\.(js|css)$/.test(url.pathname))
       return url.pathname.slice(1);
   } catch {

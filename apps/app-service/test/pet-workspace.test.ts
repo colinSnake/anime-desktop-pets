@@ -120,7 +120,7 @@ test('clone has stable package reference but independent position and stopped re
  const added = await w.mutate('add', { expectedRevision: 0, package: pkg }); assert.ok(added.ok);
  const id = added.workspace.instances[0]!.id;
  const clone = await w.mutate('clone', { expectedRevision: 1, id }); assert.ok(clone.ok);
- assert.equal(clone.workspace.instances[1]!.id, `${id}-copy`);
+ assert.notEqual(clone.workspace.instances[1]!.id, id);
  assert.equal(clone.workspace.instances[1]!.autoStartOnLaunch, false);
  assert.deepEqual(clone.workspace.instances[1]!.package, pkg);
  phase = 'running';
@@ -180,6 +180,16 @@ test('closing drains queued changes and rejects new calls without leaking except
  assert.deepEqual(await w.list(), { ok: false, error: 'unavailable' });
 });
 
+test('deleting and cloning again allocates a new identity rather than reusing private data', async t => {
+ const { workspace: w } = await setup(t);
+ const added = await w.mutate('add', { expectedRevision: 0, package: pkg }); assert.ok(added.ok);
+ const original = added.workspace.instances[0]!.id;
+ const clone = await w.mutate('clone', { expectedRevision: 1, id: original }); assert.ok(clone.ok);
+ const removed = clone.workspace.instances[1]!.id;
+ assert.ok((await w.mutate('delete', { expectedRevision: 2, id: removed })).ok);
+ const fresh = await w.mutate('clone', { expectedRevision: 3, id: original }); assert.ok(fresh.ok);
+ assert.notEqual(fresh.workspace.instances[1]!.id, removed);
+});
 test('long legacy IDs can be cloned without double-hyphen or overlong identifiers', async t => {
  const {workspace:w,root} = await setup(t); await data(w);
  const id = 'a'.repeat(53) + '-bbbbbbbbbb';
@@ -296,9 +306,48 @@ test('pause gates owned and additional player starts, reports unconfirmed stop, 
  finishStop({kind:'qt-player',status:'stopped',detail:''});
  assert.deepEqual(await blockedStart,{ok:false,error:'busy'});
  assert.deepEqual(await pausedPromise,{ok:false,error:'apply-failed'});
- const failed=await w.list();assert.ok(failed.ok);assert.equal(failed.workspace.linkage,'stop-unconfirmed');
+ const failed=await w.list();assert.ok(failed.ok);assert.equal(failed.workspace.linkage,'stop-unconfirmed');assert.equal(w.taskLease.enable(),false);
  assert.equal(failed.workspace.revision,1);assert.equal(failed.workspace.instances[0]!.phase,'stopped');
  assert.doesNotMatch(await readFile(join(root,'workspace-state.json'),'utf8'),/linkage|paused/);
  assert.deepEqual(await w.mutate('resume',{expectedRevision:1}),{ok:false,error:'active'});
  assert.deepEqual(calls,['stop','additional-stop']);
+});
+
+test('workspace pause and close revoke task reads synchronously; resume does not reauthorize', async t => {
+ const {workspace:w,root}=await setup(t);
+ const seeded=await w.mutate('add',{expectedRevision:0,package:pkg});assert.ok(seeded.ok);
+ const before=await readFile(join(root,'workspace-state.json'),'utf8');
+ const lease=w.taskLease;
+ const probe=async ()=>'running' as const;
+ const read=async ()=>({state:'working',activeCount:1,startSerial:2});
+ for (const expectedRevision of [0,1]) {
+  assert.ok(lease.enable());assert.ok(await lease.refresh(probe));
+  let deliver!: (value: Awaited<ReturnType<typeof read>>) => void;
+  let permit!: AbortSignal;
+  const pending=lease.sample(signal=>{permit=signal;return new Promise(resolve=>{deliver=resolve;});});
+  const paused=w.mutate('pause',{expectedRevision});
+  assert.equal(permit.aborted,true);
+  assert.equal(lease.enable(),false);
+  assert.equal(await pending,undefined);
+  deliver(await read());
+  const result=await paused;
+  if(expectedRevision===0) assert.deepEqual(result,{ok:false,error:'conflict'});
+  else {
+   assert.ok(result.ok);assert.equal(result.workspace.linkage,'paused');
+   assert.equal(lease.enable(),false);
+   assert.ok((await w.mutate('resume',{expectedRevision:1})).ok);
+  }
+  assert.equal(await lease.refresh(probe),false);
+  assert.equal(await lease.sample(read),undefined);
+  assert.equal(await readFile(join(root,'workspace-state.json'),'utf8'),before);
+  await assert.rejects(readFile(join(root,'codex-task-lease.json')),{code:'ENOENT'});
+ }
+ assert.ok(lease.enable());assert.ok(await lease.refresh(probe));
+ let permit!:AbortSignal;
+ const pending=lease.sample(signal=>{permit=signal;return new Promise(resolve=>signal.addEventListener('abort',()=>resolve(undefined),{once:true}));});
+ const closed=w.close();
+ assert.equal(permit.aborted,true);
+ assert.equal(lease.enable(),false);
+ assert.equal(await pending,undefined);
+ await closed;
 });

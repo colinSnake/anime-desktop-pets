@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { ModelError } from './errors.ts';
-import { MODEL_PROTOCOLS, type Compatibility, type ModelConfiguration, type ModelProtocol, type ModelPurpose, type ModelRoute, type ModelSelection } from './types.ts';
+import { MODEL_PROTOCOLS, type Compatibility, type ModelConfiguration, type ModelConnection, type ModelEntry, type ModelProtocol, type ModelPurpose, type ModelRoute, type ModelSelection } from './types.ts';
 const invalid = (): never => { throw new ModelError('invalid_configuration'); };
 const record = (x: unknown): x is Record<string,unknown> => typeof x === 'object' && x !== null && !Array.isArray(x);
 const keys = (x: Record<string,unknown>, allowed: string[]) => Object.keys(x).every(key => allowed.includes(key));
@@ -49,9 +49,15 @@ export function resolveRoute(configuration: ModelConfiguration, selection: Model
   const c=config.connections.find(c=>c.id === (selection?.connectionID ?? config.defaultConnectionID));
   const m=c?.models.find(m=>m.entryID === (selection?.modelEntryID ?? c.defaultModelEntryID));
   if (!c || !m) throw new ModelError(selection ? 'route_changed' : 'not_configured');
+  const route = routeFor(config.revision,c,m,purpose);
+  if (selection && selection.fingerprint !== route.fingerprint) throw new ModelError('route_changed');
+  return route;
+}
+
+/** Build a route from a connection and model taken from a validated snapshot. */
+export function routeFor(revision: number, c: ModelConnection, m: ModelEntry, purpose: ModelPurpose): ModelRoute {
   const baseURL=validateBaseURL(c.baseURL,c.apiProtocol);
   const compatibility={...c.compatibility,...m.compatibility};
   const fingerprint=createHash('sha256').update(JSON.stringify([c.id,c.apiProtocol,baseURL,c.authMode,c.credentialRef ?? null,m.entryID,m.modelID,compatibility])).digest('hex');
-  if (selection && selection.fingerprint !== fingerprint) throw new ModelError('route_changed');
-  return {connectionID:c.id,modelEntryID:m.entryID,fingerprint,configurationRevision:config.revision,connectionRevision:c.revision,apiProtocol:c.apiProtocol,baseURL,authMode:c.authMode,...(c.credentialRef ? {credentialRef:c.credentialRef} : {}),modelID:m.modelID,compatibility,tools:m.capabilities.tools.status,purpose,tokenBudget:Math.min(purpose==='text-chat'?2048:160,m.maxOutputTokens ?? 2048),timeoutMs:purpose==='text-chat'?60_000:25_000};
+  return {connectionID:c.id,modelEntryID:m.entryID,fingerprint,configurationRevision:revision,connectionRevision:c.revision,apiProtocol:c.apiProtocol,baseURL,authMode:c.authMode,...(c.credentialRef ? {credentialRef:c.credentialRef} : {}),modelID:m.modelID,compatibility,tools:m.capabilities.tools.status,purpose,tokenBudget:Math.min(purpose==='text-chat'?2048:160,m.maxOutputTokens ?? 2048),timeoutMs:purpose==='text-chat'?60_000:25_000};
 }

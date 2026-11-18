@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { array, call, discoveryPath, invalidResponse, object, recalled, reply, snapshotInput, string, token, usage } from './common.ts';
+import { modelUserText, array, call, discoveryItems, discoveryPath, invalidResponse, object, recalled, reply, snapshotInput, string, token, usage } from './common.ts';
 import type { JsonObject, ProtocolAdapter, ToolCall } from './types.ts';
 export const gemini: ProtocolAdapter = {
   encode(route, original) {
@@ -15,7 +15,7 @@ export const gemini: ProtocolAdapter = {
           pendingCalls = []; results.clear();
         }
       }
-      else if (m.role === 'user') push('user', [{ text: m.text }]);
+      else if (m.role === 'user') push('user', [{ text: modelUserText(input, m) }]);
       else {
         pendingCalls = m.toolCalls ?? [];
         const data = recalled(m, route);
@@ -50,8 +50,9 @@ export const gemini: ProtocolAdapter = {
     return reply(route, text, calls, finish === 'MAX_TOKENS' ? 'length' : calls.length ? 'tools' : 'end', counts, replay);
   },
   discovery(cursor) { return { path: discoveryPath('/models', cursor, 'pageToken', 'pageSize=100'), headers: {} }; },
-  decodeDiscovery(raw) {
-    const root = object(raw), models = array(root.models).flatMap(v => {
+  decodeDiscovery(raw, firstPage) {
+    const root = object(raw), { items, truncated } = discoveryItems(root.models, firstPage);
+    const models = items.flatMap(v => {
       const m = object(v), methods = array(m.supportedGenerationMethods).map(v => string(v, 128));
       if (!methods.includes('generateContent')) return [];
       const name = token(m.name, 263); if (!name.startsWith('models/') || !name.slice(7)) return invalidResponse();
@@ -62,6 +63,6 @@ export const gemini: ProtocolAdapter = {
       }
       return [{ ...result, ...limits }];
     });
-    return { models, ...(root.nextPageToken === undefined || root.nextPageToken === '' ? {} : { next: token(root.nextPageToken, 1024) }) };
+    return { models, ...(truncated ? { truncated: true } : {}), ...(root.nextPageToken === undefined || root.nextPageToken === '' ? {} : { next: token(root.nextPageToken, 1024) }) };
   },
 };

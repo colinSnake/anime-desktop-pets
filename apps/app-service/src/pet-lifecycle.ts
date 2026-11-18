@@ -1,8 +1,12 @@
 import type { PlayerController, PlayerSnapshot, PlayerInitialPreferences } from '../../../packages/contracts/src/index.ts';
 import type { PetDefinition, PetError, PetPhase, RuntimeBehaviorState } from '../../../packages/contracts/src/pets.ts';
 
+import type { TaskSnapshot } from './codex-task-lease.ts';
+import { TASK_ANIMATION_MS, taskAnimationOff, type TaskAnimation } from './task-animation.ts';
+
+type OwnedPlayer = PlayerController & { applyTaskAnimation?(value: TaskAnimation): void };
 type Position = { x: number; y: number };
-type Owned = { controller: PlayerController; pending?: 'starting' | 'stopping'; epoch: number; positionEpoch: number; failed: boolean; applied?: { size: number; hideInFullscreen: boolean; visible: boolean }; behavior?: RuntimeBehaviorState; positionFeedback?: Position & { status: 'saving' | 'saved' | 'failed' } };
+type Owned = { controller: OwnedPlayer; taskStartFloor: number; pending?: 'starting' | 'stopping'; epoch: number; positionEpoch: number; failed: boolean; applied?: { size: number; hideInFullscreen: boolean; visible: boolean }; behavior?: RuntimeBehaviorState; positionFeedback?: Position & { status: 'saving' | 'saved' | 'failed' } };
 function phase(status: PlayerSnapshot['status']): PetPhase {
   return status === 'error' ? 'failed' : status === 'blocked' || status === 'unconfigured' ? 'not-connected' : status;
 }
@@ -11,8 +15,10 @@ export class PetLifecycle {
   private owned = new Map<string, Owned>();
   private closing?: Promise<void>;
   private paused = false;
+  private task = taskAnimationOff;
+  private highestTaskStart = 0;
   private positionWriter?: (id: string, position: Position) => Promise<boolean>;
-  constructor(private options: { supports(pet: PetDefinition): boolean; create(pet: PetDefinition): PlayerController }) {}
+  constructor(private options: { supports(pet: PetDefinition): boolean; create(pet: PetDefinition): OwnedPlayer }) {}
   phase(pet: PetDefinition): PetPhase {
     const own = this.owned.get(pet.id);
     return own ? own.pending ?? (own.failed ? 'failed' : phase(own.controller.snapshot().status)) : this.options.supports(pet) ? 'stopped' : 'not-connected';
@@ -25,6 +31,21 @@ export class PetLifecycle {
   }
   positionFeedback(pet: PetDefinition) { const value = this.owned.get(pet.id)?.positionFeedback; return value && { ...value }; }
   setPositionWriter(writer: (id: string, position: Position) => Promise<boolean>) { this.positionWriter = writer; }
+  updateTaskAnimation(snapshot: TaskSnapshot | undefined): void {
+    if (this.closing || this.paused) return;
+    if (snapshot) this.highestTaskStart = Math.max(this.highestTaskStart, snapshot.startSerial);
+    this.task = snapshot ? {
+      state: snapshot.state, startSerial: snapshot.startSerial,
+      expiresAt: snapshot.state === 'working' ? Date.now() + TASK_ANIMATION_MS : 0,
+    } : taskAnimationOff;
+    for (const own of this.owned.values()) this.sendTaskAnimation(own);
+  }
+  private sendTaskAnimation(own: Owned): void {
+    if (this.closing || this.paused || own.pending || own.failed || own.controller.snapshot().status !== 'running') return;
+    const task = this.task.state === 'working' && this.task.expiresAt <= Date.now() ? taskAnimationOff : this.task;
+    try { own.controller.applyTaskAnimation?.({ ...task, startSerial: task.startSerial > own.taskStartFloor ? task.startSerial : 0 }); }
+    catch { /* Optional task feedback cannot fail a player's startup or stop. */ }
+  }
   start(pet: PetDefinition): PetError | undefined {
     if (this.closing) return 'unavailable';
     if (this.paused) return 'busy';
@@ -37,7 +58,7 @@ export class PetLifecycle {
     if ([...this.owned.values()].filter(own => own.pending || own.failed || own.controller.snapshot().status !== 'stopped').length >= 3) return 'limit';
     let own = this.owned.get(pet.id);
     if (!own) {
-      try { own = { controller: this.options.create(structuredClone(pet)), epoch: 0, positionEpoch: 0, failed: false }; }
+      try { own = { controller: this.options.create(structuredClone(pet)), epoch: 0, positionEpoch: 0, failed: false, taskStartFloor: 0 }; }
       catch { return 'unavailable'; }
       this.owned.set(pet.id, own);
       own.controller.setPositionListener?.(position => { void this.persistPosition(pet.id, own!, position); });
@@ -47,6 +68,8 @@ export class PetLifecycle {
     this.command(own, 'start', 'starting', () => {
       own!.applied = { size: preferences.size, hideInFullscreen: preferences.hideInFullscreen, visible: true };
       own!.behavior = { status: 'applied', scheduledActivity: preferences.scheduledActivity, movement: preferences.movement };
+      own!.taskStartFloor = this.highestTaskStart;
+      this.sendTaskAnimation(own!);
     }, preferences);
   }
   private async persistPosition(id: string, own: Owned, position: Position) {
@@ -66,6 +89,7 @@ export class PetLifecycle {
   }
   async pauseAll(): Promise<boolean> {
     if (this.closing) return false;
+    this.task = taskAnimationOff;
     this.paused = true;
     const results = await Promise.all([...this.owned.values()].map(async own => {
       const current = own.controller.snapshot().status;

@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "build:cross-platform": "node scripts/build-cross-platform.mjs",
     "dev:desktop": "pnpm run build:cross-platform && electron apps/desktop",
+    "dev:desktop:codex": "pnpm run build:cross-platform && electron apps/desktop --launch-codex",
     "test:bridge": "node scripts/test-runtime-bridge.mjs",
     "check:cross-platform": "pnpm run test:workspace && pnpm run test:tooling && pnpm run typecheck && pnpm run test:cross-platform && pnpm run test:bridge && pnpm run build:cross-platform && pnpm run test:build",
     "test:build": "node --test apps/desktop/test/build-smoke.test.mjs",

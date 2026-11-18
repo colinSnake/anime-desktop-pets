@@ -1,0 +1,37 @@
+/* Keep light-dark() on the workspace scope so explicit themes can override the system scheme. */
+:root, .workspace {
+  --canvas: light-dark(#fafafa, #1c1c1f);
+  --sidebar: light-dark(#f2f2f5, #242428);
+  --surface: light-dark(#ffffff, #29292e);
+  --surface-soft: light-dark(#f4f4f7, #303035);
+  --text: light-dark(#29282c, #efedf1);
+  --muted: light-dark(#65636e, #b4b1bb);
+  --line: light-dark(#dcdce3, #45444c);
+  --accent: light-dark(#674aa2, #c1a8ed);
+  --accent-hover: light-dark(#553987, #d2bdf4);
+  --accent-ink: light-dark(#ffffff, #251836);
+  --accent-soft: light-dark(#eee8f8, #393047);
+  --accent-text: light-dark(#553a82, #dcc9f7);
+  --focus: light-dark(#7154a5, #c7adf2);
+  --success: light-dark(#226a58, #a5d4bd);
+  --danger: light-dark(#a2473a, #ecab98);
+  --danger-soft: light-dark(#f8eae3, #432e28);
+  --warning: light-dark(#916b25, #e0c78d);
+  --shadow: 0 10px 32px #12101c0a;
+  --shadow-control-ink: #0000000a;
+  --shadow-popover-ink: #0002;
+  --shadow-dialog-ink: #0003;
+  --shadow-confirmation-ink: #00000030;
+  --shadow-drawer-ink: #00000018;
+  --backdrop-dialog: #0004;
+  --overlay: #15131da6;
+  --overlay-soft: #15131d59;
+  --transparent: transparent;
+  --system-focus: Highlight;
+  --system-button-ink: ButtonText;
+  /* Old macOS interaction gradient, separate from the colors inside the app icon. */
+  --brand-cyan: #21cfde;
+  --brand-violet: #9e7dd6;
+  --brand-pearl: #f5f2fc;
+  --brand-focus-gradient: linear-gradient(to right, var(--brand-cyan), var(--brand-violet) 55%, var(--brand-pearl));
+}

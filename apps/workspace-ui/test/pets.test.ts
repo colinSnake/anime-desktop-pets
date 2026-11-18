@@ -95,8 +95,8 @@ test('SSR starts on pets with all nine navigation entries and truthful empty cat
   const html = renderToStaticMarkup(createElement(WorkspaceView, diagnostics));
   for (const title of ['我的桌宠', '聊天', '身份', '记忆', '能力与目标', '模型管理', '语音互动', '直播管理', '高级']) assert.ok(html.includes(title), title);
   assert.match(html, /aria-current="page"[^>]*>.*我的桌宠/);
-  const planned = renderToStaticMarkup(createElement(WorkspaceView, {...diagnostics,initialPage:'models'}));
-  assert.match(planned, /功能尚未迁移/); assert.match(html, /尚未连接桌面宿主/);
+  const speech = renderToStaticMarkup(createElement(WorkspaceView, {...diagnostics,initialPage:'speech'}));
+  assert.match(speech, /disabled=""[^>]*>保存语音设置/); assert.match(html, /尚未连接桌面宿主/);
   assert.doesNotMatch(html, /启动开发桌宠/);
 });
 

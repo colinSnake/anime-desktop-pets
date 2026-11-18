@@ -1,5 +1,6 @@
 """Private bounded NDJSON protocol. No Qt, filesystem reads, or user data."""
 import json
+import unicodedata
 import os
 import re
 
@@ -73,11 +74,24 @@ def parse_request(line, session):
     elif raw.get('command') == 'apply-behavior':
         value = _parse(line, {'version', 'session', 'id', 'command', 'preferences'})
         _behavior_preferences(value['preferences'])
+    elif raw.get('command') == 'task-animation':
+        value = _parse(line, {'version', 'session', 'id', 'command', 'task'})
+        _task_animation(value['task'])
     else:
         value = _parse(line, {'version', 'session', 'id', 'command'})
-    if value['session'] != session or value['command'] not in ('status', 'stop', 'show', 'hide', 'apply', 'apply-behavior'):
+    if value['session'] != session or value['command'] not in ('status', 'stop', 'show', 'hide', 'apply', 'apply-behavior', 'task-animation'):
         raise ValueError('invalid_request')
     return value
+
+
+def _task_animation(value):
+    if not isinstance(value, dict) or set(value) != {'state', 'startSerial', 'expiresAt'}:
+        raise ValueError('invalid_task_animation')
+    state, serial, deadline = value['state'], value['startSerial'], value['expiresAt']
+    if (state not in ('working', 'idle', 'unknown', 'disabled') or
+            any(type(n) is not int or not 0 <= n <= 2**53 - 1 for n in (serial, deadline)) or
+            (deadline == 0 if state == 'working' else (serial != 0 or deadline != 0))):
+        raise ValueError('invalid_task_animation')
 
 
 def _preferences(value, allow_position=False):
@@ -122,3 +136,14 @@ def position_event(x, y):
         raise ValueError('invalid_position')
     return (json.dumps(dict(version=3, event='position', x=x, y=y),
                        separators=(',', ':')) + '\n').encode('utf-8')
+
+
+def bubble_speech_event(text):
+    """A visible local interaction cue; no legacy socket, account or task lookup."""
+    if (not isinstance(text, str) or not 0 < len(text) <= 120 or
+            text.strip().strip('\ufeff') != text or
+            any(unicodedata.category(char) in ('Cc', 'Cs') for char in text) or
+            len(text.encode('utf-8')) > 512):
+        raise ValueError('invalid_speech_cue')
+    return (json.dumps(dict(version=3, event='bubble-speech', text=text),
+                       ensure_ascii=False, separators=(',', ':')) + '\n').encode('utf-8')

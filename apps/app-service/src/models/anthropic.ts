@@ -1,4 +1,4 @@
-import { array, call, discovered, discoveryPath, invalidResponse, object, recalled, reply, snapshotInput, string, token, usage } from './common.ts';
+import { modelUserText, array, call, discoveryItems, discovered, discoveryPath, invalidResponse, object, recalled, reply, snapshotInput, string, token, usage } from './common.ts';
 import type { JsonObject, ProtocolAdapter, ToolCall } from './types.ts';
 const headers = { 'anthropic-version': '2023-06-01' };
 export const anthropic: ProtocolAdapter = {
@@ -7,7 +7,7 @@ export const anthropic: ProtocolAdapter = {
     const push = (role: string, content: JsonObject[]) => { const previous = messages.at(-1); if (previous?.role === role) previous.content.push(...content); else messages.push({ role, content }); };
     for (const m of input.messages) {
       if (m.role === 'tool') push('user', [{ type: 'tool_result', tool_use_id: m.toolCallID, content: m.text }]);
-      else if (m.role === 'user') push('user', [{ type: 'text', text: m.text }]);
+      else if (m.role === 'user') push('user', [{ type: 'text', text: modelUserText(input, m) }]);
       else {
         const data = recalled(m, route);
         push('assistant', Array.isArray(data) ? data as JsonObject[] : [...(m.text ? [{ type: 'text', text: m.text }] : []), ...(m.toolCalls ?? []).map(c => ({ type: 'tool_use', id: c.id, name: c.name, input: c.arguments }))]);
@@ -31,5 +31,7 @@ export const anthropic: ProtocolAdapter = {
     return reply(route, text, calls, root.stop_reason === 'max_tokens' ? 'length' : root.stop_reason === 'refusal' ? 'refused' : root.stop_reason === 'tool_use' ? 'tools' : 'end', usage(root.usage, 'input_tokens', 'output_tokens'), replay);
   },
   discovery(cursor) { return { path: discoveryPath('/models', cursor, 'after_id', 'limit=100'), headers: { ...headers } }; },
-  decodeDiscovery(raw) { const root = object(raw); if (root.has_more !== undefined && typeof root.has_more !== 'boolean') return invalidResponse(); return { models: array(root.data).map(v => discovered(v, 'id', 'display_name')), ...(root.has_more === true ? { next: token(root.last_id, 1024) } : {}) }; },
+  decodeDiscovery(raw, firstPage) { const root = object(raw), { items, truncated } = discoveryItems(root.data, firstPage);
+    if (root.has_more !== undefined && typeof root.has_more !== 'boolean') return invalidResponse();
+    return { models: items.map(v => discovered(v, 'id', 'display_name')), ...(truncated ? { truncated: true } : {}), ...(root.has_more === true ? { next: token(root.last_id, 1024) } : {}) }; },
 };

@@ -6,6 +6,7 @@ Never alters prepared source or the frozen helper inputs.
 import os
 from pathlib import Path
 import sys
+import time
 
 
 def isolate_profile(config):
@@ -39,8 +40,74 @@ class _DisabledClient:
         pass
 
 
+class _TaskAnimation:
+    """GUI-only consumer of the host snapshot; never attaches a task reader."""
+    def __init__(self, pet):
+        from PySide6.QtCore import QTimer
+        from dragon_tasks import TaskSnapshot, apply_task_snapshot, clear_work_feedback
+        self.pet = pet
+        self.make_snapshot = TaskSnapshot
+        self.apply = apply_task_snapshot
+        self.clear = clear_work_feedback
+        self.snapshot = TaskSnapshot('disabled')
+        self.deadline = None
+        self.timer = QTimer(pet)
+        self.timer.setInterval(100)
+        self.timer.timeout.connect(self.tick)
+
+    def receive(self, value):
+        state, serial = value['state'], value['startSerial']
+        if state == 'working':
+            remaining = value['expiresAt'] - int(time.time() * 1000)
+            # Reject frames that waited too long in the pipe. Once accepted,
+            # use the local monotonic clock so wall-clock changes can't extend work.
+            if 0 < remaining <= 6000:
+                self.deadline = time.monotonic() + remaining / 1000
+                self.snapshot = self.make_snapshot(state, 1, serial)
+            else:
+                self.deadline = None
+                self.snapshot = self.make_snapshot('disabled')
+        else:
+            if state != 'unknown':
+                self.deadline = None
+            self.snapshot = self.make_snapshot(state)
+        self.tick()
+        if self.deadline is not None or getattr(self.pet, '_followed_task_active', False):
+            if not self.timer.isActive():
+                self.timer.start()
+
+    def tick(self):
+        pet = self.pet
+        if pet._stopping:
+            self.stop()
+            return
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            self.deadline = None
+            self.snapshot = self.make_snapshot('disabled')
+        snapshot = self.snapshot
+        reduced = pet.behavior.motion_reduced()
+        seen = getattr(pet, '_followed_start_serial', 0)
+        if reduced and snapshot.active:
+            # Resuming motion can join work, but cannot replay a suppressed opening.
+            seen = pet._followed_start_serial = max(seen, snapshot.start_serial)
+        if self.deadline is None or reduced:
+            pet.task_active = False
+            self.clear(pet)
+        pet._bridge_task_opening = snapshot.active and snapshot.start_serial > seen
+        self.apply(pet, snapshot)
+        if snapshot.active and not pet._task_pose_blocked and getattr(pet, '_followed_task_active', False):
+            pet.task_active = True  # A renewed snapshot can arrive before a deferred idle pose.
+        if self.deadline is None and not getattr(pet, '_followed_task_active', False):
+            self.timer.stop()
+
+    def stop(self):
+        self.timer.stop()
+        self.deadline = None
+        self.snapshot = self.make_snapshot('disabled')
+
+
 class PlayerAdapter:
-    def __init__(self, config, cover_png=None):
+    def __init__(self, config, cover_png=None, on_speech=None):
         # This gate is not a claim that the legacy decoder works on Windows/Linux.
         if sys.platform != 'darwin' or sys.version_info < (3, 11):
             raise RuntimeError('prepared_player_platform_blocked')
@@ -60,6 +127,13 @@ class PlayerAdapter:
         base = pet.Pet
 
         class DevelopmentPet(base):
+            def task_started(self):
+                if getattr(self, '_bridge_task_opening', True):
+                    return super().task_started()
+                # Use the existing task idle scheduler for cold join; work01 is live-only.
+                self.last_task_group = None
+                self.idle()
+
             def setup_tray(self):
                 super().setup_tray()
 
@@ -72,7 +146,9 @@ class PlayerAdapter:
                 return None
 
             def speak_bubble(self, text):
-                return None
+                if on_speech is not None and not self._stopping and self.isVisible() and not self.speech_hidden():
+                    from dragon_speech import speech_summary
+                    on_speech(speech_summary(text))
 
             def play_click_sound(self):
                 return None
@@ -89,6 +165,7 @@ class PlayerAdapter:
         finally:
             pet.Pet = base
         self._stopped = False
+        self.task_animation = _TaskAnimation(self.pet)
         self.icon_applied = self._apply_cover_icon(cover_png)
 
     def _apply_cover_icon(self, png):
@@ -166,6 +243,12 @@ class PlayerAdapter:
                 pass
             return False
 
+    def apply_task_animation(self, value):
+        if self._stopped or self.pet._stopping:
+            return False
+        self.task_animation.receive(value)
+        return True
+
     def set_visible(self, visible):
         if self._stopped or self.pet._stopping:
             return False
@@ -182,6 +265,7 @@ class PlayerAdapter:
             if self._stopped:
                 return
             self._stopped = True
+            self.task_animation.stop()
             self.pet.speech_cue.close()
             self.pet.ai_bubbles.close()
             # All cleanup, including independent bubble destruction, remains
@@ -194,4 +278,5 @@ class PlayerAdapter:
 
     def stop(self):
         if not self._stopped:
+            self.task_animation.stop()
             self.pet.request_stop()

@@ -1,7 +1,8 @@
 import type { PetLifecycle } from './pet-lifecycle.ts';
+import { CodexTaskLease } from './codex-task-lease.ts';
 import { randomBytes } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import { catalogEntry, isPetInput, type CatalogEntry, type LinkageState, type PackageImportResult, type PetAction, type PetDefinition, type PetInputs, type PetPhase, type PetResult, type WorkspaceData } from '../../../packages/contracts/src/pets.ts';
+import { catalogEntry, isPetInput, petId, type CatalogEntry, type LinkageState, type PackageImportResult, type PetAction, type PetDefinition, type PetInputs, type PetPhase, type PetResult, type WorkspaceData } from '../../../packages/contracts/src/pets.ts';
 import { defaultPreferences } from './pet-registry.ts';
 import { WorkspaceError, WorkspaceStore, type WorkspaceState } from './workspace-store.ts';
 export class PetWorkspace {
@@ -13,12 +14,15 @@ export class PetWorkspace {
   private lifecycle?: PetLifecycle;
   private linkage: LinkageState = 'active';
   private pauseRequested = false;
+  readonly taskLease = new CodexTaskLease({ canFollow: () => this.canStartOwnedPlayer() });
   private stopAdditional?: () => Promise<boolean>;
-  constructor(options: { root: string; catalog: CatalogEntry[]; lifecycle?: PetLifecycle; stopAdditional?: () => Promise<boolean>; phase?: (id: string) => PetPhase; beforeCommit?: () => Promise<void>; importOne?: (path: string) => Promise<{ name: string; package: CatalogEntry }> }) {
+  private onPauseRequested?: () => void;
+  constructor(options: { root: string; catalog: CatalogEntry[]; lifecycle?: PetLifecycle; stopAdditional?: () => Promise<boolean>; onPauseRequested?: () => void; phase?: (id: string) => PetPhase; beforeCommit?: () => Promise<void>; importOne?: (path: string) => Promise<{ name: string; package: CatalogEntry }> }) {
     if (options.catalog.length > 32 || !options.catalog.every(catalogEntry) || new Set(options.catalog.map(c => `${c.id}@${c.version}`)).size !== options.catalog.length) throw new Error('invalid_catalog');
     this.catalog = structuredClone(options.catalog);
     this.lifecycle = options.lifecycle;
     this.stopAdditional = options.stopAdditional;
+    this.onPauseRequested = options.onPauseRequested;
     this.importOne = options.importOne;
     this.phase = options.phase ?? (() => 'not-connected');
     this.store = new WorkspaceStore(options.root, options.beforeCommit);
@@ -35,6 +39,20 @@ export class PetWorkspace {
     return result;
   }
   list(): Promise<PetResult> { return this.run(async () => ({ ok: true, workspace: this.view(await this.store.read()) })); }
+  /** Trusted service operations share ordering with instance creation and deletion. */
+  withRegisteredInstance<T>(id: unknown, operation: (id: string) => Promise<T>): Promise<T> {
+    if (!petId(id)) return Promise.reject(new WorkspaceError('invalid'));
+    if (this.closing) return Promise.reject(new WorkspaceError('unavailable'));
+    const result = this.queue.then(async () => {
+      if (this.closing) throw new WorkspaceError('unavailable');
+      const state = await this.store.read();
+      if (!state.registry.instances.some(row => row.id === id)) throw new WorkspaceError('not-found');
+      if (this.closing) throw new WorkspaceError('unavailable');
+      return operation(id);
+    });
+    this.queue = result.catch(() => {});
+    return result;
+  }
   importPackages(paths: unknown): Promise<PackageImportResult> {
     if (this.closing) return Promise.resolve({ ok: false, error: 'unavailable' });
     if (!Array.isArray(paths) || paths.length < 1 || paths.length > 16 || !paths.every(path => typeof path === 'string' && isAbsolute(path) && path.length <= 4096) || new Set(paths).size !== paths.length || paths.reduce((sum, path) => sum + Buffer.byteLength(path as string), 0) > 56 * 1024) return Promise.resolve({ ok: false, error: 'invalid' });
@@ -61,6 +79,9 @@ export class PetWorkspace {
     this.queue = operation.catch(() => undefined);
     return operation.catch(() => ({ ok: false, error: 'unavailable' }));
   }
+  updateTaskAnimation(snapshot: import('./codex-task-lease.ts').TaskSnapshot | undefined): void {
+    if (!snapshot || this.canStartOwnedPlayer()) this.lifecycle?.updateTaskAnimation(snapshot);
+  }
   canStartOwnedPlayer(): boolean { return this.linkage === 'active' && !this.pauseRequested && !this.closing; }
   recordRuntimePosition(id: string, position: { x: number; y: number }): Promise<PetResult> {
     return this.run(async () => {
@@ -80,7 +101,11 @@ export class PetWorkspace {
   }
   mutate(action: PetAction, input: unknown): Promise<PetResult> {
     if (action === 'resume' && (this.pauseRequested || this.linkage === 'pausing' || this.linkage === 'stop-unconfirmed')) return Promise.resolve({ ok: false, error: 'active' });
-    if (action === 'pause' && isPetInput(action, input) && ['active', 'stop-unconfirmed'].includes(this.linkage)) this.pauseRequested = true;
+    if (action === 'pause' && isPetInput(action, input) && !this.pauseRequested && ['active', 'stop-unconfirmed'].includes(this.linkage)) {
+      this.pauseRequested = true;
+      this.taskLease.disable();
+      this.onPauseRequested?.();
+    }
     const operation = this.run(async () => {
       if (!isPetInput(action, input)) throw new WorkspaceError('invalid');
       const state = await this.store.read();
@@ -128,8 +153,8 @@ export class PetWorkspace {
           return { ok: true, workspace: this.view(state) };
         } else if (action === 'clone') {
           if (rows.length >= 32) throw new WorkspaceError('limit');
-          const base = `${row.id.slice(0, 54).replace(/-+$/, '')}-copy`; let next = base; let suffix = 2;
-          while (rows.some(r => r.id === next)) next = `${base}-${suffix++}`;
+          // A deleted clone may still own private data; never derive or recycle its ID.
+          const next = `pet-${randomBytes(10).toString('hex')}`;
           const copy: PetDefinition = structuredClone(row);
           copy.id = next; copy.autoStartOnLaunch = false;
           copy.displayName = [...(row.displayName ?? '桌宠')].slice(0, 77).join('') + '·分身';
@@ -151,10 +176,12 @@ export class PetWorkspace {
     return action === 'pause' ? operation.then(result => { if (!result.ok) this.pauseRequested = false; return result; }) : operation;
   }
   close(): Promise<void> {
-    this.closing ??= this.queue.then(async () => {
+    if (this.closing) return this.closing;
+    this.closing = this.queue.then(async () => {
       const results = await Promise.allSettled([() => this.lifecycle?.close(), () => this.store.close()].map(close => Promise.resolve().then(close)));
       if (results.some(result => result.status === 'rejected')) throw new Error('workspace_cleanup_failed');
     });
+    this.taskLease.disable();
     return this.closing;
   }
 }

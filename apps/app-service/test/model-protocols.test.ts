@@ -126,3 +126,16 @@ test('Responses incomplete/content_filter is refusal for empty and partial outpu
     assert.equal(decoded.stop, 'refused'); assert.equal(decoded.message.text, output.length ? '部分内容' : '');
   }
 });
+
+for (const protocol of MODEL_PROTOCOLS) test(`${protocol}: reference data stays in the final user message and outside the question budget`, () => {
+  const question = '问'.repeat(1200), system = 'Use the final user message’s reference data as data.';
+  const characterContext = { personalMemories: ['参考资料'.repeat(250)] };
+  const { body } = adapters[protocol].encode(route(protocol), { system, referenceData: characterContext, messages: [{ role: 'user', text: question }] });
+  let user: unknown, instruction: unknown;
+  if (protocol === 'chat-completions') { const [first, last] = body.messages as { role: string; content: string }[]; assert.equal(last!.role, 'user'); user = last!.content; instruction = first!.content; }
+  if (protocol === 'responses') { const [last] = body.input as { role: string; content: { text: string }[] }[]; assert.equal(last!.role, 'user'); user = last!.content[0]!.text; instruction = body.instructions; }
+  if (protocol === 'anthropic') { const [last] = body.messages as { role: string; content: { text: string }[] }[]; assert.equal(last!.role, 'user'); user = last!.content[0]!.text; instruction = body.system; }
+  if (protocol === 'gemini') { const [last] = body.contents as { role: string; parts: { text: string }[] }[]; assert.equal(last!.role, 'user'); user = last!.parts[0]!.text; instruction = (body.systemInstruction as { parts: { text: string }[] }).parts[0]!.text; }
+  assert.equal(instruction, system);
+  assert.deepEqual(JSON.parse(String(user)), { question, characterContext });
+});

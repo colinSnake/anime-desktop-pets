@@ -1,7 +1,10 @@
+import type { OnlineChatInput, ChatSendResult } from '../../../packages/contracts/src/online-chat.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ChatWorkspaceController, characterCount, validatedMessage, trimTranscript, requestHistory, type ChatTurn, type ChatRequest } from '../src/chat-session.ts';
 import { ComposerKeyboard } from '../src/chat-input.ts';
+
+const deferred = <T>() => { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; };
 
 const characters = [{ id: 'pet-one', name: '龙妹' }, { id: 'pet-two', name: '二号' }];
 const models = [{ id: 'test-model', name: '合成模型' }];
@@ -143,4 +146,80 @@ test('invalid replies become retryable failures instead of success and do not ex
   assert.equal(c.getSnapshot().session.failed,true);assert.equal(c.getSnapshot().session.pending,false);
   assert.equal(c.getSnapshot().session.turns.length,1);assert.equal(c.getSnapshot().session.draft,'保留提问');
  }
+});
+
+test('local chat only dispatches explicit commands and its exchanges never enter model history', async () => {
+ const asked: unknown[] = [];
+ const online: ChatRequest[] = [];
+ const c = new ChatWorkspaceController({ models, reply: async request => { online.push(request); return '合成模型回复'; } }, {
+  localChatContext: async input => { asked.push(input); return { ok: true, petID: input.petID, text: '本机合成知识' }; },
+ });
+ c.syncCharacters(characters);
+ c.edit('查角色知识：合成密钥');
+ assert.equal(await c.send(), false);
+ assert.equal(asked.length + online.length, 0);
+ c.edit('查角色知识：星图');
+ assert.equal(await c.send(), true);
+ assert.deepEqual(asked, [{ petID: 'pet-one', intent: 'knowledge', query: '星图' }]);
+ assert.equal(c.getSnapshot().session.turns.at(-1)?.text, '本机合成知识');
+ assert.deepEqual(requestHistory(c.getSnapshot().session.turns), []);
+ c.edit('引用上一段');
+ assert.equal(await c.send(), true);
+ assert.deepEqual(online[0]?.history, []);
+});
+
+test('local-only chat retains unsupported drafts and cancels late or mismatched replies', async () => {
+ let done!: (result: { ok: true; petID: string; text: string }) => void;
+ const c = new ChatWorkspaceController(undefined, { localChatContext: () => new Promise(resolve => { done = resolve; }) });
+ c.syncCharacters(characters);
+ c.edit('随意聊天仍未接入');
+ assert.equal(await c.send(), false);
+ assert.equal(c.getSnapshot().session.draft, '随意聊天仍未接入');
+ c.edit('查看目标进度');
+ const first = c.send();
+ c.selectCharacter('pet-two');
+ done({ ok: true, petID: 'pet-one', text: '迟到合成回答' });
+ assert.equal(await first, false);
+ assert.equal(c.getSnapshot().session.turns.length, 0);
+ c.selectCharacter('pet-one');
+ assert.equal(c.getSnapshot().session.draft, '查看目标进度');
+ const second = c.retry();
+ done({ ok: true, petID: 'pet-two', text: '串角色内容' });
+ assert.equal(await second, false);
+ assert.doesNotMatch(JSON.stringify(c.getSnapshot()), /迟到合成回答|串角色内容/);
+});
+
+const onlineOptions = [
+ { route: { connectionID: 'first', modelEntryID: 'one', fingerprint: 'a'.repeat(64) }, connectionName: '服务甲', modelName: '同名模型', ready: true, isDefault: true },
+ { route: { connectionID: 'second', modelEntryID: 'one', fingerprint: 'b'.repeat(64) }, connectionName: '服务乙', modelName: '同名模型', ready: true, isDefault: false },
+];
+test('saved default is pinned; context and other destinations never feed the next model history', async () => {
+ const sent: OnlineChatInput[] = [];
+ const c = new ChatWorkspaceController(undefined, undefined, {
+  list: async () => ({ ok: true, models: onlineOptions }), cancel: async () => {},
+  send: async input => { sent.push(input); return { ok: true, requestID: input.requestID, text: '合成回复', replayable: sent.length !== 1 }; },
+ });
+ c.syncCharacters(characters); await c.refreshModels();
+ c.edit('第一问'); assert.equal(await c.send(), true);
+ assert.deepEqual(sent[0]?.route, { ...onlineOptions[0]!.route, useDefault: true });
+ c.edit('第二问'); assert.equal(await c.send(), true); assert.deepEqual(sent[1]?.history, []);
+ c.edit('第三问'); assert.equal(await c.send(), true); assert.deepEqual(sent[2]?.history, [{ user: '第二问', assistant: '合成回复' }]);
+ c.selectModel(c.getSnapshot().models[1]!.id); c.edit('第四问'); assert.equal(await c.send(), true);
+ assert.deepEqual(sent[3]?.route, onlineOptions[1]!.route); assert.deepEqual(sent[3]?.history, []);
+ assert.equal(c.getSnapshot().session.turns.length, 8);
+});
+
+test('online retry does not silently replace a stale route and cancellation reaches the bridge', async () => {
+ const sent: OnlineChatInput[] = [], cancelled: string[] = [];
+ let options = onlineOptions;
+ const reply = deferred<ChatSendResult>();
+ const c = new ChatWorkspaceController(undefined, undefined, { list: async () => ({ ok: true, models: options }), cancel: async id => { cancelled.push(id); }, send: input => { sent.push(input); return reply.promise; } });
+ c.syncCharacters(characters); await c.refreshModels(); c.edit('当前问题');
+ const pending = c.send(); c.selectCharacter('pet-two');
+ assert.deepEqual(cancelled, [sent[0]?.requestID]);
+ reply.resolve({ ok: true, requestID: sent[0]!.requestID, text: '迟到回复', replayable: true });
+ assert.equal(await pending, false);
+ c.selectCharacter('pet-one'); options = [onlineOptions[1]!]; await c.refreshModels();
+ assert.equal(await c.retry(), false); assert.equal(sent.length, 1);
+ assert.equal(c.getSnapshot().session.draft, '当前问题');
 });

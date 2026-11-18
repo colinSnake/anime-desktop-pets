@@ -1,4 +1,11 @@
 import Fastify from "fastify";
+import { registerOnlineChat } from "./online-chat.ts";
+import { registerCharacterRoutes } from "./characters/routes.ts";
+import type { CharacterRepository } from "./characters/repository.ts";
+import { registerSpeechRoutes } from "./speech/routes.ts";
+import type { BubbleSpeech } from "./speech/bubble-speech.ts";
+import { registerModelManagement } from "./models/management-routes.ts";
+import type { ModelManagement } from "./models/management.ts";
 import { registerPetRoutes } from "./pet-routes.ts";
 import type { PetWorkspace } from "./pet-workspace.ts";
 import { timingSafeEqual } from "node:crypto";
@@ -15,11 +22,17 @@ export function createService({
   runtime,
   player,
   workspace,
+  models,
+  speech,
+  characters,
 }: {
   token: string;
   runtime: RuntimeController;
   player?: PlayerController;
   workspace?: PetWorkspace;
+  models?: ModelManagement;
+  speech?: BubbleSpeech;
+  characters?: CharacterRepository;
 }) {
   if (!/^[a-f0-9]{64}$/.test(token))
     throw new Error("Invalid session credential");
@@ -95,11 +108,15 @@ export function createService({
     });
   }
   registerPetRoutes(app, workspace);
+  registerModelManagement(app, models);
+  registerOnlineChat(app, models, workspace, characters);
+  registerSpeechRoutes(app, speech);
+  registerCharacterRoutes(app, workspace, characters);
   app.addHook("preClose", async () => {
     // Schedule each closer independently: a synchronous throw or rejection must not
     // interrupt another owner draining writes / releasing its lease before process.exit.
     const results = await Promise.allSettled([
-      () => runtime.close(), () => player?.close(), () => workspace?.close(),
+      () => runtime.close(), () => player?.close(), () => workspace?.close(), () => models?.close(), () => speech?.close(), () => characters?.close(),
     ].map(close => Promise.resolve().then(close)));
     if (results.some(result => result.status === "rejected")) throw new Error("service_cleanup_failed");
   });
