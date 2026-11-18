@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2023", "DOM"],
+    "types": ["node"],
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true
+  },
+  "include": [
+    "apps/desktop/src",
+    "apps/desktop/test",
+    "apps/app-service/src",
+    "apps/app-service/test",
+    "apps/workspace-ui/src",
+    "apps/workspace-ui/test",
+    "packages/contracts"
+  ]
+}

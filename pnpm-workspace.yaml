@@ -1,0 +1,9 @@
+packages:
+  - apps/desktop
+  - apps/app-service
+  - apps/workspace-ui
+  - packages/contracts
+
+# 只批准需要的构建脚本；Electron 二进制按明确的开发预览入口下载。
+onlyBuiltDependencies:
+  - esbuild@0.28.2

@@ -10,6 +10,20 @@
 - 实际仓库即当前工作目录。`/Users/ming/Documents/coding/github/codex-pet` 是只读参考项目，不是构建目录。固定上游及构建方法见[桌宠增强与性能构建](docs/桌宠增强与性能构建.md)和[完整桌宠接入说明](docs/完整桌宠接入说明.md)。
 - 当前版本、用户确认过的决定和最新验证状态以[实际验证记录](docs/实际验证记录.md)为准；产品范围以[PRD](docs/prd.md)为准，未完成项以[路线图](docs/roadmap.md)为准。
 
+## 跨平台迁移（2026-11-16 起）
+
+- 最新优先级：先将现有 macOS 功能平稳迁入新架构，Windows/Linux 播放器阻塞保留但暂缓移植；不要把其解码/窗口移植作为 macOS 业务迁移前置。功能按[macOS 迁移清单](docs/macOS功能迁移清单.md)逐项对齐，页面按新设计改善，不照搬旧 SwiftUI/AppKit 布局；功能保留与视觉验收分开记录。
+
+- 用户已确认长期统一 TypeScript/Python，目标 Windows/macOS/Linux；采用 Electron + React/CSS + Node.js/Fastify + Python，Linux 首版优先验证 X11/XWayland，原生 Wayland 明示限制。新通用业务/UI 优先进入新栈；保留既有 Swift 宿主与 Python/Qt 回退，不未授权迁移资料或接管进程。
+- 新入口为 `apps/desktop/`、`apps/workspace-ui/`、`apps/app-service/`、`packages/contracts/`；`apps/runtime-bridge/` 是独立诊断及显式 Qt 开发启停的协议/生命周期装配层，不是自带素材的完整播放器，也不属于现有冻结 helper。
+- 包管理器统一使用 pnpm 10.32.0（禁止使用 npm）；workspace 与唯一锁文件为 `pnpm-workspace.yaml` / `pnpm-lock.yaml`。诊断使用 Node.js 24.x、Python 3.10+；实际 prepared 播放器要求 macOS / Python 3.11+ / PySide6/Pillow，Windows/Linux 启动明确 blocked；`pnpm install --frozen-lockfile` 后执行 `pnpm run check:cross-platform`。该检查不打开 Electron/Qt。`pnpm run check:qt` 为只读 Qt 必要条件检查（退出 2 表示阻塞）；不得据此声称播放器已接入。`pnpm run dev:desktop` 是真实开发窗口启动入口，执行前仍需用户明确选择预览。
+- 当前新栈已有配置页及 macOS 显式逐实例开发启停（最多3个自有 PlayerRuntime、独立随机 profile）；P03 已开发接入保存尺寸/全屏隐藏策略和位置的启动应用、运行中单独应用尺寸/全屏策略、本会话显隐，以及拖拽松手位置的受限事件持久化。位置写入成功才更新 revision；运行反馈与已保存配置分开，revision 刷新保留未保存草稿。自主活动/移动偏好已开发接入每次显式启动采用最新保存值及运行中单独应用；复用旧 setter 与任务/减少动态效果门禁，无变化不取消甩动，不清空任务状态。P07 已接入无参系统面板选择目录／`.petpack`、最多16项串行校验导入及隔离 catalog 恢复；导入包尚不可播放，新工作区无素材删除入口，引用锁定删除流程未迁移。暂停/旧任务跟随、自动恢复及真实 Electron/Qt 桌面验收仍未完成。三端动画、任务、真实模型聊天、记忆、模型或语音仍待迁移；三系统 CI 配置不等于三端验收。不能因基础测试通过删除旧实现或宣称已交付跨平台产品。
+- 播放器仅由可信 Electron 主进程读取显式 `PET_PLAYER_SOURCE` / `PET_PLAYER_ASSETS`，默认未配置、不自动启动；每会话新建隔离 profile，禁用旧账号/任务/语音/托盘入口，不复用旧 registry/Unix IPC。Qt 专用回归为 `scripts/test-player-qt.py`，必须使用可信本机 Qt 环境、合成动画和 Fusion/offscreen；标准 pnpm 检查不导入 Qt。
+- 2026-11-18按独立多厂商设计推进：`apps/app-service/src/models/`已有内部schema v2多连接／模型路由、四协议编解码、同源WeakMap私有回放和有界请求／发现核心；不持久化凭证或配置，不挂生产HTTP／IPC／renderer入口。下一段先做安全凭证与原子配置，再管理页／选择／聊天接线；不能把内部合成测试称为多厂商可用交付，正式发送仍禁用，原独立设计文档不改写。
+- 聊天页按用户最新要求对齐 macOS 布局，输入交互参考 deepseek-harness、独立实现原生 textarea。当前只有按新实例隔离的有界内存会话及取消/重试/清空确认，跨页面保留草稿，重载/退出不恢复；正式模型服务未接入，发送和模型选择禁用，合成回复只在测试注入。身份/记忆/上下文/模型凭证仍待迁移，不导入旧资料或把 UI 接入称为完整聊天交付。
+- 安全壳保留固定无参诊断/播放器方法及受限 `pets` 命令，不暴露任意 IPC/偏好/路径/命令/环境变量；素材选择也是无参命令，路径只由主进程文件面板取得并传给本地服务，服务端有数量、单路径和总字节边界。配置在开发 profile 的 workspace 内单一写入，运行阶段易失，逐实例运行时只绑定主进程认可的开发元数据。显式播放器配置开放开发元数据；导入素材落在应用专用隔离目录，但当前不可播放、不可从新 UI 删除。启停/显示与行为偏好应用/显隐不写入配置 revision；行为确认易失且失败不当成已应用。私有 player 协议 v3，bootstrap 必含两个行为布尔值，运行中固定 `apply-behavior`；worker 仅用固定版本 `position` 事件回报本会话拖拽坐标，服务持久化成功才递增 revision。停止确认前不能删除，失败实例保守占用运行槽。
+- 安全壳只暴露受限固定桥接；服务只绑定回环随机端口并鉴权，密钥/端口不进 renderer；协议需版本、大小限制、超时与自有进程回收。数据逐项移交唯一写入权，不让多个运行时并写。详见[跨平台开发与迁移](docs/跨平台开发与迁移.md)。
+
 ## 目录与开发入口
 
 - `apps/companion-macos/Sources/PetCore/`：配置、状态机及可独立验证的核心逻辑。

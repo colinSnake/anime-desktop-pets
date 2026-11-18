@@ -1,0 +1,193 @@
+import { requestPets } from "./pet-transport.ts";
+import type { PetMethod } from "./pet-ipc.ts";
+import type { CatalogEntry, PetResult } from "../../../packages/contracts/src/pets.ts";
+import { isPackageImportResult, type PackageImportResult } from "../../../packages/contracts/src/pets.ts";
+import { randomBytes } from "node:crypto";
+import {
+  isSnapshot,
+  type Snapshot,
+} from "../../../packages/contracts/src/index.ts";
+
+export interface ServiceTransport {
+  send(message: unknown): void;
+  onMessage(handler: (message: unknown) => void): void;
+  onExit(handler: (code?: number) => void): void;
+  terminate(): void;
+}
+export class ServiceProcess {
+  private readonly token = randomBytes(32).toString("hex");
+  private transport?: ServiceTransport;
+  private starting?: Promise<void>;
+  private closing?: Promise<void>;
+  private exited: Promise<void> = Promise.resolve();
+  private abortStart?: () => void;
+  private port?: number;
+  private closed = false;
+  private hasExited = false;
+  private exitCode?: number;
+  constructor(
+    private factory: () => ServiceTransport,
+    private options: {
+      workspace?: { root: string; catalog: CatalogEntry[]; packageToolPath?: string };
+      workerPath: string;
+      guardianPath: string;
+      python?: string;
+      player?: { workerPath: string; config?: import("../../app-service/src/player-runtime.ts").PlayerConfig };
+      startupMs?: number;
+      shutdownMs?: number;
+    },
+  ) {}
+
+  start(): Promise<void> {
+    if (this.closed) return Promise.reject(new Error("service_unavailable"));
+    if (this.starting) return this.starting;
+    this.starting = this.launch().catch(async () => {
+      await this.close();
+      throw new Error("service_unavailable");
+    });
+    return this.starting;
+  }
+  private launch(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const transport = this.factory();
+      this.transport = transport;
+      let finished = false;
+      const timer = setTimeout(() => fail(), this.options.startupMs ?? 5000);
+      const fail = () => {
+        if (!finished) {
+          finished = true;
+          clearTimeout(timer);
+          reject(new Error("service_unavailable"));
+        }
+      };
+      this.abortStart = fail;
+      let didExit!: () => void;
+      this.exited = new Promise<void>((resolveExit) => {
+        didExit = resolveExit;
+      });
+      transport.onExit((code) => {
+        this.exitCode = code;
+        this.hasExited = true;
+        this.port = undefined;
+        fail();
+        didExit();
+      });
+      transport.onMessage((message) => {
+        if (finished || this.closed) return;
+        if (typeof message !== "object" || message === null) {
+          fail();
+          return;
+        }
+        const value = message as Record<string, unknown>;
+        if (
+          value.type !== "ready" ||
+          !Number.isInteger(value.port) ||
+          Number(value.port) < 1 ||
+          Number(value.port) > 65535
+        ) {
+          fail();
+          return;
+        }
+        this.port = Number(value.port);
+        finished = true;
+        clearTimeout(timer);
+        resolve();
+      });
+      try {
+        transport.send({
+          type: "bootstrap",
+          version: 1,
+          token: this.token,
+          workerPath: this.options.workerPath,
+          guardianPath: this.options.guardianPath,
+          python: this.options.python,
+          player: this.options.player,
+          workspace: this.options.workspace,
+        });
+      } catch {
+        fail();
+      }
+    });
+  }
+  async request(command: "snapshot" | "probe" | "start-player" | "stop-player"): Promise<Snapshot> {
+    if (this.closed || !this.port) throw new Error("service_unavailable");
+    const paths = { snapshot: "/v1/snapshot", probe: "/v1/runtime/probe", "start-player": "/v1/player/start", "stop-player": "/v1/player/stop" };
+    const path = paths[command];
+    if (!path) throw new Error("service_unavailable");
+    try {
+      const response = await fetch(`http://127.0.0.1:${this.port}${path}`, {
+        method: command === "snapshot" ? "GET" : "POST",
+        headers: {
+          authorization: `Bearer ${this.token}`,
+          ...(command !== "snapshot"
+            ? { "content-type": "application/json" }
+            : {}),
+        },
+        body: command !== "snapshot" ? "{}" : undefined,
+        signal: AbortSignal.timeout(command === "start-player" ? 15_000 : 12_000),
+        redirect: "error",
+      });
+      if (!response.ok) throw new Error();
+      const value: unknown = await response.json();
+      if (!isSnapshot(value) || this.closed || !this.port) throw new Error();
+      return value;
+    } catch {
+      throw new Error("service_unavailable");
+    }
+  }
+  async petRequest(method: PetMethod, input?: unknown): Promise<PetResult> {
+    if (this.closed || !this.port) return {ok:false,error:"unavailable"};
+    const result = await requestPets({ base: `http://127.0.0.1:${this.port}`, token: this.token }, method, input);
+    return this.closed || !this.port ? {ok:false,error:"unavailable"} : result;
+  }
+  async importPackages(paths: string[]): Promise<PackageImportResult> {
+    if (this.closed || !this.port || !Array.isArray(paths) || paths.length < 1 || paths.length > 16 || !paths.every(path => typeof path === 'string' && path.length <= 4096) || paths.reduce((sum, path) => sum + Buffer.byteLength(path), 0) > 56 * 1024) return { ok: false, error: 'invalid' };
+    try {
+      const response = await fetch(`http://127.0.0.1:${this.port}/v1/pets/import`, {
+        method: 'POST', redirect: 'error', signal: AbortSignal.timeout(120_000),
+        headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ paths }),
+      });
+      const value: unknown = await response.json();
+      if (!isPackageImportResult(value) || (value.ok && !response.ok)) return { ok: false, error: 'unavailable' };
+      return this.closed || !this.port ? { ok: false, error: 'unavailable' } : value;
+    } catch { return { ok: false, error: 'unavailable' }; }
+  }
+  private checkCleanup() {
+    if (typeof this.exitCode === "number" && this.exitCode !== 0) throw new Error("service_cleanup_failed");
+  }
+  close(): Promise<void> {
+    if (this.closing) return this.closing;
+    this.closed = true;
+    this.port = undefined;
+    this.abortStart?.();
+    this.closing = (async () => {
+      if (!this.transport) return;
+      if (this.hasExited) { this.checkCleanup(); return; }
+      try {
+        this.transport.send({ type: "shutdown" });
+      } catch {
+        /* 进程可能已退出。 */
+      }
+      if (await waitFor(this.exited, this.options.shutdownMs ?? 10_000)) { this.checkCleanup(); return; }
+      this.transport.terminate();
+      if (!(await waitFor(this.exited, 1500)))
+        throw new Error("service_cleanup_timeout");
+      this.checkCleanup();
+    })();
+    return this.closing;
+  }
+}
+async function waitFor(exit: Promise<void>, timeout: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      exit.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeout);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}

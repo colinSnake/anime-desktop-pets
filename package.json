@@ -1,0 +1,32 @@
+{
+  "name": "anime-desktop-pets",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0 <25"
+  },
+  "scripts": {
+    "test:cross-platform": "tsx --test --test-concurrency=1 packages/contracts/test/*.test.ts apps/app-service/test/*.test.ts apps/desktop/test/*.test.ts apps/workspace-ui/test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "build:cross-platform": "node scripts/build-cross-platform.mjs",
+    "dev:desktop": "pnpm run build:cross-platform && electron apps/desktop",
+    "test:bridge": "node scripts/test-runtime-bridge.mjs",
+    "check:cross-platform": "pnpm run test:workspace && pnpm run test:tooling && pnpm run typecheck && pnpm run test:cross-platform && pnpm run test:bridge && pnpm run build:cross-platform && pnpm run test:build",
+    "test:build": "node --test apps/desktop/test/build-smoke.test.mjs",
+    "test:workspace": "node --test scripts/test-workspace-config.test.mjs",
+    "check:qt": "node scripts/check-qt-runtime.mjs",
+    "test:tooling": "node --test scripts/test-qt-report.test.mjs scripts/test-build-output.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.0",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "electron": "45.3.2",
+    "esbuild": "0.28.2",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vite": "8.3.8"
+  },
+  "packageManager": "pnpm@10.32.0"
+}

@@ -31,3 +31,10 @@ venv/
 .mypy_cache/
 .ruff_cache/
 *.egg-info/
+
+# Cross-platform Node development dependencies
+node_modules/
+
+# Local headless UI verification evidence
+.playwright-cli/
+output/playwright/

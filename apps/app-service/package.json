@@ -1,0 +1,10 @@
+{
+  "name": "@pet/app-service",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "fastify": "5.12.8"
+  },
+  "exports": "./dist/entry.cjs"
+}

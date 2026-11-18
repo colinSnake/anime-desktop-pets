@@ -1,0 +1,14 @@
+export type ComposerKey = { key: string; shiftKey: boolean; ctrlKey: boolean; metaKey: boolean; altKey: boolean; isComposing: boolean; keyCode: number };
+/** 原生 textarea 负责选择/粘贴/撤销；仅接管无修饰Enter和Escape。 */
+export class ComposerKeyboard {
+ private composing = false;
+ private endedAt = -Infinity;
+ start() { this.composing = true; }
+ end(now: number) { this.composing = false; this.endedAt = now; }
+ action(event: ComposerKey, canSend: boolean, now: number): 'native' | 'send' | 'block' | 'blur' {
+  if (this.composing || event.isComposing || event.keyCode === 229 || now - this.endedAt < 10) return 'native';
+  if (event.key === 'Escape') return 'blur';
+  if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return 'native';
+  return canSend ? 'send' : 'block';
+ }
+}

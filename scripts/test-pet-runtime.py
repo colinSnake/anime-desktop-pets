@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import random
 from pathlib import Path
 import struct
 import sys
@@ -15,7 +16,11 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 # 在导入任何 Qt/上游模块前隔离配置与可写状态；不连接用户 Codex。
 HOME = tempfile.TemporaryDirectory(prefix='pet-runtime-test-')
-os.environ.update(HOME=HOME.name, BAILONG_DATA_DIR=HOME.name, QT_QPA_PLATFORM='offscreen', BAILONG_CODEX='/usr/bin/false')
+for key in ('PET_TASK_LEASE', 'BAILONG_PET_LIBRARY_DIR', 'BAILONG_ASSETS_DIR', 'PET_WINDOW_CONTROL'):
+    os.environ.pop(key, None)
+os.environ.update(HOME=HOME.name, BAILONG_DATA_DIR=HOME.name,
+                  CODEX_HOME=str(Path(HOME.name) / 'disabled-codex'),
+                  QT_QPA_PLATFORM='offscreen', QT_STYLE_OVERRIDE='Fusion', BAILONG_CODEX='/usr/bin/false')
 sys.path[:0] = [str(ROOT / 'apps/pet-runtime/bailong'), str(ROOT / '.local/pet-build/generated-source/app')]
 from PIL import Image
 from PySide6.QtCore import QEvent
@@ -25,6 +30,7 @@ from dragon_frames import (AnimationFrameStore, AnimationResourceBudget,
 import dragon_ui
 from dragon_ui import Bubble, NativeMenu, FittedText, bubble_font, message_font
 APP = QApplication.instance() or QApplication([])
+APP.setStyle('Fusion')
 APP.setQuitOnLastWindowClosed(False)
 # These UI tests verify family selection; the frozen-build test verifies that
 # the real font file is embedded and registered by Qt.
@@ -1508,10 +1514,13 @@ class ClipMovementTests(unittest.TestCase):
 
     def test_base_idle_selection_and_extended_menu_labels(self):
         selected = set()
-        for _ in range(10):
-            self.pet.idle()
-            selected.add(self.pet.current['id'])
-            self.assertIn(self.pet.current['id'], ['idle', 'idle2', 'idle03', 'idle04', 'idle05', 'idle06'])
+        # This test checks action/menu coverage, not random quality. An unseeded
+        # ten-draw assertion can legitimately miss every extended idle (5/9)^10.
+        with patch('pet.random.choices', side_effect=random.Random(7).choices):
+            for _ in range(10):
+                self.pet.idle()
+                selected.add(self.pet.current['id'])
+                self.assertIn(self.pet.current['id'], ['idle', 'idle2', 'idle03', 'idle04', 'idle05', 'idle06'])
         self.assertTrue(selected.intersection({'idle03', 'idle04', 'idle05', 'idle06'}))
         menu = self.pet.context_menu()
         previews = next(a.menu() for a in menu.actions() if a.text() == '动作预览')
