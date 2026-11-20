@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-swift test --package-path "$ROOT/apps/companion-macos" --scratch-path "$ROOT/.build"
 python3 "$ROOT/scripts/test-codex-tasks.py"
 python3 "$ROOT/scripts/test-provider-quota.py"
 python3 "$ROOT/scripts/test-speech-runtime-queue.py"
@@ -9,13 +8,11 @@ python3 "$ROOT/scripts/test-speech-runtime-session.py"
 python3 "$ROOT/scripts/test-speech-runtime-service.py"
 python3 "$ROOT/scripts/test-speech-cues.py"
 python3 "$ROOT/scripts/test-pet-ai-bubbles.py"
-python3 "$ROOT/scripts/test-speech-roundtrip-acceptance.py"
 python3 "$ROOT/scripts/test-live-runtime.py"
 python3 "$ROOT/scripts/test-speech-mlx-backend.py"
 python3 "$ROOT/scripts/test-startup-upscale.py"
 python3 "$ROOT/scripts/check-project.py"
-python3 "$ROOT/scripts/test-product-naming.py"
-python3 "$ROOT/scripts/test-app-bundle.py"
+python3 "$ROOT/scripts/test-clean-builds.py"
 python3 "$ROOT/scripts/test-app-icon.py"
 python3 "$ROOT/scripts/test-pet-build-inputs.py"
 python3 "$ROOT/scripts/test-pet-release-physics.py"
@@ -40,13 +37,13 @@ if [[ -x "$ROOT/.local/pet-build/venv/bin/python" && -f "$ROOT/.local/pet-build/
 else
   echo 'Enhanced runtime tests skipped: prepare the private source build first.'
 fi
-if [[ -x "$ROOT/build/桌边小崽.app/Contents/MacOS/PetCompanion" ]]; then
-  python3 "$ROOT/scripts/test-control.py"
-fi
-
 if [[ -x "$ROOT/.local/pet-build/venv/bin/python" && -f "$ROOT/.local/pet-build/generated-source/PET_PATCH.json" ]]; then
   /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network-outbound (remote ip "*:*")) (deny network-inbound (local ip "*:*"))' \
     "$ROOT/.local/pet-build/venv/bin/python" "$ROOT/scripts/test-real-pet-adapter.py"
   /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network*)' \
     "$ROOT/.local/pet-build/venv/bin/python" "$ROOT/scripts/test-qt-lifecycle.py"
+  /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network*)' \
+    "$ROOT/.local/pet-build/venv/bin/python" "$ROOT/scripts/test-multi-pet.py"
+  /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network-outbound (remote ip "*:*")) (deny network-inbound (local ip "*:*"))' \
+    "$ROOT/.local/pet-build/venv/bin/python" "$ROOT/scripts/test-instance-ipc.py"
 fi

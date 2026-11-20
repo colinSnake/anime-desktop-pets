@@ -60,6 +60,25 @@ export const isKnowledgeBatch = (value: unknown): value is KnowledgeDraft[] =>
   within(value, KNOWLEDGE_IMPORT_LIMIT, (draft): draft is KnowledgeDraft => isMemoryDraft(draft) && draft.kind === '知识' && !!draft.source.trim()) &&
   boundedParagraphs(value.map(draft => draft.text));
 export const normalizeMemoryText = (value: string) => value.normalize('NFKC').toLowerCase().replace(/[\p{Z}\p{P}\p{S}\p{Default_Ignorable_Code_Point}\s]/gu, '');
+export const CHAT_MEMORY_LIMIT = 300;
+const chatMemoryPrefix = /^记住(?:\s*[:：]|$)/u;
+export const isChatMemoryCommand = (raw: string): boolean => chatMemoryPrefix.test(raw.trim());
+export const isChatMemoryText = (value: unknown): value is string =>
+  text(value, CHAT_MEMORY_LIMIT, true) && value === value.trim() && encoder.encode(value).byteLength <= 4096 && !!normalizeMemoryText(value);
+export function parseChatMemoryCommand(raw: string): { text: string } | 'invalid' | 'credential-like' | undefined {
+  const input = raw.trim();
+  const match = chatMemoryPrefix.exec(input);
+  if (!match) return;
+  const content = input.slice(match[0].length).trim();
+  if (!isChatMemoryText(content)) return 'invalid';
+  return credentialLikeText(content) ? 'credential-like' : { text: content };
+}
+export const chatMemoryDraft = (text: string): MemoryDraft => ({ kind: '事实', text, source: '聊天确认', citation: '', version: '' });
+export const matchesChatMemory = (record: Memory, messageID: string, text: string): boolean => {
+  const draft = chatMemoryDraft(text);
+  return record.id === messageID && record.revision === 1 && record.status === 'confirmed' && !record.chatShare &&
+    record.kind === draft.kind && record.text === draft.text && record.source === draft.source && record.citation === '' && record.version === '';
+};
 export function knowledgeCollision(value: MemoryDraft) {
   if (value.kind !== '知识') return;
   const source = normalizeMemoryText(value.source), citation = normalizeMemoryText(value.citation);
@@ -100,6 +119,7 @@ export const recordRoutes = {
   restoreMemory: { family: 'memories', path: 'memories/restore', method: 'POST' },
   readMemories: { family: 'memories', path: 'memories', method: 'GET' },
   addKnowledgeBatch: { family: 'memories', path: 'memories/import', method: 'POST' },
+  saveChatMemory: { family: 'memories', path: 'memories/confirm-chat', method: 'POST' },
   addMemory: { family: 'memories', path: 'memories/add', method: 'POST' },
   confirmMemory: { family: 'memories', path: 'memories/confirm', method: 'POST' },
   withdrawMemory: { family: 'memories', path: 'memories/withdraw', method: 'POST' },
@@ -125,6 +145,7 @@ export type RecordInputs = {
   editMemory: RecordWriteInput & { id: string; draft: MemoryDraft };
   restoreMemory: RecordWriteInput & { id: string; historicalRevision: number };
   addKnowledgeBatch: RecordWriteInput & { drafts: KnowledgeDraft[] };
+  saveChatMemory: RecordWriteInput & { messageID: string; text: string };
   readMemories: ReadRecordInput; addMemory: RecordWriteInput & { draft: MemoryDraft };
   confirmMemory: RecordWriteInput & { id: string }; withdrawMemory: RecordWriteInput & { id: string };
   deleteMemory: RecordDeleteInput; deleteGoal: RecordDeleteInput;
@@ -145,6 +166,8 @@ export function isRecordInput<A extends RecordAction>(action: A, value: unknown)
   if (recordRoutes[action].method === 'GET') return shape(value, ['petID']);
   if (!revision(value.expectedRevision)) return false;
   switch (action) {
+    case 'saveChatMemory':
+      return shape(value, ['petID', 'expectedRevision', 'messageID', 'text']) && recordID(value.messageID) && isChatMemoryText(value.text);
     case 'addMemory': case 'editMemory':
       if (!shape(value, action === 'addMemory' ? ['petID', 'expectedRevision', 'draft'] : ['petID', 'expectedRevision', 'draft', 'id']) ||
           (action === 'editMemory' && !recordID(value.id)) || !isMemoryDraft(value.draft) || (value.draft.kind === '知识' && !value.draft.source.trim())) return false;

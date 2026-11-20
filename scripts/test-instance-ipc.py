@@ -332,16 +332,6 @@ class IPCChecks(unittest.TestCase):
         self.assertEqual(states['first']['phase'], 'stopped')
         self.assertEqual(states['second']['phase'], 'running')
 
-    def test_cli_clone_uses_real_protocol_and_persists(self):
-        result = subprocess.run([sys.executable, str(ROOT / 'scripts/pet-instances.py'),
-                                 '--profile', str(self.profile), 'clone', 'first', 'cli-copy'],
-                                env=self.env, capture_output=True, text=True, timeout=5)
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertTrue(json.loads(result.stdout)['ok'])
-        self.assertEqual(self.states()['cli-copy']['phase'], 'stopped')
-        rows = json.loads((self.profile / 'pet-instances.json').read_text())['instances']
-        self.assertIn('cli-copy', [row['id'] for row in rows])
-
     def test_clone_shares_package_but_is_stopped_and_preferences_are_independent(self):
         self.command('set_preferences', instanceID='first', preferences={'size': 200, 'x': -120, 'y': 80})
         result = self.command('clone_pet', instanceID='first', cloneID='first-copy')
@@ -469,19 +459,6 @@ class IPCChecks(unittest.TestCase):
         self.child.wait(timeout=3)
         self.assertFalse(self.path.exists())
 
-    def test_cli_json_and_absent_controller_never_cold_starts(self):
-        result = subprocess.run([sys.executable, str(ROOT / 'scripts/pet-instances.py'), '--profile', str(self.profile), 'status'],
-                                env=self.env, capture_output=True, text=True, timeout=4)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(json.loads(result.stdout)['ok'])
-        self.command('shutdown'); self.child.wait(timeout=3)
-        result = subprocess.run([sys.executable, str(ROOT / 'scripts/pet-instances.py'), '--profile', str(self.profile), 'status'],
-                                env=self.env, capture_output=True, text=True, timeout=4)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse(json.loads(result.stderr)['ok']); self.assertFalse(self.path.exists())
-
-
-class ParentOwnershipChecks(unittest.TestCase):
     def test_helper_exits_when_owning_host_disappears(self):
         with tempfile.TemporaryDirectory(prefix='pet-parent-watch-', dir='/tmp') as tmp:
             profile = Path(tmp) / 'profile'

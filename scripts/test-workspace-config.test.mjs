@@ -23,3 +23,16 @@ test('desktop resolves the service through an explicit workspace dependency', as
   assert.equal(service.dependencies?.fastify, '5.12.8');
   assert.equal(desktop.dependencies?.fastify, undefined);
 });
+
+
+test('only the local service directly pins the DeepSeek SDK and Provider plugin', async () => {
+  const service = await json('apps/app-service/package.json');
+  assert.equal(service.dependencies['@deepseek-ai/dsh'], undefined, 'the CLI is selected by the SDK, not by the service');
+  for (const name of ['dsh-sdk-client', 'dsh', 'dsh-llm-pi-ai']) {
+    const id = `@deepseek-ai/${name}`;
+    if (name !== 'dsh') assert.equal(service.dependencies[id], '0.2.2-rc.5');
+    for (const consumer of ['apps/desktop', 'apps/workspace-ui', 'packages/contracts']) {
+      assert.equal((await json(`${consumer}/package.json`)).dependencies?.[id], undefined);
+    }
+  }
+});

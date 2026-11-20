@@ -8,6 +8,8 @@
   --muted: light-dark(#65636e, #b4b1bb);
   --line: light-dark(#dcdce3, #45444c);
   --accent: light-dark(#674aa2, #c1a8ed);
+  --button-hover: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  --danger-hover: color-mix(in srgb, var(--danger) 86%, var(--text));
   --accent-hover: light-dark(#553987, #d2bdf4);
   --accent-ink: light-dark(#ffffff, #251836);
   --accent-soft: light-dark(#eee8f8, #393047);
@@ -21,6 +23,12 @@
   --shadow-control-ink: #0000000a;
   --shadow-popover-ink: #0002;
   --shadow-dialog-ink: #0003;
+  --model-test-untested: light-dark(#bd8900, #ffd15a);
+  --model-test-success: light-dark(#268044, #68d98a);
+  --model-test-failure: light-dark(#c44449, #ff8588);
+  --model-empty-glow: radial-gradient(ellipse at 50% 0%, var(--accent-soft), var(--transparent) 68%);
+  --model-blue-ink: light-dark(#3c608a, #a9c8f0);
+  --model-blue-surface: light-dark(#eaf1fa, #28364a);
   --shadow-confirmation-ink: #00000030;
   --shadow-drawer-ink: #00000018;
   --backdrop-dialog: #0004;
@@ -34,4 +42,110 @@
   --brand-violet: #9e7dd6;
   --brand-pearl: #f5f2fc;
   --brand-focus-gradient: linear-gradient(to right, var(--brand-cyan), var(--brand-violet) 55%, var(--brand-pearl));
+}
+
+.workspace.workspace-nook, .workspace .sidebar {
+  --canvas: light-dark(#fcfbff, #1b1924);
+  --sidebar: light-dark(#f1eff8, #211e2e);
+  --surface: light-dark(#fff, #23202e);
+  --surface-soft: light-dark(#f7f3fc, #2e283e);
+  --text: light-dark(#242238, #f1edf8);
+  --muted: light-dark(#625c73, #bab3c7);
+  --nook-quiet: light-dark(#716984, #a99eb6);
+  --line: light-dark(#e5e0ed, #373145);
+  --accent: light-dark(#594088, #d5baf5);
+  --accent-soft: light-dark(#eee7fb, #382c4e);
+  --accent-text: light-dark(#573c85, #dac5ff);
+  --nook-onaccent: light-dark(#fff, #2b1744);
+  --focus: light-dark(#7253ac, #c7a7fb);
+  --success: light-dark(#286655, #a1e3c8);
+  --nook-action-hover: brightness(1.12);
+  --nook-stage-button: light-dark(#ffffff4d, #1b192438);
+  --nook-stage-button-line: light-dark(#bca9d38c, #bea2e078);
+  --nook-status-fill: light-dark(#fff9, #1c172866);
+  --nook-art-glow: light-dark(#67508435, #0006);
+}
+
+/* Role colors belong to the stage and avatars, not controls or status. */
+:is(.pet-nook [data-pet-art], .chat-page[data-pet-art], .pet-agent-panel[data-pet-art]) {
+  --pet-art-wall: var(--surface-soft);
+  --pet-art-light: var(--surface);
+  --pet-art-line: var(--line);
+  --pet-art-star: var(--muted);
+  --pet-art-avatar: var(--surface-soft);
+  --nook-orbit: light-dark(#fffd, color-mix(in srgb, var(--pet-art-star) 30%, var(--transparent)));
+  --pet-art-shadow: drop-shadow(0 9px 7px var(--shadow-popover-ink));
+  --pet-art-orbit: var(--line);
+  --pet-art-halo: var(--surface-soft);
+  --pet-art-halo-fill: radial-gradient(ellipse at center, var(--pet-art-halo), var(--transparent) 62%);
+  --pet-art-background: radial-gradient(ellipse at 85% 12%, var(--pet-art-light), var(--transparent) 62%), linear-gradient(112deg, var(--canvas), var(--pet-art-wall));
+}
+/* A character changes only the backdrops and illustration accents. */
+:is(.pet-nook [data-pet-art], .chat-page[data-pet-art], .pet-agent-panel[data-pet-art]):is([data-pet-art="longmei"], [data-pet-art="dafeiyu"]) {
+  --pet-art-wall: light-dark(hsl(var(--pet-hue) 71% 88%), hsl(var(--pet-hue) 31% 31%));
+  --pet-art-base: light-dark(hsl(var(--pet-hue) 70% 97%), hsl(var(--pet-hue) 29% 19%));
+  --pet-art-light: light-dark(hsl(var(--pet-mist) 75% 92%), hsl(var(--pet-mist) 29% 25%));
+  --pet-art-line: light-dark(hsl(var(--pet-hue) 62% 88%), hsl(var(--pet-hue) 25% 36%));
+  --pet-art-star: light-dark(hsl(var(--pet-hue) 35% 48%), hsl(var(--pet-hue) 75% 80%));
+  --pet-art-orbit: light-dark(hsl(var(--pet-hue) 48% 69% / .52), hsl(var(--pet-hue) 65% 80% / .38));
+  --pet-art-halo: light-dark(hsl(var(--pet-hue) 75% 86% / .67), hsl(var(--pet-hue) 53% 53% / .30));
+  --pet-art-background: radial-gradient(ellipse at 85% 18%, var(--pet-art-light), transparent 65%), linear-gradient(118deg, var(--pet-art-base), var(--pet-art-wall));
+}
+:is(.pet-nook [data-pet-art="longmei"], .chat-page[data-pet-art="longmei"], .pet-agent-panel[data-pet-art="longmei"]) {
+  --pet-hue: 274; --pet-mist: 216;
+  --pet-art-avatar: light-dark(#e9dffb, #45345e);
+}
+:is(.pet-nook [data-pet-art="dafeiyu"], .chat-page[data-pet-art="dafeiyu"], .pet-agent-panel[data-pet-art="dafeiyu"]) {
+  --pet-hue: 222; --pet-mist: 189;
+  --pet-art-avatar: light-dark(#e0eaf9, #263958);
+}
+
+/* Approved speech/live design: shared controls, character color only in the stage. */
+.content-interaction {
+  --canvas: light-dark(#f8f7fb, #1d1925);
+  --surface: light-dark(#fff, #272131);
+  --surface-soft: light-dark(#f4f1f8, #2b2537);
+  --line: light-dark(#e4dfed, #3a3147);
+  --text: light-dark(#242238, #f4eef9);
+  --muted: light-dark(#625c73, #c2b8cd);
+  --accent: light-dark(#594088, #d7bef7);
+  --accent-soft: light-dark(#eee7fa, #39304e);
+  --nook-onaccent: light-dark(#fff, #2c1948);
+  --focus: light-dark(#7859ae, #c3a4f3);
+  --interaction-good: light-dark(#25624e, #a0ddc1);
+  --interaction-good-fill: light-dark(#e8f5ee, #223d36);
+  --interaction-warn: light-dark(#8a5027, #f2c28a);
+  --interaction-warn-fill: light-dark(#fbeddc, #402e26);
+  --interaction-error: light-dark(#984052, #ffc2ce);
+  --interaction-error-fill: light-dark(#fbecef, #432735);
+  --interaction-art-shadow: light-dark(#3b2b5940, #08050c70);
+  --interaction-cover-shadow: drop-shadow(0 7px 6px var(--interaction-art-shadow));
+}
+.interaction-page {
+  --interaction-halo-fill: radial-gradient(ellipse, color-mix(in srgb, var(--interaction-art-ink) 20%, var(--transparent)), var(--transparent) 67%);
+}
+.interaction-page:is([data-interaction="speech"], [data-interaction="advanced"]) {
+  --interaction-art-start: light-dark(#fbf8ff, #272033);
+  --interaction-art-end: light-dark(#e9ddfa, #422e57);
+  --interaction-art-ink: light-dark(#72549d, #cfb6ef);
+  --interaction-art-line: light-dark(#ded0ef, #59446d);
+}
+.interaction-page[data-interaction="live"] {
+  --interaction-art-start: light-dark(#f7fbff, #222b3b);
+  --interaction-art-end: light-dark(#dfeafb, #2d4260);
+  --interaction-art-ink: light-dark(#4c668e, #bdd4f6);
+  --interaction-art-line: light-dark(#d0e0f3, #405775);
+}
+
+.interaction-page[data-interaction="advanced"] {
+  --advanced-case-back: light-dark(#a58aca, #755b98);
+  --advanced-case-face: light-dark(#d9c7ef, #594477);
+  --advanced-case-edge: light-dark(#ad96cf, #997ab9);
+  --advanced-case-shine: light-dark(#f8f1ff, #a88dc7);
+  --advanced-case-note: light-dark(#fefbff, #e9dcfa);
+  --advanced-case-shadow: drop-shadow(0 9px 8px var(--interaction-art-shadow));
+  --advanced-monitor-ink: light-dark(#45668e, #a9c9f1);
+  --advanced-monitor-fill: light-dark(#eaf1fb, #2c3850);
+  --advanced-well: light-dark(#faf8fc, #241f2e);
+  --interaction-halo-fill: radial-gradient(ellipse, color-mix(in srgb, var(--interaction-art-ink) 23%, var(--transparent)), var(--transparent) 67%);
 }

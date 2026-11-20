@@ -39,7 +39,6 @@ ad-hoc签名更新后，文稿文件夹及辅助功能授权可能需要用户�
 | --- | --- |
 | `app-icon.svg` | 可编辑的 1024×1024 矢量版本，新工作区侧栏使用同一份 |
 | `app-icon.png` | 1024×1024 RGBA 主图，外缘透明；macOS Electron 开发 Dock 使用同一份 |
-| `AppIcon.icns` | 10 档标准/Retina 表示，供 macOS App 使用 |
 | `petStatusTemplate.png`、`petStatusTemplate@2x.png` | Electron 工作区 macOS 状态栏的 16/32 px 单色模板，沿用旧宿主的窗口与伴星轮廓 |
 
 单一几何与色彩源为根目录 `scripts/build-app-icon.swift`。SVG/PNG 共用渐变、形状与透明度定义，
@@ -52,7 +51,7 @@ python3 scripts/test-app-icon.py
 ./scripts/build.sh --enhanced-pet
 ```
 
-宿主构建复制图标到 `Contents/Resources/AppIcon.icns`，并设置 `CFBundleIconFile`，供 Finder 与 Dock 展示。
+Electron 开发构建复用 SVG 与 PNG；旧宿主的 ICNS 输出已退役。
 菜单栏状态项使用透明的窗口与伴星单色模板，由 macOS 适配菜单栏外观。新 Electron 开发构建直接复制 SVG、PNG 与两档模板，分别用于工作区、开发 Dock 与菜单栏。旧 Swift 宿主仍在内部绘制模板，继续使用原 ICNS；Electron 正式发行包配置及真实桌面显示待验。
 不改官方 App 或第三方 `BailongPet.app` 的原图标，也不改安装位置。构建不会启动或安装应用，不刷新系统图标缓存；实际显示仍需用户验收。
 

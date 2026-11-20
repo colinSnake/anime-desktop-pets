@@ -5,6 +5,8 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { ModelDiscoveryReply, ModelsBridge, ModelWorkspaceReply, SavedModelConfiguration, SavedModelConnection } from '../../../packages/contracts/src/models.ts';
 import { ModelWorkspaceController } from '../src/model-state.ts';
 import { ModelPage } from '../src/ModelPage.tsx';
+import { ModelEditorDialog } from '../src/ModelEditorDialog.tsx';
+import { DeleteModelDialog } from '../src/ModelConnectionActions.tsx';
 
 const entry = (id: string) => ({ entryID: id, modelID: id, displayName: id, compatibility: {}, capabilities: { tools: { status: 'unknown' as const, source: 'user' as const } } });
 const connection = (id: string, revision: number): SavedModelConnection => ({ id, displayName: `连接 ${id}`, revision, preset: 'custom', apiProtocol: 'chat-completions', baseURL: 'https://example.invalid/v1', authMode: 'apiKey', credentialState: 'missing', defaultModelEntryID: 'm', compatibility: {}, models: [entry('m'), entry('n')] });
@@ -87,16 +89,166 @@ test('failure to read the configuration cannot appear as an empty or editable wo
   const { controller: c, get } = fixture({ list: async () => bad('storage_unavailable') }); await c.load();
   assert.equal(get().configuration, undefined); assert.equal(c.add('custom'), undefined);
   const html = renderToStaticMarkup(createElement(ModelPage, { controller: c }));
-  assert.match(html, /重新读取/); assert.doesNotMatch(html, /还没有服务连接/);
+  assert.match(html, /重新读取/); assert.doesNotMatch(html, /尚未添加服务商配置/);
 });
 
-test('offline markup has two keyboard-accessible expansion levels, no secret input and no online actions', async () => {
-  const { controller: c } = fixture(); await c.load(); c.edit('a'); c.toggleModel('a', 'm');
+test('a loaded empty provider list has one setup action and keeps read-only or unavailable states distinct', async () => {
+  const configuration = { revision: 0, defaultConnectionID: null, connections: [] };
+  const current = (writesBlocked = false) => fixture({ list: async () => ({ version: 1, ok: true, configuration, writesBlocked: writesBlocked ? true : undefined }) }).controller;
+  const render = (c?: ModelWorkspaceController) => renderToStaticMarkup(createElement(ModelPage, { controller: c }));
+  const c = current();
+  assert.doesNotMatch(render(c), /model-empty-state/);
+  assert.doesNotMatch(render(), /model-empty-state|添加配置/);
+  await c.load();
+  const empty = render(c);
+  assert.match(empty, /class="model-empty-state"/);
+  assert.match(empty, /<h3>尚未添加服务商配置<\/h3>/);
+  assert.match(empty, /选择第三方模型提供商.*自定义模型 API/);
+  assert.equal((empty.match(/添加配置<\/button>/g) ?? []).length, 1);
+  assert.doesNotMatch(empty, /disabled=""[^>]*>.*?添加配置<\/button>/);
+  const locked = current(true); await locked.load();
+  assert.match(render(locked), /model-add-config" disabled=""/);
+});
+
+test('both Ape-aligned add categories expose a default-off probe option, disabled for an invalid endpoint', async () => {
+  const { controller: c, get } = fixture({ testConnection: async () => assert.fail('render must not probe'), cancelConnectionTest: async () => {} }); await c.load();
+  const provider = c.add('deepseek')!, custom = c.add('custom')!;
+  c.selectProvider(provider, 'deepseek');
+  const render = (mode: 'provider' | 'custom') => renderToStaticMarkup(createElement(ModelEditorDialog, {
+    editor: { kind: 'add', mode, provider, custom }, state: get(), controller: c,
+    onMode() {}, onClose() {}, onSaved() {},
+  }));
+  const providerHtml = render('provider'), customHtml = render('custom');
+  for (const html of [providerHtml, customHtml]) {
+    assert.match(html, /第三方模型提供商/); assert.match(html, /自定义模型 API/); assert.match(html, />厂商<\/span>/);
+    assert.doesNotMatch(html, /服务商预设|自定义 API/);
+  }
+  assert.match(customHtml, /placeholder="输入厂商名称"/);
+  assert.match(providerHtml, /model-test-option"><input type="checkbox"\/>保存后测试连接/);
+  assert.match(customHtml, /model-test-option"><input type="checkbox" disabled=""\/>保存后测试连接/);
+  c.patch(custom, { baseURL: 'http://insecure.invalid/v1' });
+  assert.match(render('custom'), /model-test-option"><input type="checkbox" disabled=""\/>保存后测试连接/);
+  c.patch(custom, { baseURL: 'https://custom.invalid/v1' });
+  assert.match(render('custom'), /model-test-option"><input type="checkbox"\/>保存后测试连接/);
+});
+
+test('model management renders one row per saved connection even when provider names match, without exposing model details', async () => {
+  const config = initial();
+  config.connections[1]!.displayName = config.connections[0]!.displayName;
+  config.connections[0]!.models[0] = { ...entry('private-model-id'), entryID: 'm', displayName: '藏在弹窗的模型' };
+  const { controller: c } = fixture({ list: async () => good(config) }); await c.load(); c.edit('a'); c.patchEntry('a', 'm', { displayName: '未保存的名称' }); c.add('custom');
   const html = renderToStaticMarkup(createElement(ModelPage, { controller: c }));
-  assert.match(html, /aria-expanded="true"/); assert.match(html, /模型 API ID/); assert.match(html, /从剪贴板保存/);
-  assert.match(html, /获取模型列表[^<]*<\/button>/); assert.doesNotMatch(html, /type="password"|role="dialog"|mcred-v1|已连接/);
+  assert.match(html, /aria-label="服务商列表"/); assert.match(html, /添加配置/);
+  assert.equal((html.match(/<li class="model-row"/g) ?? []).length, 2);
+  assert.equal((html.match(/<strong>连接 a<\/strong>/g) ?? []).length, 2);
+  assert.doesNotMatch(html, /更多操作/);
+  assert.doesNotMatch(html, /服务商预设|自定义 API/);
+  assert.match(html, /aria-label="删除 连接 a">删除<\/button>/);
+  assert.doesNotMatch(html, /藏在弹窗的模型|private-model-id|未保存的名称|Chat Completions|type="password"|mcred-v1/);
 });
 
+test('the status button next to the service name reports only the saved default model on its current revision', async () => {
+  let config = initial();
+  config.connections[0]!.credentialState = 'reference-present';
+  const probes: Parameters<NonNullable<ModelsBridge['testConnection']>>[0][] = [];
+  let fail = true;
+  const { controller: c, inputs } = fixture({ list: async () => good(config), testConnection: async input => {
+    probes.push(input);
+    if (input.entryID === 'm' && fail) return { version: 1, ok: false, error: 'rate_limited' };
+    return { version: 1, ok: true, connectionID: input.connectionID, revision: input.expectedRevision, entryID: input.entryID };
+  }, cancelConnectionTest: async () => {} });
+  const render = () => renderToStaticMarkup(createElement(ModelPage, { controller: c }));
+  const status = (state: string, label: string) => new RegExp(`<strong>连接 a</strong><button[^>]*data-status="${state}"[^>]*aria-label="测试连接 连接 a：${label}[^>]*>`);
+  await c.load();
+  assert.match(render(), status('untested', '未测试'));
+  assert.match(render(), /连接 b：未测试[^>]*请先保存此连接的 API Key/);
+  assert.match(render(), /点击发送一次短测试，可能产生费用/);
+  assert.equal(probes.length, 0);
+  c.prepareConnectionTest('a', 'n'); await c.confirmConnectionTest('a');
+  assert.match(render(), status('untested', '未测试'));
+  assert.equal((await c.testSavedDefault('a', 1))?.ok, false);
+  assert.match(render(), status('failed', '测试失败'));
+  assert.match(render(), /限制了请求频率/);
+  assert.match(render(), /点击重新测试连接，可能产生费用/);
+  fail = false;
+  assert.equal((await c.testSavedDefault('a', 1))?.ok, true);
+  assert.match(render(), status('ok', '测试成功'));
+  assert.equal(probes.length, 3);
+  const { operationID: first, ...firstInput } = probes[1]!;
+  const { operationID: retry, ...retryInput } = probes[2]!;
+  assert.notEqual(first, retry);
+  assert.deepEqual(retryInput, firstInput);
+  assert.deepEqual(inputs, []);
+  config = { ...config, revision: 4, connections: [{ ...config.connections[0]!, revision: 4 }, config.connections[1]!] };
+  await c.load();
+  assert.match(render(), status('untested', '未测试'));
+});
+
+test('testing the saved default sends once and rejects drafts, stale revisions, missing Keys and overlapping tests', async () => {
+  const config = initial();
+  const saved = config.connections[0]!;
+  saved.credentialState = 'reference-present'; saved.defaultModelEntryID = 'n';
+  let finish!: (reply: import('../../../packages/contracts/src/model-probe.ts').ModelProbeReply) => void;
+  const probes: Parameters<NonNullable<ModelsBridge['testConnection']>>[0][] = [];
+  const { controller: c } = fixture({ list: async () => good(config), testConnection: input => { probes.push(input); return new Promise(resolve => { finish = resolve; }); },
+    cancelConnectionTest: async () => {} });
+  await c.load();
+  assert.equal(await c.testSavedDefault('a', 0), undefined);
+  assert.equal(await c.testSavedDefault('b', 2), undefined);
+  c.edit('a'); c.patch('a', { defaultModelEntryID: 'm' });
+  assert.equal(await c.testSavedDefault('a', 1), undefined);
+  c.cancel('a'); assert.equal(probes.length, 0);
+  const pending = c.testSavedDefault('a', 1);
+  assert.equal(await c.testSavedDefault('a', 1), undefined);
+  assert.equal(probes.length, 1);
+  assert.deepEqual(probes[0], { connectionID: 'a', expectedRevision: 1, entryID: 'n', modelID: 'n', operationID: 'generated-0-1' });
+  const html = renderToStaticMarkup(createElement(ModelPage, { controller: c }));
+  assert.match(html, /aria-disabled="true"[^>]*aria-label="测试连接 连接 a：测试中/);
+  finish({ version: 1, ok: true, connectionID: 'a', entryID: 'n', revision: 1 });
+  assert.equal((await pending)?.ok, true);
+});
+
+test('editing a connection exposes all saved models behind one collapsed parameter section with no removal shortcut', async () => {
+  const { controller: c, get } = fixture(); await c.load(); c.edit('a');
+  const html = renderToStaticMarkup(createElement(ModelEditorDialog, { editor: { kind: 'edit', id: 'a' },
+    state: get(), controller: c, onMode: () => {}, onClose: () => {}, onSaved: () => {} }));
+  assert.match(html, /编辑配置/); assert.match(html, /aria-expanded="false"[^>]*>.*?模型参数/);
+  assert.equal((html.match(/aria-label="模型 [12]"/g) ?? []).length, 2);
+  assert.match(html, /再添加一个模型/); assert.doesNotMatch(html, /aria-label="移除模型/);
+});
+
+test('deleting the last saved model requires explicitly handling the global default', async () => {
+  const config = initial();
+  const saved = config.connections[0]!;
+  saved.models.pop();
+  const { controller: c, get } = fixture({ list: async () => good(config) });
+  await c.load();
+  const deletion = renderToStaticMarkup(createElement(DeleteModelDialog, { connection: saved, controller: c, state: get(), close: () => {} }));
+  assert.match(deletion, /最后一个模型.*?一并移除连接/);
+  assert.match(deletion, /清空全局默认/);
+  assert.match(deletion, /disabled=""[^>]*>确认删除/);
+});
+
+test('deleting one model pins the saved revision and replaces a default only on explicit selection', async () => {
+  const { controller: c, get, inputs } = fixture(); await c.load();
+  assert.equal(await c.deleteModel('a', 0, 'm', 'n'), false);
+  assert.equal(await c.deleteModel('a', 1, 'm'), false);
+  assert.equal(inputs.length, 0);
+  assert.equal(await c.deleteModel('a', 1, 'm', 'n'), true);
+  const input = inputs[0]![1] as Parameters<ModelsBridge['save']>[0];
+  assert.equal(input.expectedRevision, 1); assert.equal(input.connection.defaultModelEntryID, 'n');
+  assert.deepEqual(input.connection.models.map(item => item.entryID), ['n']);
+  assert.deepEqual(input.credential, { kind: 'keep' });
+  assert.equal(get().configuration?.defaultConnectionID, 'a');
+});
+
+test('last-model removal requires an explicit global fallback and does not save an empty connection', async () => {
+  const config = initial(); config.connections[0]!.models.pop();
+  const { controller: c, inputs } = fixture({ list: async () => good(config) }); await c.load();
+  assert.equal(await c.deleteModel('a', 1, 'm'), false);
+  assert.equal(await c.deleteModel('a', 1, 'm', null), true);
+  assert.deepEqual(inputs, [['remove', { connectionID: 'a', expectedRevision: 1, replacementDefault: null }]]);
+});
 
 test('a readable manifest after indeterminate publication is read-only until the local service restarts', async () => {
   let blocked = false, writes = 0;
@@ -232,18 +384,49 @@ test('inline test requires a second click, pins the draft model, survives foldin
   assert.equal(calls.length, 1);
 });
 
-test('connection test confirmation is inline, identifies the saved destination and model, and discloses possible charges', async () => {
+test('per-model testing pins the selected saved row instead of the connection default', async () => {
   const config = initial(); config.connections[0]!.credentialState = 'reference-present';
-  const { controller } = fixture({ list: async () => good(config),
-    testConnection: async () => { assert.fail('confirmation alone cannot send'); }, cancelConnectionTest: async () => {},
-  });
-  await controller.load(); controller.edit('a'); controller.patchEntry('a', 'm', { modelID: 'current-draft-model' });
-  controller.prepareConnectionTest('a');
-  const markup = renderToStaticMarkup(createElement(ModelPage, { controller }));
-  assert.match(markup, /aria-label="确认连接测试"/);
-  assert.match(markup, /https:\/\/example\.invalid\/v1/);
-  assert.match(markup, /current-draft-model/);
-  assert.match(markup, /可能产生费用/);
-  assert.match(markup, /确认发送一次测试/);
-  assert.doesNotMatch(markup, /role="dialog"|<dialog/);
+  const requests: import('../../../packages/contracts/src/model-probe.ts').ModelProbeOperation[] = [];
+  const { controller: c } = fixture({ list: async () => good(config), testConnection: async input => {
+    requests.push(input); return { version: 1, ok: true, connectionID: input.connectionID, revision: input.expectedRevision, entryID: input.entryID };
+  }, cancelConnectionTest: async () => {} });
+  await c.load(); c.prepareConnectionTest('a', 'n'); assert.equal(requests.length, 0);
+  await c.confirmConnectionTest('a'); assert.equal(requests[0]?.entryID, 'n'); assert.equal(requests[0]?.expectedRevision, 1);
+});
+
+test('post-save batch tests require explicit opt-in and a confirmed write, and pin each saved model', async () => {
+  for (const [optIn, fails] of [[false, false], [true, true], [true, false]]) {
+    const requests: string[] = [];
+    const { controller: c } = fixture({ save: async input => fails ? bad('write_outcome_unknown') : good({ ...initial(), connections: [
+      { ...input.connection, credentialState: 'reference-present', revision: 9 },
+    ] }), testConnection: async input => {
+      assert.equal(input.expectedRevision, 9); requests.push(input.entryID);
+      return { version: 1, ok: true, connectionID: input.connectionID, revision: 9, entryID: input.entryID };
+    }, cancelConnectionTest: async () => {} });
+    await c.load(); c.edit('a');
+    assert.equal(await c.save('a', false, optIn ? ['m', 'n'] : undefined), !fails);
+    assert.deepEqual(requests, optIn && !fails ? ['m', 'n'] : []);
+  }
+});
+
+test('provider and custom drafts can share the last new-connection slot without sharing fields', async () => {
+  const { controller: c, get } = fixture({ list: async () => good({ revision: 1, defaultConnectionID: null, connections: Array.from({ length: 31 }, (_, i) => connection(`saved-${i}`, 1)) }) });
+  await c.load();
+  const vendor = c.add('deepseek')!; c.selectProvider(vendor, 'deepseek');
+  const custom = c.add('custom', vendor)!; c.patch(custom, { displayName: '自定义草稿', baseURL: 'https://custom.invalid/v1' });
+  c.selectProvider(vendor, 'qwen');
+  assert.equal(get().drafts.get(vendor)?.provider, 'qwen');
+  assert.equal(get().drafts.get(vendor)?.edit.displayName, '阿里云百炼 · 通义千问');
+  assert.equal(get().drafts.get(custom)?.edit.baseURL, 'https://custom.invalid/v1');
+  assert.equal(c.add('openai'), undefined);
+});
+
+test('leaving before save settles prevents any post-save connection test', async () => {
+  let confirm!: (reply: ModelWorkspaceReply) => void;
+  const { controller: c } = fixture({ save: () => new Promise(resolve => { confirm = resolve; }),
+    testConnection: async () => { assert.fail('a departed editor must not send'); }, cancelConnectionTest: async () => {} });
+  await c.load(); c.edit('a');
+  const pending = c.save('a', false, ['m']); c.leave();
+  const saved = initial(); saved.connections[0]!.credentialState = 'reference-present';
+  confirm(good(saved)); assert.equal(await pending, true);
 });

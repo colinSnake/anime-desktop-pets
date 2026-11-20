@@ -159,8 +159,8 @@ class StoreChecks(unittest.TestCase):
             with self.subTest(key=key, value=value):
                 with self.assertRaises(InstanceError): preferences({key: value})
 
-    def test_shared_example_matches_swift_contract(self):
-        data = json.loads((ROOT / 'config/pet-instances.example.json').read_text())
+    def test_frozen_helper_registry_fixture_remains_disabled(self):
+        data = json.loads((ROOT / 'scripts/fixtures/pet-instances.json').read_text())
         value = validate_registry(data)
         self.assertEqual(value, validate_registry(data))
         self.assertFalse(value['instances'][0]['enabled'])

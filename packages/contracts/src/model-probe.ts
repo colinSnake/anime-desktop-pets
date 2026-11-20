@@ -4,11 +4,13 @@ import { shape } from './pets.ts';
 export const modelProbePath = '/v1/models/test';
 export const modelProbeIPC = { testConnection: 'pet:models-test-connection', cancelConnectionTest: 'pet:models-cancel-connection-test' } as const;
 export const modelProbeBytes = 2048;
+export const streamingModelProbeTimeoutMs = 60_000;
 export type ModelProbeInput = { connectionID: string; expectedRevision: number; entryID: string; modelID: string; maxOutputTokens?: number } & Compatibility;
 export type ModelProbeOperation = ModelProbeInput & { operationID: string };
 export const modelProbeStatus = {
   invalid_configuration: 400, configuration_conflict: 409, credentials_unavailable: 503, storage_unavailable: 503, publication_uncertain: 503,
   busy: 409, authentication_failed: 502, rate_limited: 429, invalid_response: 502, response_too_large: 502, upstream_unavailable: 502,
+  provider_bad_request: 502, provider_forbidden: 502, provider_not_found: 502, output_budget_exhausted: 502,
   timed_out: 504, cancelled: 409, unavailable: 503,
 } as const;
 export type ModelProbeError = keyof typeof modelProbeStatus;

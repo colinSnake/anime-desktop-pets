@@ -1,3 +1,4 @@
+import { isChatMemoryCommand } from './character-records.ts';
 import { parseLocalChatCommand } from './local-chat.ts';
 import { petId, shape } from './pets.ts';
 
@@ -33,7 +34,7 @@ const safeText = (value: unknown, max: number): value is string => typeof value 
 const label = (value: unknown): value is string => safeText(value, 128) && !/[\x00-\x1f]/.test(value);
 const segmenter = new Intl.Segmenter('zh', { granularity: 'grapheme' });
 export const onlineCharacterCount = (value: string) => [...segmenter.segment(value)].length;
-export const acceptedChatText = (value: unknown): value is string => safeText(value, 12 * 1024) && onlineCharacterCount(value) <= 1200 && !parseLocalChatCommand(value);
+export const acceptedChatText = (value: unknown): value is string => safeText(value, 12 * 1024) && onlineCharacterCount(value) <= 1200 && !parseLocalChatCommand(value) && !isChatMemoryCommand(value);
 export const validChatRequestID = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
 export const validChatReplyText = (value: unknown): value is string => safeText(value, 24 * 1024);
 export const sameChatRoute = (a: ChatRoute, b: ChatRoute): boolean => a.connectionID === b.connectionID && a.modelEntryID === b.modelEntryID && a.fingerprint === b.fingerprint;

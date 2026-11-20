@@ -126,6 +126,7 @@ export class IdentityWorkspace {
     if (!editor) { editor = new IdentityEditor(this.bridge, id); this.editors.set(id, editor); }
     return editor;
   }
+  refreshExisting(id: string) { void this.editors.get(id)?.load(); }
   keepRegistered(ids: readonly string[]) {
     const live = new Set(ids);
     for (const [id, editor] of this.editors) if (!live.has(id)) { this.editors.delete(id); editor.retire(); }

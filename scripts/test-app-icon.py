@@ -18,21 +18,6 @@ def png_dimensions(data):
     return struct.unpack('>II', data[16:24])
 
 
-def icon_entries(data):
-    if len(data) < 8 or data[:4] != b'icns' or struct.unpack('>I', data[4:8])[0] != len(data):
-        raise ValueError('ICNS 容器长度无效')
-    entries, index = {}, 8
-    while index < len(data):
-        if index + 8 > len(data):
-            raise ValueError('ICNS 条目头截断')
-        tag, size = struct.unpack('>4sI', data[index:index+8])
-        if size < 8 or index + size > len(data) or tag in entries:
-            raise ValueError('ICNS 条目越界或重复')
-        entries[tag] = data[index+8:index+size]
-        index += size
-    return entries
-
-
 class AppIconTests(unittest.TestCase):
     def test_vector_has_no_linked_media_or_scripts(self):
         tree = ElementTree.fromstring((BRANDING/'app-icon.svg').read_bytes())
@@ -47,20 +32,6 @@ class AppIconTests(unittest.TestCase):
         self.assertEqual(png_dimensions(data), (1024, 1024))
         self.assertEqual(data[25], 6, 'PNG 必须保留 RGBA 透明外缘')
 
-    def test_icns_has_all_ten_retina_and_standard_representations(self):
-        entries = icon_entries((BRANDING/'AppIcon.icns').read_bytes())
-        required = {b'ic04', b'ic05', b'ic07', b'ic08', b'ic09',
-                    b'ic10', b'ic11', b'ic12', b'ic13', b'ic14'}
-        self.assertTrue(required <= entries.keys())
-        for tag, size in ((b'ic11', 32), (b'ic12', 64), (b'ic07', 128),
-                          (b'ic08', 256), (b'ic13', 256), (b'ic09', 512),
-                          (b'ic14', 512), (b'ic10', 1024)):
-            self.assertEqual(png_dimensions(entries[tag]), (size, size), tag)
-
-    def test_invalid_icns_is_rejected(self):
-        for value in (b'', b'icns', b'icns\0\0\0\x09', b'icns\0\0\0\x10bad!\0\0\0\x00'):
-            with self.assertRaises(ValueError): icon_entries(value)
-
     def test_offline_export_from_single_geometry_source(self):
         with tempfile.TemporaryDirectory(prefix='anime-pets-icon-test-') as temporary:
             subprocess.run(['swift', str(ROOT/'scripts/build-app-icon.swift'), temporary], check=True,
@@ -69,8 +40,7 @@ class AppIconTests(unittest.TestCase):
             self.assertEqual((out/'app-icon.svg').read_bytes(), (BRANDING/'app-icon.svg').read_bytes())
             self.assertEqual(png_dimensions((out/'app-icon.png').read_bytes()), (1024, 1024))
             self.assertEqual((out/'app-icon.png').read_bytes(), (BRANDING/'app-icon.png').read_bytes())
-            self.assertEqual(icon_entries((out/'AppIcon.icns').read_bytes()),
-                             icon_entries((BRANDING/'AppIcon.icns').read_bytes()))
+
 
 
 if __name__ == '__main__':

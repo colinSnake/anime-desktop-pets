@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>桌边小崽 · 透明视频预览</title>
+  <link rel="stylesheet" href="./style.css">
+  <script defer src="./renderer.js"></script>
+</head>
+<body>
+  <main aria-label="龙妹 · 视频桌宠预览">
+    <video muted playsinline disablepictureinpicture preload="auto"></video>
+    <video muted playsinline disablepictureinpicture preload="auto"></video>
+    <canvas id="pet-pose" aria-hidden="true" hidden></canvas>
+    <span id="pet-name" aria-hidden="true" hidden>龙妹</span>
+    <p id="pet-caption" role="status" aria-live="polite" hidden></p>
+    <output aria-live="polite" hidden></output>
+    <section id="pet-quota" aria-labelledby="quota-title" hidden>
+      <header>
+        <h2 id="quota-title">查询额度</h2>
+        <button id="quota-refresh" type="button" aria-label="刷新额度" title="刷新额度">↻</button>
+        <button id="quota-close" type="button" aria-label="关闭额度卡片" title="关闭">×</button>
+      </header>
+      <div id="quota-result" aria-live="polite"></div>
+      <footer id="quota-footer" hidden>
+        <small id="quota-source"></small>
+        <small id="quota-time"></small>
+      </footer>
+    </section>
+  </main>
+</body>
+</html>

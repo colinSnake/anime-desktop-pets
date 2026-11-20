@@ -9,8 +9,8 @@
   `dragon-codex-boot/media/startup.mp4`。保留 `licenses/startup-media.md`。
   上游代码的 MIT 不授予提取、改授视频、角色、音乐或标志的权利。
   本地开发构建不等于获得公开分发授权。
-- `resources/pet/preview.png`：来自本地 `bailong-desktop-pet-macos/docs/preview.png`，
-  仅作为私有开发参考。保留 `licenses/pet-reference.md`，不主张新增商用、改编或再分发权利。
+- 龙妹：本机原封面来自 `bailong-desktop-pet-macos/docs/preview.png`，保存在 `.local/pets/longmei/cover-original.png`；现用 `cover.png` 为用户提供的 2× 版本，仅供私有开发参考。保留 `licenses/pet-reference.md`，不主张新增商用、改编或再分发权利。
+- 大肥鱼：从用户明确指定的本机 `dsh-pet` checkout 提取固定待机原片并裁切透明封面；现用封面为用户提供的 2× 版本，只在 `.local/pets/dafeiyu/` 与临时会话使用。社区角色的署名与 CC BY-NC-SA 4.0 见 `licenses/local-companion-media.md`。
 - 原创海报：尚未生成；后续生成后再记录服务、模型、来源与适用权利说明。
 
 构建脚本会把本地媒体打进开发 App。它**不是已获授权的公开发行打包流程**，
@@ -69,3 +69,12 @@ AppKit、AVFoundation、AVKit、CoreGraphics、ImageIO、QuartzCore 是系统框
 
 龙妹外观观察与提示词仅是对既有素材的描述性归纳，不恢复原始生成参数，
 不使第三方角色成为本项目原创，也不授予新生成衍生角色的商用或再分发权利。
+
+## 聊天编辑器与 DeepSeek Harness SDK
+
+- Lexical、`@lexical/plain-text`、`@lexical/history` 与 `@lexical/utils` 固定 `0.49.0`，用于桌面聊天编辑，按上游 MIT 与各包附带声明。无移动 WebKit 补丁。`react-markdown` 固定 `10.1.0`（MIT），仅为本机草稿预览；禁用 HTML、外部链接及图片加载。传递依赖适用各自许可证。
+- Ape Agent Harness 仅作本机架构和输入交互参考；不复制内部源码或产品数据。常规 macOS 开发服务通过 pnpm 直接固定 `@deepseek-ai/dsh-sdk-client` 和 `@deepseek-ai/dsh-llm-pi-ai` `0.2.2-rc.5`（MIT）；同版 `@deepseek-ai/dsh` 由 SDK 传递安装和解析。这些包保留自身许可证；其传递依赖适用各自许可。普通构建不复制完整第三方依赖树或 Node 二进制，独立分发需另做依赖与许可证清点。
+
+## 工作区图标
+
+- 「高级」导航使用 Lucide `Settings2`（Lucide 0.514.0 的 `icons/settings-2.svg`），仅内嵌该图标，不引入图标库运行时。原许可证保留于 `licenses/lucide.txt`。

@@ -1,10 +1,12 @@
+import type { LegacyHandoffReply } from '../../../packages/contracts/src/legacy-character-snapshot.ts';
+import type { WorkspaceVideoHost } from './workspace-video-host.ts';
 import { isTaskFollowingState, type TaskFollowingState } from '../../app-service/src/codex-task-following.ts';
 import { probeError, type ModelProbeInput, type ModelProbeReply } from '../../../packages/contracts/src/model-probe.ts';
 import { chatUnavailable, requestChatModels, requestOnlineChat } from './chat-transport.ts';
 import type { ChatListResult, ChatSendResult, OnlineChatInput } from '../../../packages/contracts/src/online-chat.ts';
 import { recordRoutes, type RecordAction } from '../../../packages/contracts/src/character-records.ts';
 import type { IdentityWriteAction } from '../../../packages/contracts/src/characters.ts';
-import { identityUnavailable, identityWriteUnknown, requestIdentity, writeIdentity, requestCharacterRecords, requestKnowledgeSearch, requestLocalChatContext } from './character-transport.ts';
+import { identityUnavailable, identityWriteUnknown, requestIdentity, writeIdentity, requestCharacterRecords, requestKnowledgeSearch, requestLocalChatContext, requestLegacyHandoff, type LegacyHandoffWrite } from './character-transport.ts';
 import { isSpeechResult, type SpeechResult } from "../../../packages/contracts/src/speech.ts";
 import { discoveryError } from '../../app-service/src/models/discovery-contract.ts';
 import type { ModelDiscoveryInput, ModelDiscoveryReply } from '../../../packages/contracts/src/models.ts';
@@ -37,19 +39,21 @@ export class ServiceProcess {
   private closed = false;
   private hasExited = false;
   private exitCode?: number;
+  private videoCleanupFailed = false;
   private taskFollowingState: TaskFollowingState = 'off';
   constructor(
     private factory: () => ServiceTransport,
     private options: {
       modelsRoot?: string;
+      harnessExecutable?: string;
       taskFollowingHome?: string;
       onTaskFollowingState?: (state: TaskFollowingState) => void;
       speech?: { python: string; model: string; worker: string };
+      videoHost?: WorkspaceVideoHost;
       workspace?: { root: string; catalog: CatalogEntry[]; packageToolPath?: string };
       workerPath: string;
       guardianPath: string;
       python?: string;
-      player?: { workerPath: string; config?: import("../../app-service/src/player-runtime.ts").PlayerConfig };
       startupMs?: number;
       shutdownMs?: number;
     },
@@ -86,11 +90,14 @@ export class ServiceProcess {
         this.exitCode = code;
         this.hasExited = true;
         this.port = undefined;
+        this.videoCleanupFailed = this.options.videoHost?.close() === false;
         this.publishTaskFollowing('off');
         fail();
         didExit();
       });
       transport.onMessage((message) => {
+        if (finished && !this.hasExited && (this.port || this.closed) &&
+            this.options.videoHost?.receive(message, reply => transport.send(reply), !this.closed)) return;
         if (this.closed) return;
         if (finished) {
           if (this.port && this.options.taskFollowingHome && shape(message, ['type', 'state']) &&
@@ -124,20 +131,21 @@ export class ServiceProcess {
           workerPath: this.options.workerPath,
           guardianPath: this.options.guardianPath,
           python: this.options.python,
-          player: this.options.player,
           workspace: this.options.workspace,
           modelsRoot: this.options.modelsRoot,
+          ...(this.options.harnessExecutable ? { harnessExecutable: this.options.harnessExecutable } : {}),
           speech: this.options.speech,
           taskFollowingHome: this.options.taskFollowingHome,
+          ...(this.options.videoHost ? { workspaceVideo: true } : {}),
         });
       } catch {
         fail();
       }
     });
   }
-  async request(command: "snapshot" | "probe" | "start-player" | "stop-player"): Promise<Snapshot> {
+  async request(command: "snapshot" | "probe"): Promise<Snapshot> {
     if (this.closed || !this.port) throw new Error("service_unavailable");
-    const paths = { snapshot: "/v1/snapshot", probe: "/v1/runtime/probe", "start-player": "/v1/player/start", "stop-player": "/v1/player/stop" };
+    const paths = { snapshot: "/v1/snapshot", probe: "/v1/runtime/probe" };
     const path = paths[command];
     if (!path) throw new Error("service_unavailable");
     try {
@@ -150,7 +158,7 @@ export class ServiceProcess {
             : {}),
         },
         body: command !== "snapshot" ? "{}" : undefined,
-        signal: AbortSignal.timeout(command === "start-player" ? 15_000 : 12_000),
+        signal: AbortSignal.timeout(12_000),
         redirect: "error",
       });
       if (!response.ok) throw new Error();
@@ -160,6 +168,12 @@ export class ServiceProcess {
     } catch {
       throw new Error("service_unavailable");
     }
+  }
+  async legacyCharacterHandoff(petID: string, write?: LegacyHandoffWrite): Promise<LegacyHandoffReply> {
+    const port = this.port;
+    if (this.closed || !port) return { ok: false, error: 'unavailable' };
+    const result = await requestLegacyHandoff({ port, token: this.token, petID, write });
+    return this.closed || this.port !== port ? { ok: false, error: write ? 'write-outcome-unknown' : 'unavailable' } : result;
   }
   async readIdentity(input: unknown) {
     const port = this.port;
@@ -270,7 +284,7 @@ export class ServiceProcess {
     try { this.options.onTaskFollowingState?.(state); } catch { /* Status presentation cannot interrupt cleanup. */ }
   }
   private checkCleanup() {
-    if (typeof this.exitCode === "number" && this.exitCode !== 0) throw new Error("service_cleanup_failed");
+    if (this.videoCleanupFailed || (typeof this.exitCode === "number" && this.exitCode !== 0)) throw new Error("service_cleanup_failed");
   }
   close(): Promise<void> {
     if (this.closing) return this.closing;
@@ -279,7 +293,10 @@ export class ServiceProcess {
     this.abortStart?.();
     this.publishTaskFollowing('off');
     this.closing = (async () => {
-      if (!this.transport) return;
+      if (!this.transport) {
+        if (this.options.videoHost?.close() === false) throw new Error("service_cleanup_failed");
+        return;
+      }
       if (this.hasExited) { this.checkCleanup(); return; }
       try {
         this.transport.send({ type: "shutdown" });
@@ -288,10 +305,12 @@ export class ServiceProcess {
       }
       if (await waitFor(this.exited, this.options.shutdownMs ?? 10_000)) { this.checkCleanup(); return; }
       this.transport.terminate();
-      if (!(await waitFor(this.exited, 1500)))
+      if (!(await waitFor(this.exited, 1500))) {
+        this.options.videoHost?.close();
         throw new Error("service_cleanup_timeout");
+      }
       this.checkCleanup();
-    })();
+    })().finally(() => this.options.videoHost?.drain());
     return this.closing;
   }
 }

@@ -1,6 +1,7 @@
+import { isLegacyHandoffReply, legacyHandoffBodyLimit, type LegacyHandoffReply, type LegacyImportBatch } from '../../../packages/contracts/src/legacy-character-snapshot.ts';
 import { isLocalChatInput, isLocalChatResult, localChatResponseBytes, localChatStatus, type LocalChatResult } from '../../../packages/contracts/src/local-chat.ts';
 import { isKnowledgeSearchInput, isKnowledgeSearchResult, knowledgeSearchBytes, knowledgeSearchStatus, type KnowledgeSearchResult } from '../../../packages/contracts/src/knowledge-search.ts';
-import { isMemoryHistorySnapshot, isRecordInput, isRecordSnapshot, isRecordWriteResult, recordErrorStatus, recordRoutes, recordWriteLimit,
+import { matchesChatMemory, isMemoryHistorySnapshot, isRecordInput, isRecordSnapshot, isRecordWriteResult, recordErrorStatus, recordRoutes, recordWriteLimit,
   type CharacterRecord, type RecordAction, type RecordDeleteInput, type RecordSnapshot, type RecordWriteInput } from '../../../packages/contracts/src/character-records.ts';
 import { identityRecordLimit, isIdentitySnapshot, isIdentityWriteInput, isIdentityWriteResult, validIdentityInput, type IdentityResult, type IdentityWriteAction, type IdentityWriteError, type IdentityWriteResult } from '../../../packages/contracts/src/characters.ts';
 import { readBoundedJSON } from './bounded-json.ts';
@@ -72,6 +73,9 @@ export async function requestCharacterRecords(
       return response.status === 404 && isRecordWriteResult(validSnapshot, value, 0) && !value.ok && value.error === 'not-found' ? value : identityUnavailable;
     }
     if (!isRecordWriteResult(validSnapshot, value, (input as RecordWriteInput).expectedRevision)) return identityWriteUnknown;
+    if (value.ok && action === 'saveChatMemory' && isRecordInput(action, input) &&
+        (value.durability === 'unchanged' || !isRecordSnapshot('memories', value.snapshot, petID) ||
+         !value.snapshot.records.some(record => matchesChatMemory(record, input.messageID, input.text)))) return identityWriteUnknown;
     if (value.ok && (action === 'deleteMemory' || action === 'deleteGoal') &&
         (value.durability === 'unchanged' || value.snapshot.records.some(record => record.id === (input as RecordDeleteInput).id))) return identityWriteUnknown;
     if (value.ok && (action === 'setMemoryChatShare' || action === 'setGoalChatShare') && isRecordInput(action, input) &&
@@ -109,4 +113,22 @@ export async function requestLocalChatContext(
     const value = await readBoundedJSON(response, localChatResponseBytes);
     return isLocalChatResult(value, petID) && response.status === (value.ok ? 200 : localChatStatus[value.error]) ? value : identityUnavailable;
   } catch { return identityUnavailable; }
+}
+
+export type LegacyHandoffWrite = { expectedRevision: number; command: { type: 'importLegacy'; value: LegacyImportBatch } | { type: 'undoLegacyImport' } };
+export async function requestLegacyHandoff({ port, token, petID, write, transport = fetch }: {
+  port: number; token: string; petID: string; write?: LegacyHandoffWrite; transport?: typeof fetch;
+}): Promise<LegacyHandoffReply> {
+  if (!validIdentityInput({ petID })) return { ok: false, error: 'invalid' };
+  const unknown = { ok: false, error: write ? 'write-outcome-unknown' : 'unavailable' } as const;
+  const body = JSON.stringify(write ?? {});
+  if (Buffer.byteLength(body) > legacyHandoffBodyLimit) return { ok: false, error: 'limit' };
+  try {
+    const response = await transport(`http://127.0.0.1:${port}/v1/characters/${petID}/legacy-handoff`, {
+      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(6500),
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body,
+    });
+    const value = await readBoundedJSON(response, 1024);
+    return isLegacyHandoffReply(value, response.status) ? value : unknown;
+  } catch { return unknown; }
 }

@@ -1,16 +1,21 @@
+import { emptyChatState } from './empty-chat.ts';
+import { isRecordReadResult, isRecordWriteResult, isRecordSnapshot, matchesChatMemory, parseChatMemoryCommand, type Memory, type RecordSnapshot } from '../../../packages/contracts/src/character-records.ts';
+import { canReloadMemory, type ChatMemoryBridge, type ChatMemoryProposal } from './chat-memory.ts';
 import { acceptedChatText, isChatListResult, isChatSendResult, sameChatRoute, validOnlineChatInput, type ChatErrorCode, type ChatExchange, type ChatOption, type ChatRoute, type OnlineChatBridge } from '../../../packages/contracts/src/online-chat.ts';
 import { isLocalChatResult, parseLocalChatCommand, type LocalChatBridge, type LocalChatInput } from '../../../packages/contracts/src/local-chat.ts';
+import { acceptedDraft, sameDraft, textDraft, type ChatDraft } from './chat-draft.ts';
 
 /** 按角色隔离的内存会话。 */
-export type ChatTurn = { id: string; role: 'user' | 'assistant'; text: string; createdAt: number; localOnly?: true; replayRoute?: string; replyTo?: string };
+export type ChatTurn = { id: string; role: 'user' | 'assistant'; text: string; createdAt: number; localOnly?: true; replayRoute?: string; replyTo?: string; memory?: ChatMemoryProposal };
 export type ChatRequest = { characterId: string; model: string; text: string; history: ChatTurn[] };
+export type LocalChatShortcut = '你是谁' | '查看目标进度' | '查角色知识：' | '查个人记忆：' | '记住：';
 export type ChatCharacter = { id: string; name: string };
 export type ChatModel = { id: string; name: string; ready?: boolean; isDefault?: boolean };
 export type ChatAdapter = { models: ChatModel[]; reply(request: ChatRequest, signal: AbortSignal): Promise<string> };
-export type ChatSession = { draft: string; turns: ChatTurn[]; pending: boolean; failed: boolean; status: string; model?: string; confirmingClear: boolean };
-export type ChatWorkspaceState = { characters: ChatCharacter[]; selectedId?: string; models: ChatModel[]; available: boolean; localAvailable: boolean; online?: boolean; modelStatus?: string; canRetry?: boolean; session: ChatSession };
-type Attempt = { userTurn: ChatTurn; history: ChatTurn[]; local?: LocalChatInput; model?: string; route?: ChatRoute; exchanges?: ChatExchange[] };
-type Session = ChatSession & { attempt?: Attempt; active?: { token: symbol; abort: AbortController } };
+export type ChatSession = { draft: string; draftSnapshot: ChatDraft; turns: ChatTurn[]; pending: boolean; failed: boolean; status: string; model?: string; confirmingClear: boolean };
+export type ChatWorkspaceState = { characters: ChatCharacter[]; selectedId?: string; models: ChatModel[]; available: boolean; localAvailable: boolean; memoryAvailable?: boolean; online?: boolean; canRetry?: boolean; session: ChatSession };
+type Attempt = { draft: ChatDraft; userTurn: ChatTurn; history: ChatTurn[]; local?: LocalChatInput; model?: string; route?: ChatRoute; exchanges?: ChatExchange[] };
+type Session = Omit<ChatSession, 'draft'> & { attempt?: Attempt; active?: { token: symbol; abort: AbortController } };
 const segmenter = new Intl.Segmenter('zh', { granularity: 'grapheme' });
 export const characterCount = (text: string): number => [...segmenter.segment(text)].length;
 const prefix = (text: string, limit: number): string => [...segmenter.segment(text)].slice(0, limit).map(item => item.segment).join('');
@@ -31,7 +36,7 @@ const routeID = (route: ChatRoute) => `${route.connectionID}/${route.modelEntryI
 function onlineHistory(turns: ChatTurn[], route: ChatRoute): ChatExchange[] {
  return turns.flatMap((turn, i) => {
   const prior = turns[i - 1];
-  if (turn.role !== 'assistant' || turn.replayRoute !== routeID(route) || prior?.role !== 'user' || prior.id !== turn.replyTo) return [];
+  if (turn.localOnly || prior?.localOnly || turn.role !== 'assistant' || turn.replayRoute !== routeID(route) || prior?.role !== 'user' || prior.id !== turn.replyTo) return [];
   return [{ user: prior.text, assistant: prefix(turn.text, 1200) }];
  }).slice(-5);
 }
@@ -47,8 +52,8 @@ const chatFailureMessage: Partial<Record<ChatErrorCode, string>> = {
  timed_out: '等待回复超时，服务商可能仍在处理已收到的请求。',
  unavailable: '暂时无法使用本机模型服务，请稍后重试。',
 };
-const emptySession = (model?: string): Session => ({ draft: '', turns: [], pending: false, failed: false, status: '', model, confirmingClear: false });
-export const emptyChatState: ChatWorkspaceState = { characters: [], models: [], available: false, localAvailable: false, session: emptySession() };
+const emptySession = (model?: string): Session => ({ draftSnapshot: textDraft(''), turns: [], pending: false, failed: false, status: '', model, confirmingClear: false });
+
 
 export class ChatWorkspaceController {
  private sessions = new Map<string, Session>();
@@ -58,20 +63,17 @@ export class ChatWorkspaceController {
  private listeners = new Set<() => void>();
  private readonly models: ChatModel[];
  private options: ChatOption[] = [];
- private modelStatus = '';
  private refreshing?: Promise<void>;
- constructor(private readonly adapter?: ChatAdapter, private readonly local?: LocalChatBridge, private readonly online?: OnlineChatBridge) { this.models = structuredClone(adapter?.models ?? []); }
+ constructor(private readonly adapter?: ChatAdapter, private readonly local?: LocalChatBridge, private readonly online?: OnlineChatBridge, private readonly memory?: ChatMemoryBridge) { this.models = structuredClone(adapter?.models ?? []); }
  refreshModels() {
   if (!this.online) return Promise.resolve();
   if (this.refreshing) return this.refreshing;
   const read = async () => {
-   this.modelStatus = '正在读取已保存模型…'; this.publish();
    try {
     const result = await this.online!.list();
     if (!isChatListResult(result) || !result.ok) throw Error();
     this.options = result.models;
-    this.modelStatus = this.options.length ? '' : '请先在模型管理中保存模型。';
-   } catch { this.options = []; this.modelStatus = '暂时无法读取已保存模型，请刷新。'; }
+   } catch { this.options = []; }
    finally { this.refreshing = undefined; this.publish(); }
   };
   return this.refreshing = Promise.resolve().then(read);
@@ -99,10 +101,10 @@ export class ChatWorkspaceController {
  private publish() {
   const own = this.current();
   const selection = own && this.selectedOption(own);
-  const session: ChatSession = own ? { draft: own.draft, turns: own.turns, pending: own.pending, failed: own.failed, status: own.status, model: this.online ? selection && routeID(selection.route) : own.model, confirmingClear: own.confirmingClear } : emptySession();
+  const session: ChatSession = own ? { draft: own.draftSnapshot.text, draftSnapshot: own.draftSnapshot, turns: own.turns, pending: own.pending, failed: own.failed, status: own.status, model: this.online ? selection && routeID(selection.route) : own.model, confirmingClear: own.confirmingClear } : emptyChatState.session;
   const models = this.online ? this.options.map(option => ({ id: routeID(option.route), name: `${option.modelName} · ${option.connectionName}`, ready: option.ready, isDefault: option.isDefault })) : this.models;
   this.state = { characters: this.characters, selectedId: this.selectedId, models, available: this.online ? !!(own && this.route(own)) : !!this.adapter && !!models.length,
-   localAvailable: !!this.local, online: !!this.online, modelStatus: own?.model && !selection && this.online && this.options.length ? '所选路由已变更，请重新选模。' : this.modelStatus,
+   localAvailable: !!this.local, memoryAvailable: !!this.memory, online: !!this.online,
    canRetry: own ? this.retryable(own) : false, session };
   this.listeners.forEach(listener => listener());
  }
@@ -122,7 +124,23 @@ export class ChatWorkspaceController {
   const prior = this.current(); if (prior) prior.confirmingClear = false;
   this.selectedId = id; this.publish();
  }
- edit(text: string) { const own = this.current(); if (own) { own.draft = text; this.publish(); } }
+ edit(text: string) { if (this.selectedId) this.editDraft(this.selectedId, textDraft(text)); }
+ editDraft(petID: string, draft: ChatDraft): boolean {
+  const own = this.current();
+  if (!own || petID !== this.selectedId || !acceptedDraft(draft)) return false;
+  if (!sameDraft(own.draftSnapshot, draft)) {
+   own.draftSnapshot = Object.freeze({ text: draft.text, selection: Object.freeze({ ...draft.selection }) });
+   this.publish();
+  }
+  return true;
+ }
+ prefillLocalShortcut(shortcut: LocalChatShortcut): boolean {
+  const own = this.current();
+  if (!own || !(shortcut === '记住：' ? this.memory : this.local) || own.pending || own.draftSnapshot.text.trim()) return false;
+  own.draftSnapshot = textDraft(shortcut);
+  this.publish();
+  return true;
+ }
  selectModel(id: string) {
   const own = this.current();
   if (!own || own.pending) return;
@@ -139,24 +157,97 @@ export class ChatWorkspaceController {
   const own = this.current();
   const id = this.selectedId;
   if (!own || !id || own.pending) return false;
-  const intent = parseLocalChatCommand(own.draft);
+  const command = parseChatMemoryCommand(own.draftSnapshot.text);
+  if (command) {
+   if (typeof command === 'string' || !this.memory || !validatedMessage(own.draftSnapshot.text)) return false;
+   const turn: ChatTurn = { id: crypto.randomUUID(), role: 'user', text: own.draftSnapshot.text.trim(), createdAt: Date.now(), localOnly: true };
+   own.turns = trimTranscript([...own.turns, turn]);
+   own.draftSnapshot = textDraft('');
+   own.attempt = undefined; own.failed = false; own.status = ''; own.confirmingClear = false;
+   await this.readMemoryProposal(own, id, turn.id, command.text);
+   return true;
+  }
+  const intent = parseLocalChatCommand(own.draftSnapshot.text);
   if (intent === 'invalid' || (intent && !this.local)) return false;
   const local = intent && { petID: id, ...intent };
   const route = local ? undefined : this.route(own);
   if (!local && (!route && (!this.adapter || !own.model))) return false;
-  const text = validatedMessage(own.draft);
+  const text = validatedMessage(own.draftSnapshot.text);
   if (!text) { own.status = '单条消息最多1200字，请检查输入。'; this.publish(); return false; }
   if (route && !acceptedChatText(text)) { own.status = '消息超过在线字节限制或含不支持的字符。'; this.publish(); return false; }
   if (own.failed && own.attempt?.userTurn.text === text && this.retryable(own)) return this.retry();
-  const attempt: Attempt = { userTurn: { id: crypto.randomUUID(), role: 'user', text, createdAt: Date.now(), ...(local ? { localOnly: true } : {}) }, history: local || route ? [] : requestHistory(own.turns), local, model: own.model, route, exchanges: route ? onlineHistory(own.turns, route) : undefined };
+  const attempt: Attempt = { draft: own.draftSnapshot, userTurn: { id: crypto.randomUUID(), role: 'user', text, createdAt: Date.now(), ...(local ? { localOnly: true } : {}) }, history: local || route ? [] : requestHistory(own.turns), local, model: own.model, route, exchanges: route ? onlineHistory(own.turns, route) : undefined };
   own.turns = trimTranscript([...own.turns, attempt.userTurn]);
-  own.draft = '';
+  own.draftSnapshot = textDraft('');
   return this.perform(own, attempt, id);
+ }
+ private memoryAt(petID: string, messageID: string) {
+  const own = this.selectedId === petID ? this.current() : undefined;
+  const proposal = own?.turns.find(turn => turn.id === messageID)?.memory;
+  return own && proposal && this.memory ? { own, proposal, bridge: this.memory } : undefined;
+ }
+ private setMemory(own: Session, petID: string, messageID: string, proposal: ChatMemoryProposal, previous?: ChatMemoryProposal) {
+  if (this.sessions.get(petID) !== own || !own.turns.some(turn => turn.id === messageID && turn.memory === previous)) return false;
+  own.turns = own.turns.map(turn => turn.id === messageID ? { ...turn, memory: proposal } : turn);
+  this.publish();
+  return true;
+ }
+ private memorySnapshot(petID: string) {
+  return (value: unknown): value is RecordSnapshot<Memory> => isRecordSnapshot('memories', value, petID);
+ }
+ private async readMemoryProposal(own: Session, petID: string, messageID: string, text: string, previous?: ChatMemoryProposal) {
+  const uncertain = previous?.state === 'uncertain';
+  const reading: ChatMemoryProposal = { state: 'reading', text };
+  if (!this.setMemory(own, petID, messageID, reading, previous)) return false;
+  let next: ChatMemoryProposal = uncertain ? previous : { state: 'blocked', text, error: 'unavailable' };
+  try {
+   const result = await this.memory!.readMemories({ petID });
+   if (isRecordReadResult(this.memorySnapshot(petID), result)) {
+    if (result.ok) {
+     if (!uncertain) next = { state: 'ready', text, revision: result.snapshot.revision };
+     else if (result.snapshot.revision >= (previous.revisionFloor ?? 0)) {
+      // A successful read is not a durability acknowledgement: never upgrade to saved.
+      const found = result.snapshot.records.some(item => matchesChatMemory(item, messageID, text));
+      next = { state: found ? 'observed' : 'not-observed', text };
+     }
+    } else if (!uncertain) next = { state: 'blocked', text, error: result.error };
+   }
+  } catch { /* Keep the proposal local; never recover by sending a model message or another write. */ }
+  return this.setMemory(own, petID, messageID, next, reading);
+ }
+ async refreshMemoryProposal(petID: string, messageID: string) {
+  const target = this.memoryAt(petID, messageID);
+  if (!target) return false;
+  const { own, proposal } = target;
+  if (proposal.state !== 'uncertain' && !(proposal.state === 'blocked' && canReloadMemory(proposal.error))) return false;
+  return this.readMemoryProposal(own, petID, messageID, proposal.text, proposal);
+ }
+ ignoreMemoryProposal(petID: string, messageID: string) {
+  const target = this.memoryAt(petID, messageID);
+  if (!target || (target.proposal.state !== 'ready' && target.proposal.state !== 'blocked')) return false;
+  return this.setMemory(target.own, petID, messageID, { state: 'ignored', text: target.proposal.text }, target.proposal);
+ }
+ async saveMemoryProposal(petID: string, messageID: string) {
+  const target = this.memoryAt(petID, messageID);
+  if (!target || target.proposal.state !== 'ready') return false;
+  const { own, bridge, proposal: { text, revision: expectedRevision } } = target;
+  const saving: ChatMemoryProposal = { state: 'saving', text };
+  if (!this.setMemory(own, petID, messageID, saving, target.proposal)) return false;
+  let next: ChatMemoryProposal = { state: 'uncertain', text, revisionFloor: expectedRevision };
+  try {
+   const result = await bridge.saveChatMemory({ petID, messageID, text, expectedRevision });
+   if (isRecordWriteResult(this.memorySnapshot(petID), result, expectedRevision)) {
+    if (!result.ok && result.error !== 'write-outcome-unknown') next = { state: 'blocked', text, error: result.error };
+    else if (result.ok && result.durability === 'confirmed' && result.snapshot.records.some(item => matchesChatMemory(item, messageID, text)))
+     next = { state: 'saved', text };
+   }
+  } catch { /* A missing acknowledgement is not proof of failure. */ }
+  return this.setMemory(own, petID, messageID, next, saving) && next.state === 'saved';
  }
  async retry(): Promise<boolean> {
   const own = this.current();
   if (!own || own.pending || !own.failed || !own.attempt || !this.retryable(own)) return false;
-  if (own.draft.trim() === own.attempt.userTurn.text) own.draft = '';
+  if (own.draftSnapshot.text.trim() === own.attempt.userTurn.text) own.draftSnapshot = textDraft('');
   return this.perform(own, own.attempt, this.selectedId!);
  }
  private async perform(own: Session, attempt: Attempt, id: string): Promise<boolean> {
@@ -196,7 +287,7 @@ export class ChatWorkspaceController {
   } catch (error) {
    if (own.active !== active) return false;
    own.failed = true;
-   if (!own.draft) own.draft = attempt.userTurn.text;
+   if (!own.draftSnapshot.text) own.draftSnapshot = attempt.draft;
    own.status = attempt.local ? '暂时无法读取本机角色资料，可以重试。' : error instanceof ChatFailure ? chatFailureMessage[error.code] ?? '没有收到有效回复，可以重试。' : '没有收到有效回复，可以重试。';
    if (error instanceof ChatFailure && error.code === 'route_changed') void this.refreshModels();
    return false;
@@ -208,11 +299,11 @@ export class ChatWorkspaceController {
   const own = this.current(); if (!own?.active) return;
   const active = own.active;
   own.active = undefined; own.pending = false; own.failed = true;
-  if (!own.draft) own.draft = own.attempt?.userTurn.text ?? '';
+  if (!own.draftSnapshot.text && own.attempt) own.draftSnapshot = own.attempt.draft;
   own.status = own.attempt?.local ? '已停止等待本机查询。' : '已停止等待；已发出的请求可能仍由服务商处理。';
   active.abort.abort(); this.publish();
  }
- restoreDraft() { const own = this.current(); if (own?.attempt && !own.draft) { own.draft = own.attempt.userTurn.text; this.publish(); } }
+ restoreDraft() { const own = this.current(); if (own?.attempt && !own.draftSnapshot.text) { own.draftSnapshot = own.attempt.draft; this.publish(); } }
  requestClear() { const own = this.current(); if (own && !own.pending && own.turns.length) { own.confirmingClear = true; this.publish(); } }
  cancelClear() { const own = this.current(); if (own) { own.confirmingClear = false; this.publish(); } }
  confirmClear(): boolean {

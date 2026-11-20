@@ -1,6 +1,7 @@
+import { isLegacyImportBatch, type LegacyImportBatch } from '../../../../packages/contracts/src/legacy-character-snapshot.ts';
 import { shape, revision } from '../../../../packages/contracts/src/pets.ts';
 import {
-  MEMORY_LIMIT, GOAL_LIMIT, distinct, within, recordID, isMemoryDraft, isKnowledgeBatch, isGoalDraft, isMemory, isGoal,
+  MEMORY_LIMIT, GOAL_LIMIT, distinct, within, recordID, isChatMemoryText, isMemoryDraft, isKnowledgeBatch, isGoalDraft, isMemory, isGoal,
   type Memory, type MemoryDraft, type KnowledgeDraft, type Goal, type GoalDraft, type RecordVersion,
 } from '../../../../packages/contracts/src/character-records.ts';
 export { MEMORY_LIMIT, GOAL_LIMIT, credentialLike } from '../../../../packages/contracts/src/character-records.ts';
@@ -14,12 +15,15 @@ export class CharacterError extends Error {
   constructor(readonly code: 'invalid_character_data' | 'character_storage_unavailable' | 'character_conflict' | 'character_busy' | 'character_record_not_found' | 'character_publication_uncertain' | 'character_limit' | 'credential_like_memory' | 'memory_expired' | 'memory_duplicate' | 'knowledge_conflict') { super(code); }
 }
 export const invalid = () => new CharacterError('invalid_character_data');
-export type CharacterState = { schemaVersion: 1; petID: string; revision: number; identity: Identity | null; identityHistory: Identity[]; memories: Array<{ current: Memory; history: Memory[] }>; goals: Goal[] };
+export type CharacterState = { schemaVersion: 1; petID: string; revision: number; identity: Identity | null; identityHistory: Identity[]; memories: Array<{ current: Memory; history: Memory[] }>; goals: Goal[]; legacyImport?: true };
 export type Command =
+  | { type: 'importLegacy'; value: LegacyImportBatch }
+  | { type: 'undoLegacyImport' }
   | { type: 'saveIdentity'; value: IdentityDraft }
   | { type: 'setIdentityChatShare'; enabled: boolean }
   | { type: 'setMemoryChatShare' | 'setGoalChatShare'; id: string; enabled: boolean }
   | { type: 'restoreIdentity'; revision: number }
+  | { type: 'saveChatMemory'; id: string; value: string }
   | { type: 'addMemory'; value: MemoryDraft }
   | { type: 'addKnowledgeBatch'; value: KnowledgeDraft[] }
   | { type: 'editMemory'; id: string; value: MemoryDraft }
@@ -28,16 +32,21 @@ export type Command =
   | { type: 'addGoal'; value: GoalDraft }
   | { type: 'editGoal'; id: string; value: GoalDraft };
 
+export const characterIsEmpty = (state: CharacterState) => state.identity === null && state.identityHistory.length === 0 && state.memories.length === 0 && state.goals.length === 0;
+
 const positiveRevision = (v: unknown): v is number => revision(v) && v > 0;
 
 /** Only complete DTOs cross the repository boundary; no caller revisions, owner fields, or grants in drafts. */
 export function isCommand(v: unknown): v is Command {
   if (!shape(v, ['type', 'id', 'value', 'revision', 'enabled'])) return false;
   switch (v.type) {
+    case 'importLegacy': return shape(v, ['type', 'value']) && isLegacyImportBatch(v.value);
+    case 'undoLegacyImport': return shape(v, ['type']);
     case 'setIdentityChatShare': return shape(v, ['type', 'enabled']) && typeof v.enabled === 'boolean';
     case 'setMemoryChatShare': case 'setGoalChatShare': return shape(v, ['type', 'id', 'enabled']) && recordID(v.id) && typeof v.enabled === 'boolean';
     case 'saveIdentity': return shape(v, ['type', 'value']) && isIdentityDraft(v.value);
     case 'restoreIdentity': return shape(v, ['type', 'revision']) && positiveRevision(v.revision);
+    case 'saveChatMemory': return shape(v, ['type', 'id', 'value']) && recordID(v.id) && isChatMemoryText(v.value);
     case 'addMemory': return shape(v, ['type', 'value']) && isMemoryDraft(v.value);
     case 'addKnowledgeBatch': return shape(v, ['type', 'value']) && isKnowledgeBatch(v.value);
     case 'editMemory': return shape(v, ['type', 'id', 'value']) && recordID(v.id) && isMemoryDraft(v.value);
@@ -54,9 +63,13 @@ const memoryTrail = (v: unknown): v is CharacterState['memories'][number] => sha
   within(v.history, HISTORY_LIMIT, isMemory) && trail(v.current, v.history) && v.history.every(m => m.chatShare === undefined && m.id === (v.current as Memory).id);
 
 export function isState(v: unknown, petID: string): v is CharacterState {
-  if (!(shape(v, ['schemaVersion', 'petID', 'revision', 'identity', 'identityHistory', 'memories', 'goals']) &&
+  if (!(shape(v, ['schemaVersion', 'petID', 'revision', 'identity', 'identityHistory', 'memories', 'goals', 'legacyImport']) &&
     v.schemaVersion === 1 && v.petID === petID && positiveRevision(v.revision) && (v.identity === null || isIdentityRecord(v.identity)) &&
     within(v.identityHistory, HISTORY_LIMIT, isIdentityRecord) && within(v.memories, MEMORY_LIMIT, memoryTrail) && within(v.goals, GOAL_LIMIT, isGoal))) return false;
+  if (Object.hasOwn(v, 'legacyImport') && (v.legacyImport !== true || v.identityHistory.length > 0 || (!v.identity && v.memories.length + v.goals.length === 0) ||
+    (v.identity !== null && (v.identity.revision !== 1 || v.identity.chatShare !== undefined)) ||
+    v.memories.some(row => row.history.length > 0 || row.current.revision !== 1 || row.current.status !== 'candidate' || row.current.chatShare !== undefined) ||
+    v.goals.some(goal => goal.revision !== 1 || goal.chatShare !== undefined))) return false;
   return (v.identity ? trail(v.identity, v.identityHistory) : v.identityHistory.length === 0) &&
     v.identityHistory.every(record => record.chatShare === undefined) && distinct(v.memories.map(m => m.current.id)) &&
     distinct(v.goals.map(g => g.id)) && [v.identity, ...v.memories.map(m => m.current), ...v.goals].every(record => !record || record.revision <= (v.revision as number));

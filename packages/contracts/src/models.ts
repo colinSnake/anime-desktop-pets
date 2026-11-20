@@ -1,6 +1,20 @@
 /** Local model management metadata. No raw credential, reference, or online request API. */
 export const MODEL_PROTOCOLS = ['chat-completions', 'responses', 'anthropic', 'gemini'] as const;
 export type ModelProtocol = typeof MODEL_PROTOCOLS[number];
+export const isModelLoopback = (url: URL): boolean => ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname.toLowerCase());
+/** Shared form/service validation for adapter base addresses, not full request endpoints. */
+export function normalizeModelBaseURL(value: unknown, protocol: ModelProtocol): string | undefined {
+  if (typeof value !== 'string' || !value.trim() || new TextEncoder().encode(value).byteLength > 2048 ||
+    /[\x00-\x1f\x7f\s\\]|%(?:2e|2f|5c|0[0-9a-f]|1[0-9a-f]|7f)|\/(?:\.|\.\.)(?:\/|$)/i.test(value)) return;
+  let url: URL;
+  try { url = new URL(value); } catch { return; }
+  if (!(url.protocol === 'https:' || (url.protocol === 'http:' && isModelLoopback(url))) || !url.hostname ||
+    url.username || url.password || url.search || url.hash || value.includes('?') || value.includes('#')) return;
+  const path = url.pathname.replace(/\/+$/, '');
+  if (/\/(?:chat\/completions|responses|messages)$/.test(path) || /:generateContent$/.test(path) ||
+    (protocol === 'gemini' && !/\/v1(?:beta)?$/.test(path))) return;
+  return `${url.origin}${path}`;
+}
 export type Compatibility = { outputTokenField?: 'max_tokens' | 'max_completion_tokens' };
 export type ToolCapability = { status: 'unknown' | 'supported' | 'unsupported'; source: 'user' | 'preset' | 'discovery' };
 export type ModelEntry = { entryID: string; modelID: string; displayName: string; contextWindow?: number; maxOutputTokens?: number; capabilities: { tools: ToolCapability }; compatibility: Compatibility };

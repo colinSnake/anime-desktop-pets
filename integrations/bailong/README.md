@@ -6,7 +6,7 @@
 
 构建与验证流程见 `docs/桌宠增强与性能构建.md`（仓库根目录）。上游版权和素材授权声明保持原样。
 
-2026-11-14命名迁移：当前源码使用 `pet.44` / build38、`PET_PATCH.json` 和 `PetPatchVersion`；通用多宠模块为 `pet_instances`、`pet_instance_ipc`、`pet_helper`。不提供旧标识兼容入口，必须重建helper后再构建宿主；角色层 `dragon_*.py` 仍保留。下文版本名为历史记录，不改写。
+2026-11-14命名迁移：当前源码使用 `pet.44` / build38、`PET_PATCH.json` 和 `PetPatchVersion`；通用多宠模块为 `pet_instances`、`pet_instance_ipc`、`pet_helper`。不提供旧标识兼容入口，helper 需使用固定输入重建；角色层 `dragon_*.py` 仍保留。下文版本名为历史记录，不改写。
 
 `apps/pet-runtime/bailong/dragon_behavior.py` 负责低频动作决策、可中断轨迹和拖拽松手动量，复用播放器 tick；不读取 Codex 数据。
 

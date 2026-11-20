@@ -1,3 +1,6 @@
+import { dafeiyu, longmei } from '../../../packages/contracts/src/built-in-pets.ts';
+import { prepareWorkspaceVideo } from './workspace-video-player.ts';
+import { previewScheme } from './video-preview/media.ts';
 import type { TaskFollowingState } from '../../app-service/src/codex-task-following.ts';
 import { ChatIPC } from './chat-ipc.ts';
 import { isLocalChatInput } from '../../../packages/contracts/src/local-chat.ts';
@@ -13,7 +16,9 @@ import {
   ipcMain,
   nativeImage,
   protocol,
+  screen,
   session,
+  shell,
   utilityProcess,
 } from "electron";
 import { isAbsolute, join } from "node:path";
@@ -33,6 +38,7 @@ import { PetCoverProvider } from "./pet-cover.ts";
 import { ServiceProcess } from "./service-process.ts";
 import { ModelIPC, type ModelMenuIntent } from './model-ipc.ts';
 import { KnowledgeFilePicker } from "./knowledge-file.ts";
+import { LegacyCharacterHandoff } from "./legacy-character-handoff.ts";
 import { speechMethods, validSpeechArgs } from "./speech-ipc.ts";
 import { utilityTransport } from "./utility-transport.ts";
 import { registerWorkspaceModelIPC } from "./workspace-model-ipc.ts";
@@ -43,24 +49,43 @@ import { STARTUP_SCHEME } from "./startup-playback.ts";
 import { installStartupPlayer } from "./startup-window.ts";
 import { installWorkspaceTray } from "./workspace-tray.ts";
 import { windowColors } from './window-colors.ts';
+import { WorkspaceDataFolder, workspaceProfilePath } from './workspace-data-folder.ts';
+import { fitWorkspace, sameWorkspaceBounds, validWorkspaceBounds, WorkspacePlacement, workspaceDefault, workspaceMinimum, type WorkspaceBounds } from './workspace-placement.ts';
+import { adjustWorkspacePlacement, watchWorkspaceDisplayChanges, type PlacementTrigger } from './workspace-display-recovery.ts';
+import { resolveHarnessExecutable } from './harness-node.ts';
+
+import { workspaceDevConfig, workspaceDevResponse } from './workspace-ui-hmr.ts';
+
+const workspaceHmrActivation = process.env.PET_WORKSPACE_UI_HMR;
+delete process.env.PET_WORKSPACE_UI_HMR;
+const workspaceHmr = workspaceDevConfig(process.defaultApp === true && !app.isPackaged,
+  process.argv.includes('--workspace-ui-hmr'), workspaceHmrActivation);
+
+const workspaceVideoDirectory = process.env.PET_WORKSPACE_VIDEO_DIR;
+delete process.env.PET_WORKSPACE_VIDEO_DIR;
 
 app.setName("桌边小崽");
-app.setPath(
-  "userData",
-  join(app.getPath("appData"), "AnimeDesktopPets", "cross-platform-dev"),
-);
+const appData = app.getPath("appData");
+app.setPath("userData", workspaceProfilePath(appData));
 
 protocol.registerSchemesAsPrivileged([
   {
     scheme: "pet-app",
     privileges: { standard: true, secure: true, supportFetchAPI: true },
   },
+  ...(process.platform === 'darwin' ? [{ scheme: previewScheme,
+    privileges: { standard: true, secure: true, stream: true },
+  }] : []),
   ...(process.platform === 'darwin' ? [{ scheme: STARTUP_SCHEME,
     privileges: { standard: true, secure: true, stream: true },
   }] : []),
 ]);
 let workspace: BrowserWindow | undefined;
 let workspaceRevealable = false;
+const placement = process.platform === 'darwin' ? new WorkspacePlacement(appData) : undefined;
+let placementBaseline: WorkspaceBounds | undefined;
+let placementAtClose: WorkspaceBounds | undefined;
+let stopWorkspaceDisplayWatch: (() => void) | undefined;
 let service: ServiceProcess | undefined;
 let covers: PetCoverProvider | undefined;
 let models: ModelIPC | undefined;
@@ -86,9 +111,28 @@ function isWorkspaceVisible(): boolean {
   return !exiting && workspaceRevealable && !!workspace && !workspace.isDestroyed() && workspace.isVisible();
 }
 
+function changedWorkspaceBounds(): WorkspaceBounds | undefined {
+  if (!placementBaseline || !workspaceRevealable || !workspace || workspace.isDestroyed()) return;
+  const current = workspace.getNormalBounds();
+  if (validWorkspaceBounds(current) && !sameWorkspaceBounds(placementBaseline, current)) return current;
+}
+
+function recoverWorkspacePlacement(window: BrowserWindow, trigger: PlacementTrigger): void {
+  if (!placement || exiting || !workspaceRevealable || window !== workspace) return;
+  const adjustment = adjustWorkspacePlacement(window, trigger, () => ({
+    primary: screen.getPrimaryDisplay().workArea, areas: screen.getAllDisplays().map(display => display.workArea),
+  }));
+  if (adjustment && (adjustment.relocated || (placementBaseline && sameWorkspaceBounds(placementBaseline, adjustment.before)))) {
+    // Adapting to a different screen is not an explicit placement change.
+    placementBaseline = adjustment.after;
+  }
+}
+
 function revealWorkspace(): void {
   if (exiting || !workspaceRevealable || !workspace || workspace.isDestroyed()) return;
+  const reopening = !workspace.isVisible() || workspace.isMinimized();
   if (workspace.isMinimized()) workspace.restore();
+  if (reopening) recoverWorkspacePlacement(workspace, 'reopen');
   workspace.show();
   workspace.focus();
 }
@@ -99,6 +143,9 @@ function requestCodexLaunch(): void {
 
 async function start() {
   await app.whenReady();
+  if (exiting) return;
+  const video = process.platform === 'darwin' && workspaceVideoDirectory
+    ? await prepareWorkspaceVideo(join(__dirname, 'video'), workspaceVideoDirectory).catch(() => undefined) : undefined;
   if (exiting) return;
   if (process.platform === 'darwin') {
     // This only updates our running development app; the bundle icon is a packaging concern.
@@ -121,6 +168,8 @@ async function start() {
   const taskFollowingHome = process.platform === 'darwin' ? app.getPath('home') : undefined;
   workspaceStatus = installWorkspaceTray(join(__dirname, "branding", "petStatusTemplate.png"), {
     list: () => service!.petRequest("list"),
+    linkage: (action, expectedRevision) => !exiting && service
+      ? service.petRequest(action, { expectedRevision }) : Promise.resolve({ ok: false, error: 'unavailable' }),
     readCodex: () => readCodexPresence(__dirname),
     launchCodex: requestCodexLaunch,
     taskFollowing: taskFollowingHome ? {
@@ -135,14 +184,12 @@ async function start() {
     (_contents, _permission, callback) => callback(false),
   );
   session.defaultSession.setPermissionCheckHandler(() => false);
-  covers = new PetCoverProvider(process.env.PET_PLAYER_SOURCE && process.env.PET_PLAYER_ASSETS &&
-    isAbsolute(process.env.PET_PLAYER_SOURCE) && isAbsolute(process.env.PET_PLAYER_ASSETS)
-    ? { assets: process.env.PET_PLAYER_ASSETS, python: process.env.PET_PYTHON,
-        workerPath: join(__dirname, "runtime", "pet_cover.py") } : undefined);
+  covers = new PetCoverProvider(join(__dirname, 'branding', 'pet-cover.png'), video?.companionCover);
   protocol.handle("pet-app", async (request) => {
     const cover = await covers?.response(request.url, request.method);
     if (cover) return cover;
     const relative = assetPath(request.url);
+    if (workspaceHmr && relative !== "assets/app-icon.svg") return workspaceDevResponse(workspaceHmr, request);
     if (request.method !== "GET" || !relative)
       return new Response("", { status: 404 });
     try {
@@ -166,6 +213,12 @@ async function start() {
   });
   const speech = await configuredSpeech();
   if (exiting) return;
+  const harnessExecutable = resolveHarnessExecutable({
+    platform: process.platform,
+    packaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    environment: process.env,
+  });
   service = new ServiceProcess(
     () => {
       const child = utilityProcess.fork(createRequire(__filename).resolve("@pet/app-service"), [], {
@@ -178,37 +231,37 @@ async function start() {
     },
     {
       speech,
+      videoHost: video?.host,
       taskFollowingHome,
       onTaskFollowingState: state => { taskState = state; workspaceStatus?.render(); },
+      // DSH rc.5 does not support this Electron build's native fingerprint.
+      harnessExecutable,
       modelsRoot: process.platform === "darwin" ? join(app.getPath("userData"), "models") : undefined,
       workspace: {
         root: join(app.getPath("userData"), "workspace"),
         packageToolPath: join(__dirname, 'runtime', 'pet_sources.py'),
-        catalog: process.env.PET_PLAYER_SOURCE && process.env.PET_PLAYER_ASSETS && isAbsolute(process.env.PET_PLAYER_SOURCE) && isAbsolute(process.env.PET_PLAYER_ASSETS)
-          ? [{id: "local.development.longmei", version: "0.0.0-dev", name: "龙妹开发配置", launchable: true}] : [],
+        catalog: process.platform === 'darwin'
+          ? [{ ...longmei, name: "龙妹", launchable: video?.longmeiReady === true },
+            { ...dafeiyu, name: "大肥鱼", launchable: video?.companionReady === true }] : [],
       },
       workerPath: join(__dirname, "runtime", "worker.py"),
       guardianPath: join(__dirname, "runtime", "guardian.py"),
       python: process.env.PET_PYTHON,
-      player: {
-        workerPath: join(__dirname, "runtime", "player_worker.py"),
-        config: process.env.PET_PLAYER_SOURCE && process.env.PET_PLAYER_ASSETS &&
-          isAbsolute(process.env.PET_PLAYER_SOURCE) && isAbsolute(process.env.PET_PLAYER_ASSETS)
-          ? { source: process.env.PET_PLAYER_SOURCE, assets: process.env.PET_PLAYER_ASSETS,
-              profileRoot: join(app.getPath("userData"), "player-sessions") }
-          : undefined,
-      },
     },
   );
   await service.start();
   if (exiting) return;
   workspaceStatus?.serviceReady();
+  const savedPlacement = await placement?.read();
+  if (exiting) return;
+  const initialBounds = placement
+    ? fitWorkspace(savedPlacement, screen.getPrimaryDisplay().workArea, screen.getAllDisplays().map(display => display.workArea))
+    : workspaceDefault;
   workspace = new BrowserWindow({
-    title: "桌边小崽",
-    width: 1180,
-    height: 800,
-    minWidth: 760,
-    minHeight: 560,
+    title: "",
+    ...initialBounds,
+    minWidth: Math.min(workspaceMinimum.width, initialBounds.width),
+    minHeight: Math.min(workspaceMinimum.height, initialBounds.height),
     show: false,
     backgroundColor: windowColors.workspace,
     webPreferences: {
@@ -216,15 +269,45 @@ async function start() {
       preload: join(__dirname, "preload.cjs"),
     },
   });
+  // Keep the system frame and controls; the document title is not window chrome.
+  workspace.accessibleTitle = "桌边小崽";
+  workspace.on("page-title-updated", event => event.preventDefault());
   workspace.removeMenu();
-  workspace.on("close", event => workspaceStatus?.closeWindow(() => event.preventDefault()));
+  if (placement) {
+    const window = workspace;
+    stopWorkspaceDisplayWatch = watchWorkspaceDisplayChanges(notify => {
+      screen.on('display-added', notify);
+      screen.on('display-removed', notify);
+      screen.on('display-metrics-changed', notify);
+      window.on('restore', notify);
+      window.on('unmaximize', notify);
+      window.on('leave-full-screen', notify);
+      return () => {
+        screen.off('display-added', notify);
+        screen.off('display-removed', notify);
+        screen.off('display-metrics-changed', notify);
+        window.off('restore', notify);
+        window.off('unmaximize', notify);
+        window.off('leave-full-screen', notify);
+      };
+    }, () => recoverWorkspacePlacement(window, 'display'));
+  }
+  workspace.on("close", event => {
+    let hiding = false;
+    workspaceStatus?.closeWindow(() => { hiding = true; event.preventDefault(); });
+    if (!hiding) placementAtClose = changedWorkspaceBounds();
+  });
   const markWindowUnavailable = () => {
     workspaceRevealable = false;
+    stopWorkspaceDisplayWatch?.();
     service?.setTaskFollowing(false);
     workspaceStatus?.windowUnavailable();
   };
   workspace.on("closed", () => { markWindowUnavailable(); void startupLaunch?.dispose(); });
-  workspace.webContents.on("render-process-gone", markWindowUnavailable);
+  workspace.webContents.on("render-process-gone", () => {
+    placementAtClose = undefined;
+    markWindowUnavailable();
+  });
   if (process.platform === 'darwin') {
     const installModelMenu = (intent?: ModelMenuIntent) => Menu.setApplicationMenu(Menu.buildFromTemplate([
       { role: 'appMenu' }, { role: 'editMenu' },
@@ -251,15 +334,16 @@ async function start() {
   }
 
   workspace.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  workspace.webContents.on("will-navigate", (event) => event.preventDefault());
+  workspace.webContents.on("will-navigate", (event) => {
+    // Vite may fall back to reloading this exact renderer document.
+    if (!workspaceHmr || event.url !== WORKSPACE_URL) event.preventDefault();
+  });
   workspace.webContents.on("will-attach-webview", (event) =>
     event.preventDefault(),
   );
   for (const [channel, command] of [
     ["pet:snapshot", "snapshot"],
     ["pet:probe-runtime", "probe"],
-    ["pet:start-player", "start-player"],
-    ["pet:stop-player", "stop-player"],
   ] as const) {
     ipcMain.handle(channel, (event, ...args: unknown[]) => {
       if (
@@ -278,14 +362,44 @@ async function start() {
       return service!.request(command);
     });
   }
+  const workspaceData = new WorkspaceDataFolder(appData, path => shell.openPath(path));
+  ipcMain.handle('pet:open-workspace-data', (event, ...args: unknown[]) => {
+    const eligible = () => isWorkspaceVisible() && !!workspace && trustedCaller({
+      senderId: event.sender.id, ownerId: workspace.webContents.id,
+      senderFrame: event.senderFrame, mainFrame: workspace.webContents.mainFrame,
+      url: event.senderFrame?.url ?? '', args,
+    });
+    if (!eligible()) throw new Error('forbidden');
+    return workspaceData.open(eligible);
+  });
+  if (process.platform === 'darwin') {
+    const handoff = new LegacyCharacterHandoff(appData, (id, write) => service!.legacyCharacterHandoff(id, write));
+    workspace.on('hide', () => handoff.invalidate());
+    workspace.on('closed', () => handoff.invalidate());
+    workspace.webContents.on('did-start-navigation', () => handoff.invalidate());
+    workspace.webContents.on('render-process-gone', () => handoff.invalidate());
+    ipcMain.handle('pet:legacy-character-handoff', (event, ...args: unknown[]) => {
+      const owner = workspace;
+      const eligible = () => !exiting && owner !== undefined && owner === workspace && !owner.isDestroyed() && isWorkspaceVisible() && trustedFrame({
+        senderId: event.sender.id, ownerId: owner.webContents.id, senderFrame: event.senderFrame,
+        mainFrame: owner.webContents.mainFrame, url: event.senderFrame?.url ?? '', args,
+      });
+      if (!owner || !eligible() || args.length !== 1) throw new Error('forbidden');
+      return handoff.handle(args[0], () => dialog.showOpenDialog(owner, {
+        title: '选择旧版角色资料快照', properties: ['openDirectory', 'noResolveAliases', 'dontAddToRecent'],
+      }), eligible);
+    });
+  }
   for (const method of ["list", "add", "clone", "delete", "save", "theme", "start", "stop", "applyDisplay", "applyBehavior", "visibility", "pause", "resume"] as const) {
-    ipcMain.handle(`pet:pets-${method}`, (event, ...args: unknown[]) => {
+    ipcMain.handle(`pet:pets-${method}`, async (event, ...args: unknown[]) => {
       if (!workspace || workspace.isDestroyed() || !trustedFrame({
         senderId: event.sender.id, ownerId: workspace.webContents.id,
         senderFrame: event.senderFrame, mainFrame: workspace.webContents.mainFrame,
         url: event.senderFrame?.url ?? "", args,
       }) || !validPetArgs(method, args)) throw new Error("forbidden");
-      return service!.petRequest(method, args[0]);
+      const result = await service!.petRequest(method, args[0]);
+      if (method !== "list") void workspaceStatus?.refresh();
+      return result;
     });
   }
   ipcMain.handle('pet:pets-importPackages', async (event, ...args: unknown[]) => {
@@ -367,6 +481,10 @@ async function start() {
     if (exiting) return;
     workspaceRevealable = true;
     workspace?.show();
+    if (placement && workspace) {
+      placementBaseline = workspace.getNormalBounds();
+      recoverWorkspacePlacement(workspace, 'display');
+    }
     void workspaceStatus?.windowReady();
     if (process.argv.includes('--launch-codex')) requestCodexLaunch();
   });
@@ -379,13 +497,18 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   if (exiting) return;
   exiting = true;
+  stopWorkspaceDisplayWatch?.();
+  const boundsToSave = workspaceRevealable ? changedWorkspaceBounds() : placementAtClose;
+  const placementSave = boundsToSave && placement?.save(boundsToSave);
   const trayCleanup = workspaceStatus?.dispose();
   const launchCleanup = startupLaunch?.dispose();
   models?.cancel();
   chat?.cancel();
   void (async () => {
     try {
-      const results = await Promise.allSettled([trayCleanup, launchCleanup, covers?.close(), service?.close()]);
+      // Keep the service's workspace ownership until window placement has settled.
+      await placementSave;
+      const results = await Promise.allSettled([trayCleanup, launchCleanup, service?.close()]);
       if (results.some(result => result.status === 'rejected')) dialog.showErrorBox(
         "本地服务清理失败",
         "未确认本应用子进程已完全退出，请检查开发日志。",
@@ -400,7 +523,7 @@ start().catch(async () => {
   const trayCleanup = workspaceStatus?.dispose();
   const launchCleanup = startupLaunch?.dispose();
   if (exiting) return;
-  await Promise.allSettled([trayCleanup, launchCleanup, covers?.close(), service?.close()]);
+  await Promise.allSettled([trayCleanup, launchCleanup, service?.close()]);
   dialog.showErrorBox(
     "桌边小崽启动失败",
     "本地工作区未能启动；未连接现有桌宠，也未修改用户资料。",

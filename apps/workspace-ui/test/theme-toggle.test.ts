@@ -1,4 +1,6 @@
+import { renderWorkspace } from './render-workspace.ts';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -26,20 +28,33 @@ test('theme icon button exposes the saved mode through accessible name and toolt
   }
 });
 
+test('follow system uses a monitor glyph distinct from the moon and sun', () => {
+  const glyph = (theme: Theme) => renderToStaticMarkup(createElement(ThemeToggle, { theme, disabled: false, onChange() {} }));
+  assert.match(glyph('system'), /<rect[^>]*>[\s\S]*?<path/);
+  assert.doesNotMatch(glyph('dark'), /<rect\b/);
+  assert.doesNotMatch(glyph('light'), /<rect\b/);
+});
+
+test('theme glyphs share a 20 px box without resizing the button', async () => {
+  const css = await readFile(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.theme-toggle > svg\s*\{[^}]*width:\s*20px;[^}]*height:\s*20px;/);
+  assert.match(css, /\.theme-toggle\s*\{[^}]*width:\s*36px;[^}]*height:\s*36px;/);
+});
+
 test('one global theme toggle lives in the top-right action group on pets, advanced and planned pages, never in sidebar', async () => {
   const controller=new PetWorkspaceController(bridge(async()=>({ok:true,workspace})));
   await controller.load();
-  for (const initialPage of ['pets','advanced','chat'] as const) {
-    const html=renderToStaticMarkup(createElement(WorkspaceView,{...diagnostics,initialPage,petState:controller.getSnapshot(),petController:controller}));
+  for (const initialPage of ['pets','advanced','chat','speech','live'] as const) {
+    const html=await renderWorkspace(createElement(WorkspaceView,{...diagnostics,initialPage,petState:controller.getSnapshot(),petController:controller}));
     const sidebar=html.match(/<aside[\s\S]*?<\/aside>/)?.[0];assert.ok(sidebar);assert.doesNotMatch(sidebar,/theme-toggle|workspace-theme|界面主题/);
     assert.match(html,/class="workspace-topline-actions"[\s\S]*?class="theme-toggle"/);
     assert.equal((html.match(/class="theme-toggle"/g)??[]).length,1);
   }
 });
 
-test('the common workspace header uses the product icon without repeating its accessible name', () => {
+test('the common workspace header uses the product icon without repeating its accessible name', async () => {
   for (const initialPage of ['pets', 'chat', 'advanced'] as const) {
-    const html = renderToStaticMarkup(createElement(WorkspaceView, {...diagnostics, initialPage}));
+    const html = await renderWorkspace(createElement(WorkspaceView, {...diagnostics, initialPage}));
     const brand = html.match(/<button class="brand"[^>]*>.*?<\/button>/)?.[0];
     assert.ok(brand);
     assert.match(brand, /<img[^>]*src="\.\/assets\/app-icon\.svg"[^>]*alt=""/);

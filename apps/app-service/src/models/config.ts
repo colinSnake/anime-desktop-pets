@@ -1,3 +1,4 @@
+import { isModelLoopback, normalizeModelBaseURL } from '../../../../packages/contracts/src/models.ts';
 import { createHash } from 'node:crypto';
 import { ModelError } from './errors.ts';
 import { MODEL_PROTOCOLS, type Compatibility, type ModelConfiguration, type ModelConnection, type ModelEntry, type ModelProtocol, type ModelPurpose, type ModelRoute, type ModelSelection } from './types.ts';
@@ -9,15 +10,8 @@ const identifier = (x: unknown): x is string => typeof x === 'string' && /^[A-Za
 const capacity = (x: unknown) => x === undefined || (Number.isInteger(x) && Number(x) > 0 && Number(x) <= 2_147_483_647);
 const oneOf = (x: unknown, allowed: readonly string[]): boolean => typeof x === 'string' && allowed.includes(x);
 const revision = (x: unknown) => Number.isSafeInteger(x) && Number(x) >= 0;
-export const isLoopback = (url: URL): boolean => ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname.toLowerCase());
 export function validateBaseURL(value: unknown, protocol: ModelProtocol): string {
-  if (!text(value,2048) || /[\s\\]|%(?:2e|2f|5c|0[0-9a-f]|1[0-9a-f]|7f)/i.test(value) || /\/(?:\.|\.\.)(?:\/|$)/.test(value)) return invalid();
-  let url: URL; try { url = new URL(value); } catch { return invalid(); }
-  if (!(url.protocol === 'https:' || (url.protocol === 'http:' && isLoopback(url))) || !url.hostname || url.username || url.password || url.search || url.hash || value.includes('?') || value.includes('#')) return invalid();
-  const path = url.pathname.replace(/\/+$/, '');
-  if (/\/(?:chat\/completions|responses|messages)$/.test(path) || /:generateContent$/.test(path)) return invalid();
-  if (protocol === 'gemini' && !/\/v1(?:beta)?$/.test(path)) return invalid();
-  return `${url.origin}${path}`;
+  return normalizeModelBaseURL(value, protocol) ?? invalid();
 }
 function compatible(value: unknown, protocol: ModelProtocol): value is Compatibility {
   return record(value) && keys(value,protocol === 'chat-completions' ? ['outputTokenField'] : []) && (value.outputTokenField === undefined || oneOf(value.outputTokenField,['max_tokens','max_completion_tokens']));
@@ -31,7 +25,7 @@ export function validateConfiguration(value: unknown): ModelConfiguration {
     ids.add(c.id);
     const protocol=c.apiProtocol as ModelProtocol;
     const base=validateBaseURL(c.baseURL,protocol);
-    if (!compatible(c.compatibility,protocol) || !oneOf(c.authMode,['apiKey','none']) || (c.authMode === 'apiKey' ? c.credentialRef !== undefined && (!identifier(c.credentialRef) || credentials.has(c.credentialRef)) : c.credentialRef !== undefined || !isLoopback(new URL(base))) || !Array.isArray(c.models) || !c.models.length || c.models.length>33) return invalid();
+    if (!compatible(c.compatibility,protocol) || !oneOf(c.authMode,['apiKey','none']) || (c.authMode === 'apiKey' ? c.credentialRef !== undefined && (!identifier(c.credentialRef) || credentials.has(c.credentialRef)) : c.credentialRef !== undefined || !isModelLoopback(new URL(base))) || !Array.isArray(c.models) || !c.models.length || c.models.length>33) return invalid();
     if (typeof c.credentialRef === 'string') credentials.add(c.credentialRef);
     const entries=new Set<string>(), models=new Set<string>();
     for(const m of c.models) {

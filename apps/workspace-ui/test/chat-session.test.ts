@@ -111,6 +111,7 @@ test('keyboard policy protects IME closing Enter and routes only plain Enter to 
  assert.equal(keys.action(event,true,0),'send');
  for(const patch of [{shiftKey:true},{ctrlKey:true},{metaKey:true},{altKey:true},{isComposing:true},{keyCode:229}]) assert.equal(keys.action({...event,...patch},true,0),'native');
  assert.equal(keys.action(event,false,0),'block');
+ assert.equal(keys.action({...event,repeat:true},true,0),'block');
  keys.start();assert.equal(keys.action(event,true,5),'native');
  keys.end(10);assert.equal(keys.action(event,true,15),'native');assert.equal(keys.action(event,true,25),'send');
  assert.equal(keys.action({...event,key:'Escape'},true,30),'blur');
@@ -222,4 +223,44 @@ test('online retry does not silently replace a stale route and cancellation reac
  c.selectCharacter('pet-one'); options = [onlineOptions[1]!]; await c.refreshModels();
  assert.equal(await c.retry(), false); assert.equal(sent.length, 1);
  assert.equal(c.getSnapshot().session.draft, '当前问题');
+});
+
+
+test('local shortcuts insert only into the current empty draft, without running a query', async () => {
+ let calls = 0;
+ const c = new ChatWorkspaceController(undefined, { localChatContext: async ({petID}) => {
+  calls++; return {ok:true,petID,text:'合成资料'};
+ } });
+ c.syncCharacters([{ id: 'one', name: '龙妹' }, { id: 'two', name: '大肥鱼' }]);
+ c.edit('手写草稿');
+ assert.equal(c.prefillLocalShortcut('查个人记忆：'), false);
+ assert.equal(c.getSnapshot().session.draft, '手写草稿');
+ c.selectCharacter('two');
+ assert.equal(c.prefillLocalShortcut('查角色知识：'), true);
+ assert.equal(c.getSnapshot().session.draft, '查角色知识：');
+ assert.equal(c.getSnapshot().session.turns.length, 0);
+ assert.equal(calls, 0);
+ c.selectCharacter('one');
+ assert.equal(c.getSnapshot().session.draft, '手写草稿');
+ const disconnected = new ChatWorkspaceController();
+ disconnected.syncCharacters([{id:'one',name:'龙妹'}]);
+ assert.equal(disconnected.prefillLocalShortcut('你是谁'), false);
+});
+
+test('editor drafts keep semantic offsets per pet, reject delayed cross-pet events and restore the exact failed snapshot', async () => {
+ const c = setup(async () => { throw Error('synthetic'); });
+ const saved = {text:' 原文\n保留空格 ', selection:{anchor:5,focus:1}};
+ assert.equal(c.editDraft('pet-one', saved),true);
+ saved.selection.focus = 0;
+ c.selectCharacter('pet-two');
+ assert.equal(c.editDraft('pet-one',saved),false);
+ assert.deepEqual(c.getSnapshot().session.draftSnapshot,{text:'',selection:{anchor:0,focus:0}});
+ c.selectCharacter('pet-one');
+ assert.deepEqual(c.getSnapshot().session.draftSnapshot,{text:saved.text,selection:{anchor:5,focus:1}});
+ assert.equal(await c.send(),false);
+ assert.equal(c.getSnapshot().session.turns[0]?.text,saved.text.trim());
+ assert.deepEqual(c.getSnapshot().session.draftSnapshot,{text:saved.text,selection:{anchor:5,focus:1}});
+ c.edit('下一条');
+ assert.equal(await c.retry(),false);
+ assert.equal(c.getSnapshot().session.draft,'下一条');
 });

@@ -1,3 +1,4 @@
+import { WorkspaceVideoClient } from './workspace-video-client.ts';
 import { CodexTaskFollowing } from './codex-task-following.ts';
 import { CodexTaskReaderProcess } from './codex-task-reader-process.ts';
 import { readCodexPresence } from './codex-presence.ts';
@@ -12,22 +13,17 @@ import { catalogEntry, shape, type CatalogEntry } from "../../../packages/contra
 import { PetLifecycle } from "./pet-lifecycle.ts";
 import { dirname, isAbsolute, join } from "node:path";
 import { createService } from "./server.ts";
-import { PlayerRuntime, validPlayerConfig } from "./player-runtime.ts";
+import { createHarnessRuntime } from "./agent/harness-runtime.ts";
 import { PythonRuntime } from "./python-runtime.ts";
 import { PetPackageImporter } from "./pet-package-importer.ts";
+
+import { longmei as defaultVideoPet, dafeiyu, samePetPackage } from "../../../packages/contracts/src/built-in-pets.ts";
 
 type WorkspaceBootstrap = { root: string; catalog: CatalogEntry[]; packageToolPath?: string };
 function validWorkspaceBootstrap(value: unknown): value is WorkspaceBootstrap {
   return shape(value, ["root", "catalog", "packageToolPath"]) && typeof value.root === "string" && isAbsolute(value.root) && Array.isArray(value.catalog) && value.catalog.length <= 32 && value.catalog.every(catalogEntry) && (value.packageToolPath === undefined || typeof value.packageToolPath === "string" && isAbsolute(value.packageToolPath));
 }
-type PlayerBootstrap = { workerPath: string; config?: import("./player-runtime.ts").PlayerConfig };
-function validPlayerBootstrap(value: unknown): value is PlayerBootstrap {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const player = value as Record<string, unknown>;
-  return Object.keys(player).every(key => key === "workerPath" || key === "config") &&
-    typeof player.workerPath === "string" && isAbsolute(player.workerPath) &&
-    (player.config === undefined || validPlayerConfig(player.config));
-}
+
 type ParentPort = {
   on(event: "message", handler: (event: { data: unknown }) => void): void;
   postMessage(value: unknown): void;
@@ -42,6 +38,7 @@ let service: ReturnType<typeof createService> | undefined;
 let booting: Promise<void> | undefined;
 let stopping = false;
 let taskFollowing: CodexTaskFollowing | undefined;
+let video: WorkspaceVideoClient | undefined;
 const bootstrapTimer = setTimeout(() => {
   void stop();
 }, 5000);
@@ -77,6 +74,10 @@ function message(value: unknown) {
     if (!stopping && shape(input, ['type', 'enabled']) && typeof input.enabled === 'boolean') taskFollowing?.setEnabled(input.enabled);
     return;
   }
+  if (input.type === 'workspace-video-result' || input.type === 'workspace-video-ended' || input.type === 'workspace-video-drop' || input.type === 'workspace-video-cue' || input.type === 'workspace-video-menu') {
+    if (!stopping || (input.type !== 'workspace-video-cue' && input.type !== 'workspace-video-menu')) video?.receive(input);
+    return;
+  }
   if (booting || stopping) return;
   if (
     input.type !== "bootstrap" ||
@@ -89,10 +90,14 @@ function message(value: unknown) {
     !isAbsolute(input.workerPath) ||
     (input.python !== undefined && typeof input.python !== "string") ||
     (input.speech !== undefined && !isSpeechRuntimeConfig(input.speech)) ||
-    (input.player !== undefined && !validPlayerBootstrap(input.player)) ||
+    Object.hasOwn(input, "player") ||
     (input.workspace !== undefined && !validWorkspaceBootstrap(input.workspace)) ||
+    (input.workspaceVideo !== undefined && (input.workspaceVideo !== true || process.platform !== "darwin" ||
+      !input.workspace)) ||
     (input.taskFollowingHome !== undefined && (typeof input.taskFollowingHome !== 'string' ||
       !isAbsolute(input.taskFollowingHome) || input.taskFollowingHome.includes('\0') || Buffer.byteLength(input.taskFollowingHome) > 3072)) ||
+    (input.harnessExecutable !== undefined && (typeof input.harnessExecutable !== "string" ||
+      !isAbsolute(input.harnessExecutable) || input.harnessExecutable.includes("\0") || Buffer.byteLength(input.harnessExecutable) > 4096)) ||
     (input.modelsRoot !== undefined && (typeof input.modelsRoot !== "string" || input.modelsRoot.length > 4096 || input.modelsRoot.includes("\0") || !isAbsolute(input.modelsRoot)))
   ) {
     void stop();
@@ -108,13 +113,7 @@ function message(value: unknown) {
       offer: (source: symbol, text: string, eligible: () => boolean) => speech.offer(source, text, () => workspace?.canStartOwnedPlayer() === true && eligible()),
       cancelSource: (source: symbol) => speech.cancelSource(source),
     };
-    const player = new PlayerRuntime({
-      speech: playerSpeech,
-      workerPath: (input.player as PlayerBootstrap | undefined)?.workerPath ?? workerPath,
-      guardianPath,
-      python: python as string | undefined,
-      config: (input.player as PlayerBootstrap | undefined)?.config,
-    });
+    if (input.workspaceVideo === true) video = new WorkspaceVideoClient(send, undefined, playerSpeech);
     const workspaceOptions = input.workspace as WorkspaceBootstrap | undefined;
     workspace = workspaceOptions ? await (async () => {
       const packageImporter = workspaceOptions.packageToolPath ? new PetPackageImporter({
@@ -127,28 +126,17 @@ function message(value: unknown) {
         }
       }
       const lifecycle = new PetLifecycle({
-        supports: pet => process.platform === "darwin" && !!(input.player as PlayerBootstrap | undefined)?.config &&
-          pet.package.id === "local.development.longmei" && pet.package.version === "0.0.0-dev",
-        create: pet => {
-          const configured = input.player as PlayerBootstrap;
-          return new PlayerRuntime({ speech: playerSpeech, guardianPath, workerPath: configured.workerPath, python: python as string | undefined,
-            config: { ...configured.config!, profileRoot: join(configured.config!.profileRoot, "instances", pet.id) },
-            initialPreferences: { size: pet.preferences.size, hideInFullscreen: pet.preferences.hideInFullscreen, scheduledActivity: pet.preferences.scheduledActivity, movement: pet.preferences.movement,
-              ...(pet.preferences.x !== undefined && pet.preferences.y !== undefined ? { x: pet.preferences.x, y: pet.preferences.y } : {}) } });
-        },
+        supports: pet => !!video && (samePetPackage(pet.package, defaultVideoPet) || samePetPackage(pet.package, dafeiyu)) &&
+          workspaceOptions.catalog.some(entry => entry.launchable === true && samePetPackage(entry, pet.package)),
+        create: pet => video!.controller(pet.id, pet.package),
       });
-      return new PetWorkspace({ ...workspaceOptions, catalog, importOne: packageImporter?.importOne.bind(packageImporter), lifecycle,
+      return new PetWorkspace({ ...workspaceOptions, catalog, playerMode: video ? 'video' : undefined,
+        importOne: packageImporter?.importOne.bind(packageImporter), lifecycle,
         onPauseRequested: () => { taskFollowing?.setEnabled(false); void speech?.pause().catch(() => {}); },
-        stopAdditional: async () => {
-          const status = player.snapshot().status;
-          const outcomes = await Promise.allSettled([
-            ['unconfigured', 'blocked', 'stopped'].includes(status) ? Promise.resolve(true) : player.stop().then(result => result.status === 'stopped'),
-            speech?.pause().then(() => true) ?? Promise.resolve(true),
-          ]);
-          return outcomes.every(result => result.status === 'fulfilled' && result.value);
-        },
+        stopAdditional: () => speech?.pause().then(() => true) ?? Promise.resolve(true),
       });
     })() : undefined;
+    video?.setMenuHandler((id, intent, current) => { void workspace?.recordVideoMenu(id, intent, current); });
     if (process.platform === 'darwin' && workspace && typeof input.taskFollowingHome === 'string') {
       const runtimeDirectory = dirname(workerPath);
       const reader = new CodexTaskReaderProcess({ home: input.taskFollowingHome, guardian: guardianPath,
@@ -172,10 +160,16 @@ function message(value: unknown) {
     service = createService({
       token,
       models,
+      // The normal desktop service always composes the SDK route. Missing
+      // Node/worker/SDK fails before reading a model Key.
+      chatRuntime: models && createHarnessRuntime({
+        worker: typeof __dirname === 'string' ? join(__dirname, 'harness-worker.mjs') : '',
+        executable: typeof input.harnessExecutable === 'string' ? input.harnessExecutable : (parentPort ? '' : process.execPath),
+        privateRoots: [input.modelsRoot, workspaceOptions?.root].filter((value): value is string => typeof value === 'string'),
+      }),
       speech,
       characters: process.platform === "darwin" && workspaceOptions ? new CharacterRepository(join(workspaceOptions.root, "characters")) : undefined,
       workspace,
-      player,
       runtime: new PythonRuntime({
         workerPath,
         guardianPath,
@@ -186,7 +180,11 @@ function message(value: unknown) {
     const address = service.server.address();
     if (!address || typeof address === "string")
       throw new Error("startup_failed");
-    if (!stopping) send({ type: "ready", port: address.port });
+    if (!stopping) {
+      // The parent accepts owned video commands only after the ready message.
+      send({ type: "ready", port: address.port });
+      if (video) void workspace?.startOnLaunch(defaultVideoPet);
+    }
   })();
   booting.catch(() => {
     send({ type: "failed" });

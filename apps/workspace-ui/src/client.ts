@@ -6,7 +6,7 @@ import {
 
 export async function loadSnapshot(
   bridge: DesktopBridge | undefined,
-  command: "snapshot" | "probe" | "start-player" | "stop-player",
+  command: "snapshot" | "probe",
 ): Promise<Snapshot> {
   if (!bridge)
     throw new Error(
@@ -14,8 +14,7 @@ export async function loadSnapshot(
     );
   let value: unknown;
   try {
-    const actions = { snapshot: () => bridge.snapshot(), probe: () => bridge.probeRuntime(),
-      "start-player": () => bridge.startPlayer(), "stop-player": () => bridge.stopPlayer() };
+    const actions = { snapshot: () => bridge.snapshot(), probe: () => bridge.probeRuntime() };
     value = await actions[command]();
   } catch {
     throw new Error("本地服务不可用，请关闭并重新打开开发工作区。");

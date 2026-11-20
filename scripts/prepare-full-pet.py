@@ -73,7 +73,7 @@ def download(workers=12):
     chunk_size = 2 * 1024 * 1024
     count = (SIZE + chunk_size - 1) // chunk_size
     # 只从 GitHub 官方发布地址获取重定向；不使用第三方镜像。
-    request = urllib.request.Request(URL, method='HEAD', headers={'User-Agent':'PetCompanion-local-integration'})
+    request = urllib.request.Request(URL, method='HEAD', headers={'User-Agent':'AnimeDesktopPets-local-integration'})
     with urllib.request.urlopen(request, timeout=30) as response:
         target = response.geturl()
     done = 0
@@ -87,7 +87,7 @@ def download(workers=12):
         for attempt in range(4):
             try:
                 request = urllib.request.Request(target, headers={
-                    'User-Agent':'PetCompanion-local-integration', 'Range':f'bytes={begin}-{end}',
+                    'User-Agent':'AnimeDesktopPets-local-integration', 'Range':f'bytes={begin}-{end}',
                     'Accept-Encoding':'identity'})
                 with urllib.request.urlopen(request, timeout=45) as response:
                     if response.status != 206 or response.headers.get('Content-Range') != f'bytes {begin}-{end}/{SIZE}':
@@ -136,7 +136,7 @@ def inspect_app(app, verify_signature=True, assets_dir=None):
         patch_version = declared_patch
     elif build_version != '3':
         raise ValueError(f'helper build {build_version} 缺少当前增强版来源标记 PetPatchVersion / PET_PATCH.json；'
-                         '旧标识不兼容，请先从固定源码带 --local-test-font 重建 helper，再运行 scripts/build.sh --enhanced-pet')
+                         '旧标识不兼容，请先从固定源码带 --local-test-font 重建 helper')
     executable_name = info.get('CFBundleExecutable')
     if not isinstance(executable_name,str) or Path(executable_name).name != executable_name or executable_name in ('.','..'):
         raise ValueError('可执行文件名称无效')

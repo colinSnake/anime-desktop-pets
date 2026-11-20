@@ -1,12 +1,12 @@
 import { dialog, Menu, Tray, nativeImage, type MenuItemConstructorOptions } from 'electron';
 import { CodexObservation, type CodexObservationState } from './codex-observation.ts';
 import type { CodexPresence } from './codex-presence.ts';
-import { WorkspaceStatus } from './workspace-status.ts';
+import { WorkspaceStatus, type LinkageAction } from './workspace-status.ts';
 import type { PetResult } from '../../../packages/contracts/src/pets.ts';
 
 import type { TaskFollowingState } from '../../app-service/src/codex-task-following.ts';
 
-type Actions = { list(): Promise<PetResult>; readCodex(): Promise<CodexPresence>; launchCodex(): void; open(): void; hide(): void; quit(): void;
+type Actions = { list(): Promise<PetResult>; linkage(action: LinkageAction, expectedRevision: number): Promise<PetResult>; readCodex(): Promise<CodexPresence>; launchCodex(): void; open(): void; hide(): void; quit(): void;
   taskFollowing?: { state(): TaskFollowingState; setEnabled(enabled: boolean): boolean };
 };
 const taskLabels: Record<TaskFollowingState, string> = {
@@ -72,6 +72,8 @@ export function installWorkspaceTray(iconPath: string, actions: Actions): Worksp
           { type: 'separator' },
           { label: '打开管理工作区', enabled: menu.canOpen, click: () => status.open() },
           { label: '刷新本机状态', enabled: menu.canRefresh, click: () => { void status.refresh(); } },
+          ...(menu.linkageAction ? [{ label: menu.linkageAction === 'pause' ? '暂停桌宠联动' : '解除桌宠联动暂停',
+            click: () => { if (menu.linkageAction) void status.changeLinkage(menu.linkageAction); } }] : []),
           { type: 'separator' },
           { label: '打开 Codex', enabled: menu.canOpen, click: () => actions.launchCodex() },
           { label: codexLabels[observation.state], enabled: false },

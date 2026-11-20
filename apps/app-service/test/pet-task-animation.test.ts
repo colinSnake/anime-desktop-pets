@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { PlayerSnapshot } from '../../../packages/contracts/src/index.ts';
+import type { OwnedSnapshot } from '../src/pet-lifecycle.ts';
 import type { PetDefinition } from '../../../packages/contracts/src/pets.ts';
 import { PetLifecycle } from '../src/pet-lifecycle.ts';
 import type { TaskAnimation } from '../src/task-animation.ts';
@@ -15,8 +15,8 @@ test('only first-frame-confirmed owned players receive snapshots, and a late joi
   const deliveries: [string, TaskAnimation][] = [];
   const ready = new Map<string, () => void>();
   const lifecycle = new PetLifecycle({ supports: () => true, create: ({ id }) => {
-    let status: PlayerSnapshot['status'] = 'stopped';
-    const snapshot = (): PlayerSnapshot => ({ kind: 'qt-player', status, detail: '' });
+    let status: OwnedSnapshot['status'] = 'stopped';
+    const snapshot = (): OwnedSnapshot => ({ status });
     return { snapshot, start: () => new Promise(resolve => { ready.set(id, () => { status = 'running'; resolve(snapshot()); }); }),
       stop: async () => { status = 'stopped'; return snapshot(); }, close: async () => {},
       applyDisplayPreferences: async () => true, setVisible: async () => true, applyBehaviorPreferences: async () => true,

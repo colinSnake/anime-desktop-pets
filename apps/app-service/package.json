@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@deepseek-ai/dsh-llm-pi-ai": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-sdk-client": "0.2.2-rc.5",
     "fastify": "5.12.8"
   },
   "exports": "./dist/entry.cjs"

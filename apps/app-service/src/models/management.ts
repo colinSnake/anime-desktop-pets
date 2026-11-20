@@ -91,11 +91,14 @@ export class ModelManagement {
     const client = await this.onlineClient(repository);
     return client.completeChat(route, prepare, signal);
   }
-  assertChatRoute(route: ChatRoute) {
+  async assertChatRoute(route: ChatRoute) {
     if (this.closed || this.writesBlocked) throw new ModelError('closed');
-    const repository = this.repository;
-    if (!repository) throw new ModelError('closed');
-    return repository.then(owner => { resolveChatRoute(owner.snapshot(), route); });
+    // Validate a restarted profile before launching the SDK, without taking a
+    // writer lease or touching the credential vault. After dispatch, use the
+    // currently owned snapshot when one exists.
+    const state = this.repository ? (await this.repository).snapshot() : await this.store.read();
+    if (this.closed || this.writesBlocked) throw new ModelError('closed');
+    resolveChatRoute(state, route);
   }
   async discover(input: unknown, signal?: AbortSignal): Promise<ModelDiscoveryReply> {
     if (!validDiscoveryInput(input)) return discoveryError('invalid_configuration');

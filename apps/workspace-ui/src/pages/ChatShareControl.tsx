@@ -20,7 +20,7 @@ export function ChatShareControl({ enabled, locked, canGrant = true, scope, onCh
         onClick={() => enabled ? onChange(false) : setConfirming(!ask)}>{enabled ? '撤回在线授权' : '允许在线聊天使用'}</button>
     </div>
     {ask && <div id={prompt} className="module-notice" role="group" aria-label="确认在线聊天授权">
-      <p>{scope}。正式发送开放后，在线文字聊天可以把这些资料发给所选模型的服务商。现在只保存授权。</p>
+      <p>{scope}。在线发送时，相关资料可能随消息发送给所选模型的服务商。此次操作只保存授权。</p>
       <div className="button-row">
         <button type="button" className="button secondary" autoFocus onClick={cancel}>取消授权</button>
         <button type="button" className="button primary" onClick={() => { setConfirming(false); onChange(true); }}>确认授权</button>

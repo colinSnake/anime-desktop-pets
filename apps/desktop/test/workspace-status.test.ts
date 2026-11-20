@@ -91,3 +91,40 @@ test('tray disposal immediately stops menu actions and waits for its owned async
   await both;
   assert.equal(completed, true);
 });
+
+test('native linkage uses the advertised action and confirmed revision, then reports only service state', async () => {
+  const request = deferred<PetResult>();
+  const calls: Array<[string, number]> = [];
+  let menu: WorkspaceStatusMenu | undefined;
+  const status = new WorkspaceStatus({ list: async () => state(), render: value => { menu = value; },
+    open() {}, hide() {}, destroy() {}, linkage: (action, revision) => { calls.push([action, revision]); return request.promise; } });
+  await status.changeLinkage('pause');
+  assert.deepEqual(calls, []);
+  status.serviceReady(); await status.windowReady();
+  assert.equal(menu?.linkageAction, 'pause');
+  await status.changeLinkage('resume');
+  const pause = status.changeLinkage('pause');
+  await status.changeLinkage('pause'); await status.refresh();
+  assert.deepEqual(calls, [['pause', 0]]);
+  assert.equal(menu?.linkageAction, undefined);
+  request.resolve(state('paused')); await pause;
+  assert.equal(menu?.linkageAction, 'resume');
+  assert.match(menu!.label, /已暂停/);
+});
+
+test('unconfirmed native linkage stays read-only until refreshed; late replies cannot reopen actions', async () => {
+  const request = deferred<PetResult>();
+  let menu: WorkspaceStatusMenu | undefined, attempts = 0;
+  const status = new WorkspaceStatus({ list: async () => state('stop-unconfirmed'), render: value => { menu = value; },
+    open() {}, hide() {}, destroy() {}, linkage: async () => ++attempts === 1 ? { ok: false, error: 'conflict' } : request.promise });
+  status.serviceReady(); await status.windowReady();
+  assert.equal(menu?.linkageAction, 'pause');
+  await status.changeLinkage('pause');
+  assert.match(menu!.label, /未确认/);
+  await status.changeLinkage('pause'); assert.equal(attempts, 1);
+  await status.refresh();
+  const pending = status.changeLinkage('pause');
+  await status.dispose(); const last = menu;
+  request.resolve(state('paused')); await pending;
+  assert.equal(menu, last);
+});

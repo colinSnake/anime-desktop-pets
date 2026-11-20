@@ -10,12 +10,12 @@ import stat
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-HOST_HISTORY = ROOT / 'build'
 HELPER_HISTORY = ROOT / '.local/pet-build/previous'
-HOST_PATTERN = re.compile(r'^桌边小崽\.previous\.\d{8}-\d{6}-\d+\.app$')
 HELPER_PATTERN = re.compile(r'^\d{8}-\d{6}$')
-SCRATCH_ROOTS = ('.build', 'apps/companion-macos/.build',
-                 '.local/multi-pet-validation/swift-build')
+SCRATCH_ROOTS = ('.build',
+                 '.local/multi-pet-validation/swift-build',
+                 '.local/input-fix-validation/swift-build',
+                 '.local/input-fix-validation/minimal-swift-build')
 CACHE_NAMES = ('CompilationCache.noindex', 'ModuleCache.noindex',
                'SDKExplicitPrecompiledModules', 'SDKStatCaches.noindex',
                'Intermediates.noindex', 'v5', 'PCH')
@@ -33,10 +33,6 @@ def owned_bundle(path, identity):
             return plistlib.load(stream).get('CFBundleIdentifier') == identity
     except (OSError, ValueError, plistlib.InvalidFileException, AttributeError):
         return False
-
-
-def owned_host(path):
-    return owned_bundle(path, 'local.anime-desktop-pets.companion')
 
 
 def safe_directory(path):
@@ -77,7 +73,7 @@ def self_contained_helper(path):
         return False
 
 
-def cache_candidates():
+def cache_candidates(keep_prepared=False):
     """固定白名单，不包含 Products、素材、环境、下载及任何验证报告。"""
     found = []
     for scratch in SCRATCH_ROOTS:
@@ -91,7 +87,7 @@ def cache_candidates():
             found.append(path)
     stage = ROOT / '.local/pet-build/generated-source'
     marker = stage / '.pet-generated'
-    if safe_directory(stage) and marker.is_file() and not marker.is_symlink():
+    if not keep_prepared and safe_directory(stage) and marker.is_file() and not marker.is_symlink():
         try:
             if marker.read_text(encoding='utf-8') == 'generated local source\n':
                 found.append(stage)
@@ -124,11 +120,6 @@ def active_builds():
         if executable in names:
             found.append(f'{parts[0]} {parts[1][:160]}')
             continue
-        # Ignore shell -c command text; it may contain this cleaner's own source/docs.
-        if executable in {'sh', 'bash', 'zsh'} and '-c' not in argv and any(
-                Path(arg).name == 'build.sh' for arg in argv[1:]):
-            found.append(f'{parts[0]} {parts[1][:160]}')
-            continue
         if executable.startswith(('python', 'uv')) and any(
                 Path(arg).name == 'build-pet-runtime.py' for arg in argv[1:]):
             script_index = next(i for i, arg in enumerate(argv) if Path(arg).name == 'build-pet-runtime.py')
@@ -137,14 +128,9 @@ def active_builds():
     return found
 
 
-def candidates(host=True, helper=True):
+def candidates():
     found = []
-    if (host and safe_directory(HOST_HISTORY)
-            and safe_directory(HOST_HISTORY / '桌边小崽.app')
-            and owned_host(HOST_HISTORY / '桌边小崽.app')):
-        found.extend(path for path in HOST_HISTORY.iterdir()
-                     if HOST_PATTERN.fullmatch(path.name) and safe_directory(path) and owned_host(path))
-    if (helper and safe_directory(HELPER_HISTORY)
+    if (safe_directory(HELPER_HISTORY)
             and self_contained_helper(ROOT / '.local/pet-build/dist/BailongPet.app')):
         for path in HELPER_HISTORY.iterdir():
             if not HELPER_PATTERN.fullmatch(path.name) or not safe_directory(path):
@@ -170,7 +156,10 @@ def main(argv=None):
     parser.add_argument('--helper-archives-only', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--dry-run', action='store_true', help='只列出将清理的路径和占用')
     parser.add_argument('--caches', action='store_true', help='额外清理白名单编译/PyInstaller缓存；下次构建会重建')
+    parser.add_argument('--keep-prepared', action='store_true', help='清理缓存时保留新工作区正在使用的 prepared 播放器源码')
     args = parser.parse_args(argv)
+    if args.keep_prepared and not args.caches:
+        parser.error('--keep-prepared 仅用于 --caches')
     if args.caches and args.helper_archives_only:
         parser.error('--caches 不能与内部 helper 归档选项同时使用')
     try:
@@ -178,9 +167,9 @@ def main(argv=None):
             builds = active_builds()
             if builds:
                 raise RuntimeError('检测到构建进程，未删除任何文件：' + ', '.join(builds))
-        paths = list(candidates(host=not args.helper_archives_only, helper=True))
+        paths = candidates()
         if args.caches:
-            paths.extend(cache_candidates())
+            paths.extend(cache_candidates(keep_prepared=args.keep_prepared))
         busy = busy_paths(paths)
         skipped = len(busy)
         entries = []
@@ -205,8 +194,7 @@ def main(argv=None):
                     skipped += 1
                     continue
                 if (not safe_directory(path) or current_identity != identity
-                        or (path.name == 'BailongPet' and not self_contained_helper(path.with_name('BailongPet.app')))
-                        or (path.name.endswith('.app') and not owned_host(path))):
+                        or (path.name == 'BailongPet' and not self_contained_helper(path.with_name('BailongPet.app')))):
                     raise RuntimeError('候选路径被替换或归属校验失败，停止后续清理：' + str(path))
                 if busy_paths([path]):
                     print(f'跳过（清理前检测到正在使用）: {path}')

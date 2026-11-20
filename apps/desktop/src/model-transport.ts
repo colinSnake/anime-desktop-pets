@@ -1,4 +1,4 @@
-import { isProbeReply, modelProbeBytes, modelProbePath, modelProbeStatus, probeError, validProbeInput, type ModelProbeInput, type ModelProbeReply } from '../../../packages/contracts/src/model-probe.ts';
+import { isProbeReply, modelProbeBytes, modelProbePath, modelProbeStatus, probeError, streamingModelProbeTimeoutMs, validProbeInput, type ModelProbeInput, type ModelProbeReply } from '../../../packages/contracts/src/model-probe.ts';
 import { readBoundedJSON } from './bounded-json.ts';
 import { DISCOVERY_RESPONSE_LIMIT, MODEL_DISCOVERY_PATH, discoveryError, discoveryStatus, isDiscoveryReply } from '../../app-service/src/models/discovery-contract.ts';
 import { validDiscoveryInput, type ModelDiscoveryInput, type ModelDiscoveryReply } from '../../../packages/contracts/src/models.ts';
@@ -57,7 +57,8 @@ export async function requestModelProbe(
   if (!validProbeInput(input)) return probeError('invalid_configuration');
   if (signal.aborted) return probeError('cancelled');
   if (!Number.isInteger(port) || port < 1 || port > 65535 || !/^[a-f0-9]{64}$/.test(token)) return probeError('unavailable');
-  const snapshot = structuredClone(input), timeout = AbortSignal.timeout(17_000);
+  // The service resolves the saved protocol; leave room for its longest deadline and a local reply.
+  const snapshot = structuredClone(input), timeout = AbortSignal.timeout(streamingModelProbeTimeoutMs + 2_000);
   const body = JSON.stringify(snapshot);
   if (Buffer.byteLength(body) > modelProbeBytes) return probeError('invalid_configuration');
   try {

@@ -1,27 +1,26 @@
-import { useId, useRef, type Dispatch, type ReactNode, type SetStateAction } from 'react';
+import { useEffect, useId, useRef, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 
 export type Draft<T> = { value: T; update: Dispatch<SetStateAction<T>> };
 export function patch<T>(draft: Draft<T>, value: Partial<T>) {
   draft.update(previous => ({ ...previous, ...value }));
 }
-export function ModulePage({ title, description, preview = true, children }: { title: string; description: string; preview?: boolean; children: ReactNode }) {
+export function ModulePage({ title, description, children }: { title: string; description: string; children: ReactNode }) {
   return <article className="workspace-module">
-    <header className="page-heading module-heading"><div><h1>{title}</h1><p className="muted">{description}</p></div>{preview && <span className="badge module-status">界面预览</span>}</header>
+    <header className="module-heading"><h1>{title}</h1><p>{description}</p></header>
     {children}
   </article>;
 }
 export function PreviewNotice({ children }: { children: ReactNode }) {
   return <aside className="module-notice" aria-label="预览说明"><strong>仅保留在当前窗口</strong><p>{children}</p></aside>;
 }
-export function Panel({ title, description, children }: { title: string; description?: string; children: ReactNode }) {
+export function Panel({ title, description, focusHeading, children }: { title: string; description?: string; focusHeading?: boolean; children: ReactNode }) {
   const id = useId();
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => { if (focusHeading) heading.current?.focus(); }, [focusHeading]);
   return <section className="module-panel" aria-labelledby={id}>
-    <header><h2 id={id}>{title}</h2>{description && <p>{description}</p>}</header>
+    <header><h2 id={id} ref={heading} tabIndex={focusHeading ? -1 : undefined}>{title}</h2>{description && <p>{description}</p>}</header>
     {children}
   </section>;
-}
-export function Split({ main, aside }: { main: ReactNode; aside: ReactNode }) {
-  return <div className="module-split"><div className="module-stack">{main}</div><div className="module-stack">{aside}</div></div>;
 }
 export function Field({ label, value, onChange, limit, hint, placeholder, multiline = false, readOnly }: {
   label: string; value: string; onChange(value: string): void; limit: number; hint?: string; placeholder?: string; multiline?: boolean; readOnly?: boolean;
@@ -45,12 +44,8 @@ export function Choice<T extends string>({ label, value, options, onChange }: {
 export function Disclosure({ title, children }: { title: string; children: ReactNode }) {
   return <details className="module-disclosure"><summary>{title}</summary><div className="module-stack">{children}</div></details>;
 }
-export function OptionRow({ title, detail, children }: { title: string; detail: string; children: ReactNode }) {
-  return <div className="module-option"><div><strong>{title}</strong><p>{detail}</p></div><div className="module-actions">{children}</div></div>;
-}
-export function ToggleRow({ label, detail, checked = false, onChange }: { label: string; detail: string; checked?: boolean; onChange?: (checked: boolean) => void }) {
-  const id = useId();
-  return <div className="module-option module-toggle-row"><div><label htmlFor={id}>{label}</label><p id={`${id}-detail`}>{detail}</p></div><input id={id} type="checkbox" className="toggle" aria-describedby={`${id}-detail`} checked={checked} disabled={!onChange} onChange={event => onChange?.(event.currentTarget.checked)} /></div>;
+export function OptionRow({ title, detail, children }: { title: string; detail: string; children?: ReactNode }) {
+  return <div className="module-option"><div><strong>{title}</strong><p>{detail}</p></div>{children && <div className="module-actions">{children}</div>}</div>;
 }
 export function DisabledAction({ children, primary = false }: { children: string; primary?: boolean }) {
   return <button className={`button ${primary ? 'primary' : 'secondary'}`} type="button" disabled>{children}</button>;

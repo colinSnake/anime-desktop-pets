@@ -105,7 +105,7 @@ export class RecordSession<T extends CharacterRecord, D extends object> {
   }
 }
 
-export class RecordWorkspace<Session extends { retire(): void }> {
+export class RecordWorkspace<Session extends { retire(): void; load(): Promise<void> }> {
   private sessions = new Map<string, Session>();
   constructor(private create: (petID: string) => Session) {}
   forPet(petID: string) {
@@ -113,6 +113,7 @@ export class RecordWorkspace<Session extends { retire(): void }> {
     if (!session) { session = this.create(petID); this.sessions.set(petID, session); }
     return session;
   }
+  refreshExisting(id: string) { void this.sessions.get(id)?.load(); }
   keepRegistered(ids: readonly string[]) {
     const live = new Set(ids);
     for (const [id, session] of this.sessions) if (!live.has(id)) { this.sessions.delete(id); session.retire(); }

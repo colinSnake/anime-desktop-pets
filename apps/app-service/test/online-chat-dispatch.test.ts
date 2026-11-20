@@ -1,3 +1,5 @@
+import { fileURLToPath } from 'node:url';
+import { createHarnessRuntime } from '../src/agent/harness-runtime.ts';
 import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
@@ -9,6 +11,7 @@ import { PetWorkspace } from '../src/pet-workspace.ts';
 import { CharacterRepository } from '../src/characters/repository.ts';
 import { createService } from '../src/server.ts';
 import { sendOnlineChat } from '../src/online-chat.ts';
+import { TextChatTurns, type TextChatRuntime } from '../src/agent/text-chat-runtime.ts';
 import { configuration } from './fixtures/models.ts';
 import { syntheticVault } from './fixtures/secure-models.ts';
 
@@ -23,7 +26,8 @@ const writeDraft = (id: string) => {
   const { revision, credentialRef, ...draft } = configuration().connections[0]!;
   return { ...draft, id, displayName: id, baseURL: `https://${id}.invalid/v1` };
 };
-async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, beforeRead?: () => Promise<void>) {
+const syntheticRuntime: TextChatRuntime = (text, complete) => complete(text);
+async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, beforeRead?: () => Promise<void>, chatRuntime: TextChatRuntime | null = syntheticRuntime) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'pet-online-chat-')));
   const { backend } = syntheticVault(); let reads = 0;
   const models = new ModelManagement(join(root, 'models'), { ...backend, read: async (...args) => { reads++; await beforeRead?.(); return backend.read(...args); } }, undefined, { fetch });
@@ -31,7 +35,7 @@ async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, befo
   const workspace = new PetWorkspace({ root, catalog: [{ ...pkg, name: '合成桌宠' }] });
   const characters = new CharacterRepository(join(root, 'characters'));
   const snapshot = () => ({ kind: 'diagnostic' as const, status: 'idle' as const, detail: '' });
-  const app = createService({ token, models, workspace, characters, runtime: { snapshot, probe: async () => snapshot(), close: async () => {} } });
+  const app = createService({ token, models, workspace, characters, chatRuntime: chatRuntime ?? undefined, runtime: { snapshot, probe: async () => snapshot(), close: async () => {} } });
   t.after(async () => { await app.close(); await rm(root, { recursive: true, force: true }); });
   const created = await workspace.mutate('add', { expectedRevision: 0, package: pkg });
   assert.ok(created.ok);
@@ -42,7 +46,7 @@ async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, befo
   const defaultTo = async (connectionID: string, expectedRevision: number) => assert.ok((await models.run('default', { connectionID, entryID: 'entry-one', expectedRevision })).ok);
   const list = () => app.inject({ url: paths.list, headers });
   const send = (route: object, fields: object = {}) => app.inject({ method: 'POST', url: paths.send, headers,
-    payload: { requestID: '0f000000-0000-4000-8000-000000000001', petID, text: '聊聊纸船', history: [], route, ...fields } });
+    payload: { requestID: randomUUID(), petID, text: '聊聊纸船', history: [], route, ...fields } });
   const routes = async () => {
     const result = await list(); assert.equal(result.statusCode, 200);
     return result.json().models as { route: { connectionID: string; modelEntryID: string; fingerprint: string }; ready: boolean }[];
@@ -158,7 +162,7 @@ test('cancelling during a pending credential read prevents the first provider ca
   const f = await fixture(t, async () => { calls++; return completion(); }, async () => { entered.resolve(); await release.promise; });
   await f.write('first'); const [first] = await f.routes();
   const controller = new AbortController();
-  const sent = sendOnlineChat(f.models, f.workspace, f.characters, { requestID: randomUUID(), petID: f.petID, route: first!.route, text: '合成问题', history: [] }, controller.signal);
+  const sent = sendOnlineChat(f.models, f.workspace, f.characters, { requestID: randomUUID(), petID: f.petID, route: first!.route, text: '合成问题', history: [] }, controller.signal, new TextChatTurns(syntheticRuntime));
   await entered.promise;
   try {
     controller.abort();
@@ -167,4 +171,249 @@ test('cancelling during a pending credential read prevents the first provider ca
   // Let the pending vault read finish; the cancelled request must remain unable to dispatch.
   await new Promise<void>(resolve => setImmediate(resolve));
   assert.equal(calls, 0);
+});
+
+const useHarness = { ...use, timeout: 5_000 };
+
+async function harnessFixture(t: test.TestContext, transport: typeof globalThis.fetch, runtime: TextChatRuntime, beforeRead?: () => Promise<void>) {
+  const f = await fixture(t, transport, beforeRead, runtime);
+  await f.write('first');
+  const [model] = await f.routes();
+  return { ...f, route: model!.route, turn: (fields = {}) => f.send(model!.route, { requestID: randomUUID(), ...fields }) };
+}
+
+test('injected runtime owns the chat terminal; only a bound provider request carries saved history and consent', useHarness, async t => {
+  const sent: { url: string; headers: Headers; body: string }[] = [];
+  const consumed = deferred<void>(), finish = deferred<void>();
+  const f = await harnessFixture(t, async (url, init) => {
+    sent.push({ url: String(url), headers: new Headers(init?.headers), body: String(init?.body) });
+    return completion('运行时未预知的回复');
+  }, async (text, complete) => {
+    assert.equal(text, '聊聊纸船');
+    assert.equal(sent.length, 0);
+    await assert.rejects(complete('改写内容'), { message: 'invalid_request' });
+    const response = complete(text);
+    await assert.rejects(complete(text), { message: 'invalid_request' });
+    const reply = await response;
+    assert.equal(reply, '运行时未预知的回复');
+    consumed.resolve(); await finish.promise;
+    return reply;
+  });
+  await f.share();
+  const requestID = randomUUID();
+  const pending = f.turn({ requestID, history: [{ user: '既往私有问题', assistant: '既往私有答复' }] });
+  try {
+    await Promise.race([consumed.promise, pending.then(() => assert.fail('chat returned before the runtime terminal'))]);
+    assert.deepEqual((await f.turn()).json(), { ok: false, error: 'busy' });
+  } finally { finish.resolve(); }
+  assert.deepEqual((await pending).json(), { ok: true, requestID, text: '运行时未预知的回复', replayable: false });
+  assert.deepEqual((await f.turn({ requestID })).json(), { ok: false, error: 'invalid_request' });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0]!.url, 'https://first.invalid/v1/chat/completions');
+  assert.equal(sent[0]!.headers.get('authorization'), `Bearer ${key}-first`);
+  const body = JSON.parse(sent[0]!.body);
+  assert.equal(body.model, 'synthetic-model'); assert.equal(body.tools, undefined);
+  assert.deepEqual(body.messages.slice(-3, -1), [{ role: 'user', content: '既往私有问题' }, { role: 'assistant', content: '既往私有答复' }]);
+  assert.deepEqual(JSON.parse(body.messages.at(-1).content), { question: '聊聊纸船', characterContext: { personalMemories: ['蓝色纸船'] } });
+});
+
+for (const kind of ['unclaimed', 'forged', 'worker-exit', 'provider-lost'] as const) test(`runtime ${kind} does not publish or fall back to direct generation`, useHarness, async t => {
+  let calls = 0, late: (() => Promise<string>) | undefined;
+  const aborted = deferred<void>();
+  const f = await harnessFixture(t, async (_url, init) => {
+    calls++;
+    if (kind === 'provider-lost') throw new Error('PRIVATE-TRANSPORT-DETAIL');
+    if (kind === 'worker-exit') return new Promise((_resolve, reject) => {
+      init!.signal!.addEventListener('abort', () => { aborted.resolve(); reject(new Error('aborted')); }, { once: true });
+      entered.resolve();
+    });
+    return completion();
+  }, async (text, complete) => {
+    late = () => complete(text);
+    if (kind === 'unclaimed') return '合成回应';
+    if (kind === 'worker-exit') {
+      void complete(text).catch(() => {});
+      await entered.promise;
+      throw new Error('PRIVATE-WORKER-DETAIL');
+    }
+    const textFromProvider = await complete(text);
+    return `${textFromProvider}（篡改）`;
+  });
+  const entered = deferred<void>();
+  const requestID = randomUUID();
+  const result = (await f.turn({ requestID })).json();
+  assert.deepEqual(result, { ok: false, error: kind === 'unclaimed' || kind === 'forged' ? 'invalid_response' : 'upstream_unavailable' });
+  if (kind === 'worker-exit') await aborted.promise;
+  await assert.rejects(late!(), { message: 'invalid_request' });
+  assert.deepEqual((await f.turn({ requestID })).json(), { ok: false, error: 'invalid_request' });
+  assert.equal(calls, kind === 'unclaimed' ? 0 : 1);
+});
+
+test('the runtime rechecks sharing after the provider reply and before publishing', useHarness, async t => {
+  let withdraw!: () => Promise<unknown>;
+  const f = await harnessFixture(t, async () => completion('蓝色纸船'), async (text, complete) => {
+    const reply = await complete(text);
+    await withdraw();
+    return reply;
+  });
+  withdraw = await f.share();
+  assert.deepEqual((await f.turn()).json(), { ok: false, error: 'context_changed' });
+});
+
+test('the saved route cannot rotate between runtime launch and provider admission', useHarness, async t => {
+  let rotate!: () => Promise<unknown>;
+  const f = await harnessFixture(t, async () => assert.fail('stale route must not dispatch'), async (text, complete) => {
+    await rotate(); return complete(text);
+  });
+  rotate = () => f.write('first', 1);
+  assert.deepEqual((await f.turn()).json(), { ok: false, error: 'route_changed' });
+  assert.equal(f.reads(), 0);
+});
+
+test('another pet can run concurrently without receiving the first pet’s authorized context', useHarness, async t => {
+  const first = deferred<void>(), release = deferred<void>();
+  const outbound: string[] = [];
+  const f = await harnessFixture(t, async (_url, init) => { outbound.push(String(init?.body)); return completion(); }, async (text, complete) => {
+    if (text === '聊聊纸船') { first.resolve(); await release.promise; }
+    return complete(text);
+  });
+  await f.share();
+  const created = await f.workspace.mutate('add', { expectedRevision: 1, package: { id: 'local.pet', version: '1.0.0' } });
+  assert.ok(created.ok);
+  const other = created.workspace.instances.find(instance => instance.id !== f.petID)!.id;
+  const a = f.turn();
+  try {
+    await Promise.race([first.promise, a.then(() => assert.fail('first runtime missing'))]);
+    assert.equal((await f.turn({ petID: other, text: '另一只桌宠' })).json().ok, true);
+  } finally { release.resolve(); }
+  assert.equal((await a).json().ok, true);
+  assert.equal(outbound.length, 2);
+  assert.doesNotMatch(outbound[0]!, /蓝色纸船/);
+  assert.match(outbound[1]!, /蓝色纸船/);
+});
+
+test('a cancelled turn revokes provider admission before the vault is opened and retains its slot through worker cleanup', useHarness, async t => {
+  const f = await fixture(t, async () => assert.fail('cancelled turn must not dispatch'));
+  await f.write('first'); const [first] = await f.routes();
+  const entered = deferred<() => Promise<string>>(), release = deferred<void>();
+  const turns = new TextChatTurns(async (text, complete, signal) => {
+    entered.resolve(() => complete(text));
+    await release.promise;
+    assert(signal.aborted);
+    return '晚到回复';
+  });
+  const stop = new AbortController();
+  const input = { requestID: randomUUID(), petID: f.petID, route: first!.route, text: '聊聊纸船', history: [] };
+  const send = (value = input, signal = AbortSignal.timeout(1000)) => sendOnlineChat(f.models, f.workspace, f.characters, value, signal, turns);
+  const pending = send(input, stop.signal);
+  try {
+    const complete = await Promise.race([entered.promise, pending.then(() => assert.fail('runtime not started'))]);
+    stop.abort();
+    assert.deepEqual(await pending, { ok: false, error: 'cancelled' });
+    await assert.rejects(complete(), { message: 'invalid_request' });
+    assert.deepEqual(await send(), { ok: false, error: 'invalid_request' });
+    assert.deepEqual(await send({ ...input, requestID: randomUUID() }), { ok: false, error: 'busy' });
+    assert.equal(f.reads(), 0);
+  } finally { release.resolve(); turns.close(); }
+});
+
+test('provider truncation is not a successful harness model response', useHarness, async t => {
+  const f = await harnessFixture(t, async () => Response.json({ choices: [{ message: { role: 'assistant', content: '被截断' }, finish_reason: 'length' }] }),
+    (text, complete) => complete(text));
+  assert.deepEqual((await f.turn()).json(), { ok: false, error: 'invalid_response' });
+});
+
+const useSDK = { skip: process.platform !== 'darwin', timeout: 25_000 };
+const sdkWorker = fileURLToPath(new URL('../src/agent/harness-worker.mjs', import.meta.url));
+
+test('the installed SDK runs a literal text turn through the fixed chat route without forwarding its envelope', useSDK, async t => {
+  const text = '/help\n聊聊纸船';
+  const answer = `模型生成后才知道：${randomUUID()}`;
+  let sent = 0;
+  const f = await harnessFixture(t, async (url, init) => {
+    sent++;
+    assert.equal(url, 'https://first.invalid/v1/chat/completions');
+    const { model, tools, messages } = JSON.parse(String(init?.body));
+    assert.equal(model, 'synthetic-model'); assert.equal(tools, undefined);
+    assert.deepEqual(JSON.parse(messages.at(-1).content), { question: text, characterContext: { personalMemories: ['蓝色纸船'] } });
+    assert.doesNotMatch(String(init?.body), /system-reminder|pet-harness/);
+    return completion(answer);
+  }, createHarnessRuntime({ worker: sdkWorker }));
+  await f.share();
+  const requestID = randomUUID();
+  assert.deepEqual((await f.turn({ requestID, text })).json(), { ok: true, requestID, text: answer, replayable: false });
+  assert.deepEqual((await f.turn({ requestID, text })).json(), { ok: false, error: 'invalid_request' });
+  assert.equal(sent, 1);
+});
+
+test('missing SDK worker never reads the selected Key or falls back', useSDK, async t => {
+  const f = await harnessFixture(t, async () => assert.fail('must not invoke the model'), createHarnessRuntime({ worker: `${sdkWorker}.missing` }));
+  assert.deepEqual((await f.turn()).json(), { ok: false, error: 'unavailable' });
+  assert.equal(f.reads(), 0);
+});
+
+test('closing the service stops a real SDK turn and aborts the pending provider', useSDK, async t => {
+  const dispatched = deferred<void>(), cancelled = deferred<void>();
+  const f = await harnessFixture(t, async (_url, init) => new Promise((_resolve, reject) => {
+    init!.signal!.addEventListener('abort', () => { cancelled.resolve(); reject(new Error('synthetic abort')); }, { once: true });
+    dispatched.resolve();
+  }), createHarnessRuntime({ worker: sdkWorker }));
+  const turn = f.turn();
+  await Promise.race([dispatched.promise, turn.then(() => assert.fail('provider was not reached'))]);
+  await f.app.close();
+  await cancelled.promise;
+  assert.equal((await turn).json().ok, false);
+});
+
+
+test('the fixed chat handler without a configured Runtime cannot invoke the Provider', use, async t => {
+  const f = await fixture(t, async () => assert.fail('a missing Runtime must not dispatch'), undefined, null);
+  await f.write('first');
+  const [first] = await f.routes();
+  assert.deepEqual((await f.send(first!.route)).json(), { ok: false, error: 'unavailable' });
+  assert.equal(f.reads(), 0);
+});
+
+test('a slash-only message is submitted as a literal SDK prompt', useSDK, async t => {
+  const f = await harnessFixture(t, async (_url, init) => {
+    assert.equal(JSON.parse(String(init?.body)).messages.at(-1).content, '/help');
+    return completion('合成字面正文回应');
+  }, createHarnessRuntime({ worker: sdkWorker }));
+  const result = (await f.turn({ text: '/help' })).json();
+  assert.equal(result.text, '合成字面正文回应');
+});
+
+test('cancellation during final verification keeps the same pet slot until verification drains', useHarness, async () => {
+  const turns = new TextChatTurns(syntheticRuntime);
+  const rechecking = deferred<void>(), release = deferred<void>();
+  const input = { requestID: randomUUID(), petID: 'test-pet', route: { connectionID: 'synthetic', modelEntryID: 'synthetic', fingerprint: 'f'.repeat(64) }, text: '合成正文', history: [] };
+  const owner = new AbortController();
+  const pending = turns.run(input, async () => '合成回答', owner.signal, {
+    after: async () => { rechecking.resolve(); await release.promise; },
+  });
+  try {
+    await Promise.race([rechecking.promise, pending.then(() => assert.fail('final verification was not awaited'))]);
+    owner.abort();
+    await assert.rejects(pending, { message: 'cancelled' });
+    await assert.rejects(turns.run({ ...input, requestID: randomUUID() }, async () => '合成回答', new AbortController().signal), { message: 'busy' });
+  } finally { release.resolve(); await turns.close(); }
+});
+
+test('a Worker failure revokes but does not release a pet slot before its admitted Provider settles', useHarness, async () => {
+  const dispatched = deferred<void>(), release = deferred<void>();
+  const turns = new TextChatTurns(async (text, complete) => {
+    void complete(text).catch(() => {});
+    await dispatched.promise;
+    throw new Error('synthetic Worker died');
+  });
+  const input = { requestID: randomUUID(), petID: 'test-pet', route: { connectionID: 'synthetic', modelEntryID: 'synthetic', fingerprint: 'e'.repeat(64) }, text: '合成正文', history: [] };
+  const signal = new AbortController().signal;
+  try {
+    await assert.rejects(turns.run(input, async owned => {
+      dispatched.resolve(); await release.promise;
+      assert.ok(owned.aborted);
+      return '晚到的合成回答';
+    }, signal), { message: 'upstream_unavailable' });
+    await assert.rejects(turns.run({ ...input, requestID: randomUUID() }, async () => assert.fail('slot was released'), signal), { message: 'busy' });
+  } finally { release.resolve(); await turns.close(); }
 });

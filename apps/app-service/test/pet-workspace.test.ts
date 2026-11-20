@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, symlink, rm, mkdir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { PetLifecycle } from '../src/pet-lifecycle.ts';
 import { PetWorkspace } from '../src/pet-workspace.ts';
 import { defaultPreferences } from '../src/pet-registry.ts';
 const catalog = [{ id: 'local.pet', version: '1.0.0', name: '合成桌宠' }];
@@ -87,13 +88,13 @@ test('runtime drag position is persisted by the workspace writer and failed comm
 });
 test('owned runtime position events update saved config and report persistence outcome separately', async t => {
  const { PetLifecycle } = await import('../src/pet-lifecycle.ts');
- let status: import('../../../packages/contracts/src/index.ts').PlayerSnapshot['status'] = 'stopped';
+ let status: import('../src/pet-lifecycle.ts').OwnedSnapshot['status'] = 'stopped';
  let reportPosition: ((position: { x: number; y: number }) => void) | undefined;
  let failCommit = false;
  const lifecycle = new PetLifecycle({ supports: () => true, create: () => ({
-  snapshot: () => ({ kind: 'qt-player' as const, status, detail: 'synthetic' }),
-  start: async () => { status = 'running'; return { kind: 'qt-player', status, detail: 'synthetic' }; },
-  stop: async () => { status = 'stopped'; return { kind: 'qt-player', status, detail: 'synthetic' }; },
+  snapshot: () => ({ status }),
+  start: async () => { status = 'running'; return { status }; },
+  stop: async () => { status = 'stopped'; return { status }; },
   applyDisplayPreferences: async () => true, applyBehaviorPreferences: async () => true, setVisible: async () => true,
   setPositionListener: listener => { reportPosition = listener; }, close: async () => { status = 'stopped'; },
  }) });
@@ -211,9 +212,9 @@ test('invalid UTF-8 is treated as corruption and cannot be rewritten by an unrel
 
 test('instance commands preserve disk revision, stop can cancel startup, and deletion requires confirmed stop', async t => {
  const { PetLifecycle } = await import('../src/pet-lifecycle.ts');
- let status: import('../../../packages/contracts/src/index.ts').PlayerSnapshot['status']='stopped';
+ let status: import('../src/pet-lifecycle.ts').OwnedSnapshot['status']='stopped';
  let finish!:()=>void;
- const snapshot=()=>({kind:'qt-player' as const,status,detail:'synthetic'});
+ const snapshot=()=>({status});
  const lifecycle=new PetLifecycle({supports:()=>true,create:()=>({snapshot,start:()=>{status='starting';return new Promise(()=>{});},stop:()=>{status='stopping';return new Promise(resolve=>{finish=()=>{status='stopped';resolve(snapshot());};});},applyDisplayPreferences:async()=>true,applyBehaviorPreferences:async()=>true,setVisible:async()=>true,close:async()=>{status='stopped';}})});
  const {workspace:w,root}=await setup(t,{lifecycle});
  const added=await w.mutate('add',{expectedRevision:0,package:pkg});assert.ok(added.ok);
@@ -232,9 +233,9 @@ test('instance commands preserve disk revision, stop can cancel startup, and del
 
 test('display apply and visibility are per-owner runtime state and never advance the config revision', async t => {
  const { PetLifecycle } = await import('../src/pet-lifecycle.ts');
- let status: import('../../../packages/contracts/src/index.ts').PlayerSnapshot['status']='stopped';
+ let status: import('../src/pet-lifecycle.ts').OwnedSnapshot['status']='stopped';
  let applied={size:256,hideInFullscreen:true},visible=true;
- const snapshot=()=>({kind:'qt-player' as const,status,detail:'synthetic'});
+ const snapshot=()=>({status});
  const lifecycle=new PetLifecycle({supports:()=>true,create:()=>({snapshot,start:async()=>{status='running';return snapshot();},stop:async()=>{status='stopped';return snapshot();},applyDisplayPreferences:async value=>{applied=value;return true;},applyBehaviorPreferences:async()=>true,setVisible:async value=>{visible=value;return true;},close:async()=>{status='stopped';}})});
  const {workspace:w}=await setup(t,{lifecycle});
  const added=await w.mutate('add',{expectedRevision:0,package:pkg});assert.ok(added.ok);const id=added.workspace.instances[0]!.id;
@@ -250,7 +251,7 @@ test('display apply and visibility are per-owner runtime state and never advance
 });
 test('workspace shutdown releases writer lease even if owned runtime close fails', async t => {
  const {PetLifecycle}=await import('../src/pet-lifecycle.ts');
- const lifecycle=new PetLifecycle({supports:()=>true,create:()=>({snapshot:()=>({kind:'qt-player',status:'error',detail:''}),start:async()=>({kind:'qt-player',status:'error',detail:''}),stop:async()=>({kind:'qt-player',status:'error',detail:''}),applyDisplayPreferences:async()=>false,applyBehaviorPreferences:async()=>false,setVisible:async()=>false,close:async()=>{throw Error('private');}})});
+ const lifecycle=new PetLifecycle({supports:()=>true,create:()=>({snapshot:()=>({status:'error'}),start:async()=>({status:'error'}),stop:async()=>({status:'error'}),applyDisplayPreferences:async()=>false,applyBehaviorPreferences:async()=>false,setVisible:async()=>false,close:async()=>{throw Error('private');}})});
  const root=await mkdtemp(join(await realpath(tmpdir()),'pet-workspace-close-'));
  let second: PetWorkspace | undefined;
  t.after(async()=>{await second?.close();await rm(root,{recursive:true,force:true});});
@@ -264,8 +265,8 @@ test('workspace shutdown releases writer lease even if owned runtime close fails
 
 test('behavior apply uses saved preferences, never writes revision or runtime feedback to disk', async t => {
  const {PetLifecycle}=await import('../src/pet-lifecycle.ts');
- let status:import('../../../packages/contracts/src/index.ts').PlayerSnapshot['status']='stopped';let fail=false;let received:unknown;
- const snapshot=()=>({kind:'qt-player' as const,status,detail:'synthetic'});
+ let status:import('../src/pet-lifecycle.ts').OwnedSnapshot['status']='stopped';let fail=false;let received:unknown;
+ const snapshot=()=>({status});
  const lifecycle=new PetLifecycle({supports:()=>true,create:()=>({snapshot,start:async()=>{status='running';return snapshot();},stop:async()=>{status='stopped';return snapshot();},applyDisplayPreferences:async()=>true,setVisible:async()=>true,applyBehaviorPreferences:async value=>{received=value;return !fail;},close:async()=>{status='stopped';}})});
  const {workspace:w,root}=await setup(t,{lifecycle});
  const added=await w.mutate('add',{expectedRevision:0,package:pkg});assert.ok(added.ok);const id=added.workspace.instances[0]!.id;
@@ -283,12 +284,12 @@ test('behavior apply uses saved preferences, never writes revision or runtime fe
 
 test('pause gates owned and additional player starts, reports unconfirmed stop, and resumes without restoring', async t => {
  const {PetLifecycle}=await import('../src/pet-lifecycle.ts');
- let status:import('../../../packages/contracts/src/index.ts').PlayerSnapshot['status']='stopped';
- let finishStop!:(value:import('../../../packages/contracts/src/index.ts').PlayerSnapshot)=>void;
+ let status:import('../src/pet-lifecycle.ts').OwnedSnapshot['status']='stopped';
+ let finishStop!:(value:import('../src/pet-lifecycle.ts').OwnedSnapshot)=>void;
  const calls:string[]=[];
  const lifecycle=new PetLifecycle({supports:()=>true,create:()=>({
-  snapshot:()=>({kind:'qt-player',status,detail:''}),
-  start:async()=>{status='running';return {kind:'qt-player',status,detail:''};},
+  snapshot:()=>({status}),
+  start:async()=>{status='running';return {status};},
   stop:()=>{calls.push('stop');status='stopping';return new Promise(resolve=>{finishStop=value=>{status=value.status;resolve(value);};});},
   applyDisplayPreferences:async()=>status==='running',applyBehaviorPreferences:async()=>status==='running',setVisible:async()=>status==='running',close:async()=>{status='stopped';},
  })});
@@ -303,7 +304,7 @@ test('pause gates owned and additional player starts, reports unconfirmed stop, 
  const stopDeadline=Date.now()+1000;
  while(!calls.includes('stop')&&Date.now()<stopDeadline) await new Promise(resolve=>setTimeout(resolve,5));
  assert.ok(calls.includes('stop'));
- finishStop({kind:'qt-player',status:'stopped',detail:''});
+ finishStop({status:'stopped'});
  assert.deepEqual(await blockedStart,{ok:false,error:'busy'});
  assert.deepEqual(await pausedPromise,{ok:false,error:'apply-failed'});
  const failed=await w.list();assert.ok(failed.ok);assert.equal(failed.workspace.linkage,'stop-unconfirmed');assert.equal(w.taskLease.enable(),false);
@@ -350,4 +351,108 @@ test('workspace pause and close revoke task reads synchronously; resume does not
  assert.equal(lease.enable(),false);
  assert.equal(await pending,undefined);
  await closed;
+});
+
+function startupLifecycle(starts: string[], supports: (pet: import('../../../packages/contracts/src/pets.ts').PetDefinition) => boolean = () => true) {
+ return new PetLifecycle({ supports, create: pet => {
+  let status: 'stopped' | 'running' = 'stopped';
+  return {
+   snapshot: () => ({ status }),
+   start: async () => { starts.push(pet.id); status = 'running'; return { status }; },
+   stop: async () => { status = 'stopped'; return { status }; },
+   close: async () => { status = 'stopped'; },
+   applyDisplayPreferences: async () => true, applyBehaviorPreferences: async () => true, setVisible: async () => true,
+  };
+ } });
+}
+
+test('startup registers one default pet, uses its saved launch flag, and never restarts it in the same session', async t => {
+ const starts: string[] = [];
+ const { workspace: w, root } = await setup(t, { lifecycle: startupLifecycle(starts) });
+ const launched = await w.startOnLaunch(pkg);
+ assert.ok(launched.ok);
+ assert.equal(launched.workspace.revision, 1);
+ assert.equal(launched.workspace.instances.length, 1);
+ const pet = launched.workspace.instances[0]!;
+ assert.equal(pet.displayName, '合成桌宠');
+ assert.equal(pet.autoStartOnLaunch, true);
+ assert.deepEqual(starts, [pet.id]);
+ assert.equal((await data(w)).instances[0]!.phase, 'running');
+ const stopped = await w.mutate('stop', { expectedRevision: 1, id: pet.id }); assert.ok(stopped.ok);
+ await w.startOnLaunch(pkg);
+ assert.deepEqual(starts, [pet.id]);
+ const before = await readFile(join(root, 'workspace-state.json'));
+ await w.close();
+ const next = new PetWorkspace({ root, catalog, lifecycle: startupLifecycle(starts) }); t.after(() => next.close());
+ const restarted = await next.startOnLaunch(pkg); assert.ok(restarted.ok);
+ assert.deepEqual(starts, [pet.id, pet.id]);
+ assert.deepEqual(await readFile(join(root, 'workspace-state.json')), before);
+ await next.close();
+});
+
+test('startup upgrades the first enabled saved pet once and preserves opt-out, clones and deletion', async t => {
+ const { workspace: old, root } = await setup(t);
+ const added = await old.mutate('add', { expectedRevision: 0, package: pkg }); assert.ok(added.ok);
+ const id = added.workspace.instances[0]!.id;
+ const cloned = await old.mutate('clone', { expectedRevision: 1, id }); assert.ok(cloned.ok);
+ const clone = cloned.workspace.instances[1]!.id;
+ await old.close();
+ const starts: string[] = [];
+ const reopen = () => { const w = new PetWorkspace({ root, catalog, lifecycle: startupLifecycle(starts) }); t.after(() => w.close()); return w; };
+ const first = reopen();
+ const upgraded = await first.startOnLaunch(pkg); assert.ok(upgraded.ok);
+ assert.deepEqual(starts, [id]);
+ assert.deepEqual(upgraded.workspace.instances.map(pet => [pet.id, pet.autoStartOnLaunch]), [[id, true], [clone, false]]);
+ const saved = await first.mutate('save', { expectedRevision: upgraded.workspace.revision, id, displayName: '已关闭自动启动', enabled: true, autoStartOnLaunch: false, preferences: defaultPreferences() }); assert.ok(saved.ok);
+ await first.close();
+ const second = reopen();
+ const optedOut = await second.startOnLaunch(pkg); assert.ok(optedOut.ok);
+ assert.deepEqual(starts, [id]);
+ assert.equal(optedOut.workspace.revision, saved.workspace.revision);
+ for (const [offset, target] of [id, clone].entries()) assert.ok((await second.mutate('delete', { expectedRevision: optedOut.workspace.revision + offset, id: target })).ok);
+ await second.close();
+ const last = reopen();
+ const third = await last.startOnLaunch(pkg); assert.ok(third.ok);
+ assert.deepEqual(third.workspace.instances, []);
+ assert.deepEqual(starts, [id]);
+ await last.close();
+});
+
+test('startup skips disabled and unavailable instances and enforces the existing three-slot cap', async t => {
+ const starts: string[] = [];
+ const extra = { id: 'local.unplayable', version: '1.0.0', name: '未接播放器', launchable: false };
+ const { workspace: w } = await setup(t, { catalog: [extra, ...catalog], lifecycle: startupLifecycle(starts, pet => pet.package.id === pkg.id) });
+ const expected: string[] = [];
+ for (let n = 0; n < 6; n++) {
+  const added = await w.mutate('add', { expectedRevision: n * 2, package: n === 0 ? { id: extra.id, version: extra.version } : pkg }); assert.ok(added.ok);
+  const pet = added.workspace.instances[n]!;
+  assert.ok((await w.mutate('save', { expectedRevision: n * 2 + 1, id: pet.id, displayName: `合成 ${n}`, autoStartOnLaunch: true, enabled: n !== 1, preferences: defaultPreferences() })).ok);
+  if (n >= 2 && n < 5) expected.push(pet.id);
+ }
+ const loaded = await w.startOnLaunch(pkg); assert.ok(loaded.ok);
+ assert.deepEqual(starts, expected);
+ assert.equal(loaded.workspace.instances[0]!.phase, 'not-connected');
+ assert.equal(loaded.workspace.instances[5]!.phase, 'stopped');
+});
+
+test('startup stays blocked during pause, shutdown, storage failure or when no player is available', async t => {
+ const starts: string[] = [];
+ const paused = (await setup(t, { lifecycle: startupLifecycle(starts) })).workspace;
+ const queuedStart = paused.startOnLaunch(pkg);
+ const pause = paused.mutate('pause', { expectedRevision: 0 });
+ assert.deepEqual(await queuedStart, { ok: false, error: 'busy' });
+ assert.ok((await pause).ok);
+ const closing = (await setup(t, { lifecycle: startupLifecycle(starts) })).workspace;
+ const blocked = closing.startOnLaunch(pkg);
+ await closing.close();
+ assert.deepEqual(await blocked, { ok: false, error: 'unavailable' });
+ const disconnected = (await setup(t, { lifecycle: startupLifecycle(starts, () => false) })).workspace;
+ const unloaded = await disconnected.startOnLaunch(pkg); assert.ok(unloaded.ok);
+ assert.deepEqual(unloaded.workspace.instances, []);
+ const { workspace: corrupt, root } = await setup(t, { lifecycle: startupLifecycle(starts) });
+ const path = join(root, 'workspace-state.json');
+ await writeFile(path, '{bad registry');
+ assert.deepEqual(await corrupt.startOnLaunch(pkg), { ok: false, error: 'storage' });
+ assert.equal(await readFile(path, 'utf8'), '{bad registry');
+ assert.deepEqual(starts, []);
 });

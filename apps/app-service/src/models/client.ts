@@ -1,10 +1,10 @@
-import type { ModelProbeInput } from '../../../../packages/contracts/src/model-probe.ts';
+import { streamingModelProbeTimeoutMs, type ModelProbeInput } from '../../../../packages/contracts/src/model-probe.ts';
 import type { ChatRoute } from '../../../../packages/contracts/src/online-chat.ts';
 import { resolveChatRoute } from './chat-models.ts';
 import { validDiscoveryCandidate, type ModelCandidate } from '../../../../packages/contracts/src/models.ts';
-import { ModelError } from './errors.ts';
+import { ModelError, type ModelErrorCode } from './errors.ts';
 import { resolveRoute, routeFor, validateConfiguration } from './config.ts';
-import { snapshotInput } from './common.ts';
+import { array, object, snapshotInput } from './common.ts';
 import { adapters } from './protocols.ts';
 import type { DiscoveryResult, ModelConfiguration, ModelInput, ModelPurpose, ModelReply, ModelRoute, ModelSelection } from './types.ts';
 
@@ -21,6 +21,72 @@ type Options = {
 const RESPONSE_BYTES = 1_048_576, DISCOVERY_BYTES = 4 * RESPONSE_BYTES, REQUEST_BYTES = 131_072;
 const check = (signal: AbortSignal) => { if (signal.aborted) throw signal.reason instanceof ModelError ? signal.reason : new ModelError('cancelled'); };
 const cancelBody = (response: Response) => { void response.body?.cancel().catch(() => {}); };
+
+type ProbeMode = 'json' | 'streaming-responses';
+const probeHttpErrors: Readonly<Partial<Record<number, ModelErrorCode>>> = {
+  400: 'provider_bad_request', 401: 'authentication_failed', 403: 'provider_forbidden',
+  404: 'provider_not_found', 422: 'provider_bad_request', 429: 'rate_limited',
+};
+const probeMarker = 'OK';
+function verifyResponsesProbe(raw: unknown, requireMarker: boolean): void {
+  const response = object(raw);
+  if (response.error != null) throw new ModelError('invalid_response');
+  if (response.status === 'incomplete' && response.incomplete_details != null && object(response.incomplete_details).reason === 'max_output_tokens') {
+    throw new ModelError('output_budget_exhausted');
+  }
+  if (response.status !== 'completed' || response.incomplete_details != null) throw new ModelError('invalid_response');
+  if (!requireMarker) return;
+  // Reasoning is not evidence of a successful probe; neither are tool calls or partial text.
+  const messages = array(response.output).map(object).filter(item => item.type !== 'reasoning');
+  if (messages.length !== 1) throw new ModelError('invalid_response');
+  const message = messages[0]!;
+  if (message.type !== 'message' || message.role !== 'assistant' || (message.status != null && message.status !== 'completed')) throw new ModelError('invalid_response');
+  const content = array(message.content);
+  if (content.length !== 1) throw new ModelError('invalid_response');
+  const part = object(content[0]);
+  if (part.type !== 'output_text' || typeof part.text !== 'string' || part.text.trim() !== probeMarker) throw new ModelError('invalid_response');
+}
+
+/** Consume only framed SSE events and stop at the first valid terminal envelope. */
+function createResponsesStreamParser() {
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  let line = '', event = '', data: string[] = [], skipLeadingLf = false;
+  const dispatch = () => {
+    const payload = data.join('\n'), name = event;
+    event = ''; data = [];
+    if (!payload) return;
+    let message: Record<string, unknown>;
+    try { message = object(JSON.parse(payload)); } catch { throw new ModelError('invalid_response'); }
+    const { type } = message;
+    if (typeof type !== 'string' || (name && name !== 'message' && name !== type)) throw new ModelError('invalid_response');
+    if (type === 'response.failed' || type === 'error') throw new ModelError('invalid_response');
+    if (type !== 'response.completed' && type !== 'response.incomplete') return;
+    const response = object(message.response);
+    if (type !== `response.${response.status}`) throw new ModelError('invalid_response');
+    return response;
+  };
+  return (chunk: Uint8Array) => {
+    let text: string;
+    try { text = decoder.decode(chunk, { stream: true }); } catch { throw new ModelError('invalid_response'); }
+    if (!text) return;
+    if (skipLeadingLf && text.startsWith('\n')) text = text.slice(1);
+    skipLeadingLf = text.endsWith('\r');
+    let start = 0;
+    for (const newline of text.matchAll(/\r\n?|\n/g)) {
+      const field = line + text.slice(start, newline.index);
+      line = '';
+      start = newline.index + newline[0].length;
+      if (!field) {
+        const terminal = dispatch();
+        if (terminal) return terminal;
+      } else if (field.startsWith('data:')) data.push(field.slice(5).replace(/^ /, ''));
+      else if (field === 'data') data.push('');
+      else if (field.startsWith('event:')) event = field.slice(6).replace(/^ /, '');
+      else if (field === 'event') event = '';
+    }
+    line += text.slice(start);
+  };
+}
 /** Service-internal, dependency-injected transport. No renderer routes or credential persistence. */
 export class ModelClient {
   private closed = false;
@@ -89,19 +155,26 @@ export class ModelClient {
     const compatibility = outputTokenField ? { outputTokenField } : {};
     const route = routeFor(state.revision, { ...connection, compatibility }, { entryID, modelID, displayName: modelID, maxOutputTokens,
       capabilities: { tools: { status: 'unsupported', source: 'user' } }, compatibility }, 'text-chat');
-    route.tokenBudget = Math.min(32, route.tokenBudget);
+    // Gate streaming on the saved protocol and origin, not a renderer-supplied flag.
+    const streamResponses = route.apiProtocol === 'responses' && new URL(route.baseURL).origin !== 'https://api.deepseek.com';
+    route.tokenBudget = Math.min(streamResponses ? 256 : 32, route.tokenBudget);
     const adapter = adapters[route.apiProtocol];
-    const encoded = adapter.encode(route, { messages: [{ role: 'user', text: 'Reply with OK.' }] }), body = JSON.stringify(encoded.body);
+    const encoded = adapter.encode(route, { messages: [{ role: 'user', text: streamResponses ? `Reply with exactly ${probeMarker}. Do not use tools.` : 'Reply with OK.' }] });
+    const body = JSON.stringify(streamResponses
+      ? { model: route.modelID, input: encoded.body.input, store: false, stream: true, max_output_tokens: route.tokenBudget }
+      : route.apiProtocol === 'responses' ? { ...encoded.body, stream: false } : encoded.body);
     return this.run(route, signal, async owned => {
       const auth = await this.auth(route, owned);
       const key = auth.authorization?.slice(7) ?? auth['x-api-key'] ?? auth['x-goog-api-key'];
       if (key && modelID.includes(key) || route.credentialRef && modelID.includes(route.credentialRef)) throw new ModelError('invalid_configuration');
       current();
-      const raw = await this.request(route, encoded.path, { method: 'POST', headers: { ...encoded.headers, ...auth, 'content-type': 'application/json' }, body }, owned, { bytes: 0, max: 64 * 1024 });
+      const raw = await this.request(route, encoded.path, { method: 'POST', headers: { ...encoded.headers, ...auth, ...(streamResponses ? { accept: 'text/event-stream, application/json' } : {}), 'content-type': 'application/json' }, body }, owned, { bytes: 0, max: 64 * 1024 }, streamResponses ? 'streaming-responses' : 'json');
       check(owned); current();
+      if (route.apiProtocol === 'responses') verifyResponsesProbe(raw, streamResponses);
+      if (streamResponses) return; // The probe verified the marker without retaining private reasoning or replay.
       const result = adapter.decode(route, raw);
       if (result.stop === 'refused' || result.stop === 'tools' || result.message.toolCalls?.length || !result.message.text.trim()) throw new ModelError('invalid_response');
-    }, 15_000);
+    }, streamResponses ? streamingModelProbeTimeoutMs : 15_000);
   }
   async discover(connectionID: string, signal?: AbortSignal): Promise<DiscoveryResult> {
     return this.discoverModels(connectionID, signal);
@@ -196,7 +269,7 @@ export class ModelClient {
     if (typeof key !== 'string' || !key.trim() || key.length > 8192 || /[^\x21-\x7e]/.test(key)) throw new ModelError('credentials_unavailable');
     return route.apiProtocol === 'anthropic' ? { 'x-api-key': key } : route.apiProtocol === 'gemini' ? { 'x-goog-api-key': key } : { authorization: `Bearer ${key}` };
   }
-  private async request(route: ModelRoute, path: string, init: RequestInit, signal: AbortSignal, budget: { bytes: number; max: number }): Promise<unknown> {
+  private async request(route: ModelRoute, path: string, init: RequestInit, signal: AbortSignal, budget: { bytes: number; max: number }, probe?: ProbeMode): Promise<unknown> {
     check(signal);
     // Only adapter-owned relative paths; never follow an upstream-supplied URL.
     if (!path.startsWith('/') || path.startsWith('//') || /[\r\n\\#]/.test(path)) throw new ModelError('invalid_request');
@@ -206,13 +279,15 @@ export class ModelClient {
     if (signal.aborted) { cancelBody(response); check(signal); }
     if (response.redirected || !response.ok) {
       cancelBody(response);
+      if (probe && !response.redirected) throw new ModelError(probeHttpErrors[response.status] ?? 'upstream_unavailable');
       throw new ModelError(response.status === 401 || response.status === 403 ? 'authentication_failed' : response.status === 429 ? 'rate_limited' : 'upstream_unavailable');
     }
     const type = response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase();
-    if (!type || !/^application\/(?:json|[a-z0-9!#$&^_.+-]+\+json)$/.test(type) || !response.body) { cancelBody(response); throw new ModelError('invalid_response'); }
+    const eventStream = probe === 'streaming-responses' && type === 'text/event-stream';
+    if (!type || (!eventStream && !/^application\/(?:json|[a-z0-9!#$&^_.+-]+\+json)$/.test(type)) || !response.body) { cancelBody(response); throw new ModelError('invalid_response'); }
     const length = Number(response.headers.get('content-length'));
     if (length > RESPONSE_BYTES || length + budget.bytes > budget.max) { cancelBody(response); throw new ModelError('response_too_large'); }
-    const reader = response.body.getReader(), chunks: Uint8Array[] = [];
+    const reader = response.body.getReader(), chunks: Uint8Array[] = [], streamParser = eventStream ? createResponsesStreamParser() : undefined;
     let bytes = 0;
     const cancel = () => { void reader.cancel().catch(() => {}); };
     signal.addEventListener('abort', cancel, { once: true });
@@ -223,8 +298,12 @@ export class ModelClient {
         if (part.done) break;
         bytes += part.value.byteLength; budget.bytes += part.value.byteLength;
         if (bytes > RESPONSE_BYTES || budget.bytes > budget.max) throw new ModelError('response_too_large');
-        chunks.push(part.value);
+        if (streamParser) {
+          const terminal = streamParser(part.value);
+          if (terminal) { cancel(); return terminal; }
+        } else chunks.push(part.value);
       }
+      if (streamParser) throw new ModelError('invalid_response');
       try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, bytes))); }
       catch { throw new ModelError('invalid_response'); }
     } catch (error) {

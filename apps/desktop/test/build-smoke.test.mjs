@@ -45,7 +45,7 @@ test('Codex presence probe is packaged for trusted macOS code and rejects argume
   assert.equal(rejected.stderr.length, 0);
 });
 test('task reading stages the unchanged lifecycle parser only on macOS and stays outside preload', async () => {
-  const files = { 'dragon_tasks.py': 'apps/pet-runtime/bailong/dragon_tasks.py',
+  const files = { 'task_events.py': 'apps/runtime-bridge/task_events.py',
     'task_reader.py': 'apps/runtime-bridge/task_reader.py', 'task_reader_worker.py': 'apps/runtime-bridge/task_reader_worker.py' };
   assert.doesNotMatch(await readFile(resolve(out, 'preload.cjs'), 'utf8'), /codex-task-following|task_reader|taskFollowingHome/);
   assert.match(await readFile(resolve(out, 'main.cjs'), 'utf8'), /codex-task-following/);
@@ -102,14 +102,12 @@ test('the fixed startup mode is macOS scoped and its isolated player signals pla
 test("build emits sandbox preload, relative local assets and an isolated diagnostic worker", async () => {
   const html = await readFile(`${out}/ui/index.html`, "utf8");
   assert.match(html, /lang="zh-CN"/);
-  assert.match(html, /connect-src 'none'/);
+  assert.match(html.replaceAll('&#39;', "'"), /connect-src 'none'/);
   assert.match(html, /src="\.\/assets\//);
   assert.doesNotMatch(html, /https?:\/\//);
   const assets = await readdir(`${out}/ui/assets`);
   assert.ok(assets.some((file) => file.endsWith(".js")));
   assert.ok(assets.some((file) => file.endsWith(".css")));
-  assert.equal(await readFile(`${out}/runtime/pet_cover.py`, "utf8"),
-    await readFile("apps/runtime-bridge/pet_cover.py", "utf8"));
   for (const name of ['pet_sources.py', 'pet_library.py', 'pet_reference_lock.py']) {
     assert.equal(await readFile(`${out}/runtime/${name}`, 'utf8'), await readFile(`apps/pet-runtime/pets/${name}`, 'utf8'));
   }
@@ -205,13 +203,12 @@ test("compiled service authenticates, probes its copied worker and shuts down", 
   }
 });
 
-test("build copies every private player module and exposes only fixed no-arg actions", async () => {
-  for (const name of ['player_worker.py', 'player_protocol.py', 'player_adapter.py']) {
-    assert.equal(await readFile(`${out}/runtime/${name}`, 'utf8'), await readFile(`apps/runtime-bridge/${name}`, 'utf8'));
+test("build excludes Qt modules and keeps the fixed material picker", async () => {
+  for (const name of ['player_worker.py', 'player_protocol.py', 'player_adapter.py', 'player_quota.py', 'pet_cover.py', 'qt_preflight.py', 'dragon_tasks.py']) {
+    await assert.rejects(access(`${out}/runtime/${name}`), { code: 'ENOENT' });
   }
   const preload = await readFile(`${out}/preload.cjs`, 'utf8');
-  assert.match(preload, /startPlayer: \(\) => .*invoke\("pet:start-player"\)/);
-  assert.match(preload, /stopPlayer: \(\) => .*invoke\("pet:stop-player"\)/);
+  assert.doesNotMatch(preload, /startPlayer|stopPlayer|pet:(?:start|stop)-player/);
   assert.match(preload, /importPackages: \(\) => .*invoke\(['"]pet:pets-importPackages['"]\)/);
   assert.doesNotMatch(preload, /importPackages: \([^)]/);
 });
@@ -243,15 +240,35 @@ test('compiled pet workspace persists isolated metadata and preload has only fix
   } finally { if(child.exitCode===null && child.signalCode===null) child.kill('SIGKILL'); await exit; await rm(root,{recursive:true,force:true}); }
 });
 
-test('compiled instance lifecycle owns isolated synthetic workers and retains the three-slot boundary', async () => {
-  const { mkdtemp, rm, copyFile } = await import('node:fs/promises');
+test('compiled startup launches one default owned window and retains the three-slot boundary', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
   const root = await mkdtemp(join(await realpath(tmpdir()), 'pet-compiled-lifecycle-'));
-  const worker = join(root, 'behavior.py');
-  await copyFile(resolve('apps/app-service/test/fixtures/player-fixture.py'), worker);
   const child = fork(createRequire(resolve('apps/desktop/package.json')).resolve('@pet/app-service'), [], {execArgv:[],stdio:['ignore','ignore','ignore','ipc']});
   const exit = new Promise(r => child.once('exit', code => r(code)));
+  const video = process.platform === 'darwin';
+  const windows = new Map(), commands = [], problems = [];
+  child.on('message', value => {
+    if (value.type !== 'workspace-video-command') return;
+    const { id, seq, epoch, op } = value;
+    commands.push(value);
+    let result;
+    if (!video) problems.push('video requested on unsupported platform');
+    if (op === 'start') {
+      if (windows.has(id) || windows.size >= 3) problems.push('unowned or duplicate allocation');
+      windows.set(id, seq);
+      result = 'running';
+    } else if (op === 'stop') {
+      windows.delete(id);
+      result = 'stopped';
+    } else {
+      if (!windows.has(id) || windows.get(id) !== epoch) problems.push('stale window command');
+      if (op === 'task') return;
+      result = 'applied';
+    }
+    child.send({ type: 'workspace-video-result', version: 1, id, seq, result });
+  });
   try {
     const ready = new Promise((r,reject) => {
       const timer=setTimeout(()=>reject(Error('startup_timeout')),5000);
@@ -261,8 +278,8 @@ test('compiled instance lifecycle owns isolated synthetic workers and retains th
     const token=randomBytes(32).toString('hex');
     const pkg={id:'local.development.longmei',version:'0.0.0-dev'};
     child.send({type:'bootstrap',version:1,token,workerPath:`${out}/runtime/worker.py`,guardianPath:`${out}/runtime/guardian.py`,python:process.env.PET_PYTHON,
-      player:{workerPath:worker,config:{source:root,assets:root,profileRoot:join(root,'sessions')}},
-      workspace:{root:join(root,'workspace'),catalog:[{...pkg,name:'合成开发角色'}]}});
+      ...(video ? { workspaceVideo: true } : {}),
+      workspace:{root:join(root,'workspace'),catalog:[{...pkg,name:'合成开发角色',launchable:video}]}});
     const message=await ready;assert.equal(message.type,'ready');
     const base=`http://127.0.0.1:${message.port}/v1/pets`;
     const headers={authorization:`Bearer ${token}`,'content-type':'application/json'};
@@ -270,19 +287,24 @@ test('compiled instance lifecycle owns isolated synthetic workers and retains th
       const response=await fetch(`${base}${action?`/${action}`:''}`,{method:action?'POST':'GET',headers,...(action?{body:JSON.stringify(input)}:{}),signal:AbortSignal.timeout(5000)});
       return {status:response.status,value:await response.json()};
     };
-    const ids=[];
-    for(let revision=0;revision<4;revision++) {
+    const initial=await request('');
+    assert.equal(initial.status,200);
+    assert.equal(initial.value.workspace.revision,video?1:0);
+    assert.equal(initial.value.workspace.instances.length,video?1:0);
+    if(video) assert.equal(initial.value.workspace.instances[0].autoStartOnLaunch,true);
+    const ids=initial.value.workspace.instances.map(pet=>pet.id);
+    for(let revision=ids.length;revision<4;revision++) {
       const added=await request('add',{expectedRevision:revision,package:pkg});assert.equal(added.status,200);
       ids.push(added.value.workspace.instances[revision].id);
     }
     const disk=await readFile(join(root,'workspace','workspace-state.json'));
     const start=id=>request('start',{expectedRevision:4,id});
-    // Other OSes exercise the actual entry-point's rejection, never pretend Qt is portable.
-    if(process.platform!=='darwin') {
+    // Without a macOS window host the instance remains non-launchable.
+    if(!video) {
       const blocked=await start(ids[0]);assert.equal(blocked.status,409);assert.equal(blocked.value.error,'package-unavailable');
       assert.equal((await request('')).value.workspace.instances[0].phase,'not-connected');
     } else {
-      for(const id of ids.slice(0,3)) assert.equal((await start(id)).status,200);
+      for(const id of ids.slice(1,3)) assert.equal((await start(id)).status,200);
       const full=await start(ids[3]);assert.equal(full.status,409);assert.equal(full.value.error,'limit');
       const waitPhase=async(id,wanted)=>{
         const deadline=Date.now()+7000;
@@ -297,17 +319,13 @@ test('compiled instance lifecycle owns isolated synthetic workers and retains th
       const applied=await request('apply-behavior',{expectedRevision:4,id:ids[0]});
       assert.equal(applied.status,200);assert.equal(applied.value.workspace.revision,4);
       assert.deepEqual(applied.value.workspace.instances[0].behavior,{status:'applied',scheduledActivity:true,movement:true});
-      const pids=[];
-      for(const id of ids.slice(0,3)) {
-        const sessions=await readdir(join(root,'sessions','instances',id));assert.equal(sessions.length,1);
-        const preferences=JSON.parse(await readFile(join(root,'sessions','instances',id,sessions[0],'bootstrap-preferences.json'),'utf8'));
-        assert.deepEqual(preferences,{size:256,hideInFullscreen:true,scheduledActivity:true,movement:true});
-        pids.push(Number(await readFile(join(root,'sessions','instances',id,sessions[0],'worker.pid'),'utf8')));
+      assert.deepEqual([...windows.keys()], ids.slice(0,3));
+      for (const command of commands.filter(value => value.op === 'start')) {
+        assert.deepEqual(command.preferences, {size:256,hideInFullscreen:true,scheduledActivity:true,movement:true});
       }
-      assert.equal(new Set(pids).size,3);
       const active=await request('delete',{expectedRevision:4,id:ids[0]});assert.equal(active.value.error,'active');
       assert.equal((await request('stop',{expectedRevision:4,id:ids[0]})).status,200);
-      await waitPhase(ids[0],'stopped');assert.throws(()=>process.kill(pids[0],0));
+      await waitPhase(ids[0],'stopped');assert.equal(windows.has(ids[0]),false);
       assert.equal((await start(ids[3])).status,200);await waitPhase(ids[3],'running');
       const listing=(await request('')).value;assert.doesNotMatch(JSON.stringify(listing),/worker\.pid|profileRoot|Bearer|\/sessions\//);
     }
@@ -316,15 +334,10 @@ test('compiled instance lifecycle owns isolated synthetic workers and retains th
     for(const action of ['start','stop'])assert.ok(preload.includes(`pet:pets-${action}`));
     child.send({type:'shutdown'});
     assert.equal(await Promise.race([exit,new Promise((_,reject)=>{const timer=setTimeout(()=>reject(Error('shutdown_timeout')),9000);timer.unref();})]),0);
-    // Successful shutdown confirms all owned worker processes and writer lease are gone.
     await assert.rejects(access(join(root,'workspace','.workspace-writer.lock')),{code:'ENOENT'});
-    if(process.platform==='darwin')for(const id of ids) {
-      const sessions=await readdir(join(root,'sessions','instances',id));
-      for(const session of sessions) {
-        const pid=Number(await readFile(join(root,'sessions','instances',id,session,'worker.pid'),'utf8'));
-        assert.throws(()=>process.kill(pid,0));
-      }
-    }
+    assert.deepEqual([...windows.keys()], []);
+    assert.deepEqual(problems, []);
+    assert.equal(commands.filter(value => value.op === 'start').length, video ? 4 : 0);
   } finally {
     if(child.exitCode===null && child.signalCode===null)child.kill('SIGKILL');
     await exit;await rm(root,{recursive:true,force:true});
@@ -385,6 +398,44 @@ test('native model helper is packaged and rejects malformed stdin before any Key
 });
 
 
+test('compiled workspace data action uses a single fixed no-argument IPC method', async () => {
+  const { runInNewContext } = await import('node:vm');
+  let bridge;
+  const calls = [];
+  runInNewContext(await readFile(`${out}/preload.cjs`, 'utf8'), {
+    process: { platform: process.platform }, require: name => {
+      assert.equal(name, 'electron');
+      return { contextBridge: { exposeInMainWorld: (_name, value) => { bridge = value; } },
+        ipcRenderer: { invoke(...args) { calls.push(args); return Promise.resolve('opened'); } } };
+    },
+  });
+  assert.deepEqual(calls, []);
+  assert.equal(await bridge.openWorkspaceData('/ignored', { command: 'ignored' }), 'opened');
+  assert.deepEqual(calls, [['pet:open-workspace-data']]);
+});
+
+test('compiled legacy handoff exposes one macOS-only method and one scoped argument', async () => {
+  const { runInNewContext } = await import('node:vm');
+  const preload = await readFile(`${out}/preload.cjs`, 'utf8');
+  for (const platform of ['darwin', 'win32', 'linux']) {
+    let bridge;
+    const calls = [];
+    runInNewContext(preload, {
+      process: { platform }, require: name => {
+        assert.equal(name, 'electron');
+        return { contextBridge: { exposeInMainWorld: (_name, value) => { bridge = value; } },
+          ipcRenderer: { invoke(...args) { calls.push(args); return Promise.resolve({ ok: false, error: 'cancelled' }); } } };
+      },
+    });
+    assert.deepEqual(calls, []);
+    if (platform !== 'darwin') assert.equal(bridge.legacyCharacterHandoff, undefined);
+    else {
+      assert.deepEqual(await bridge.legacyCharacterHandoff({ action: 'select', petID: 'development-1' }, '/forged/path'), { ok: false, error: 'cancelled' });
+      assert.deepEqual(calls, [['pet:legacy-character-handoff', { action: 'select', petID: 'development-1' }]]);
+    }
+  }
+});
+
 test('compiled sandbox preload exposes only fixed model management, discovery and connection test actions on macOS only', async () => {
   const { runInNewContext } = await import('node:vm');
   const preload = await readFile(`${out}/preload.cjs`, 'utf8');
@@ -443,9 +494,9 @@ test('compiled character bridge exposes only fixed identity, context, memory and
       ipcRenderer: { invoke(...args) { calls.push(args); return Promise.resolve({ ok: false }); } },
     }) });
     if (platform !== 'darwin') { assert.equal(bridge.characters, undefined); continue; }
-    assert.deepEqual(Object.keys(bridge.characters), ['readIdentity', 'saveIdentity', 'restoreIdentity', 'setIdentityChatShare', 'localChatContext', 'searchKnowledge', 'readMemories', 'readMemoryHistory', 'editMemory', 'restoreMemory', 'selectKnowledgeFile', 'addKnowledgeBatch', 'addMemory', 'confirmMemory', 'withdrawMemory', 'deleteMemory', 'setMemoryChatShare', 'readGoals', 'addGoal', 'editGoal', 'deleteGoal', 'setGoalChatShare']);
+    assert.deepEqual(Object.keys(bridge.characters), ['readIdentity', 'saveIdentity', 'restoreIdentity', 'setIdentityChatShare', 'localChatContext', 'searchKnowledge', 'readMemories', 'readMemoryHistory', 'editMemory', 'restoreMemory', 'selectKnowledgeFile', 'addKnowledgeBatch', 'saveChatMemory', 'addMemory', 'confirmMemory', 'withdrawMemory', 'deleteMemory', 'setMemoryChatShare', 'readGoals', 'addGoal', 'editGoal', 'deleteGoal', 'setGoalChatShare']);
     const input = { petID: 'pet-synthetic' };
-    for (const action of ['readIdentity', 'saveIdentity', 'restoreIdentity', 'setIdentityChatShare', 'localChatContext', 'searchKnowledge', 'readMemories', 'readMemoryHistory', 'editMemory', 'restoreMemory', 'addKnowledgeBatch', 'addMemory', 'confirmMemory', 'withdrawMemory', 'deleteMemory', 'setMemoryChatShare', 'readGoals', 'addGoal', 'editGoal', 'deleteGoal', 'setGoalChatShare']) {
+    for (const action of ['readIdentity', 'saveIdentity', 'restoreIdentity', 'setIdentityChatShare', 'localChatContext', 'searchKnowledge', 'readMemories', 'readMemoryHistory', 'editMemory', 'restoreMemory', 'addKnowledgeBatch', 'saveChatMemory', 'addMemory', 'confirmMemory', 'withdrawMemory', 'deleteMemory', 'setMemoryChatShare', 'readGoals', 'addGoal', 'editGoal', 'deleteGoal', 'setGoalChatShare']) {
       await bridge.characters[action](input);
       assert.deepEqual(calls.pop(), [`pet:characters-${action}`, input]);
     }
@@ -469,4 +520,45 @@ test('compiled preload exposes only fixed online chat methods on macOS', async (
     assert.deepEqual(calls, [['pet:chat-models'], ['pet:chat-send', {}], ['pet:chat-cancel', 'synthetic']]);
   }
   assert.doesNotMatch(preload, /\/v1\/chat|127\.0\.0\.1|mcred-v1/);
+});
+
+test('workspace video stages its fixed surface without media or workspace preload access', async () => {
+  const pkg = JSON.parse(await readFile('package.json', 'utf8'));
+  const root = resolve(out, 'video');
+  assert.match(pkg.scripts['dev:desktop'], /run-pet-video-preview\.mjs --workspace$/);
+  assert.match(pkg.scripts['dev:desktop:codex'], /run-pet-video-preview\.mjs --workspace --launch-codex$/);
+  const main = await readFile(resolve(out, 'main.cjs'), 'utf8');
+  assert.match(main, /PET_WORKSPACE_VIDEO_DIR/);
+  assert.doesNotMatch(main, /PET_PLAYER_SOURCE|PET_PLAYER_ASSETS|player_worker\.py|PySide6/);
+  assert.doesNotMatch(await readFile(resolve(out, 'preload.cjs'), 'utf8'), /pet-video|workspace-video|PET_WORKSPACE_VIDEO_DIR/);
+  const probe = resolve(out, 'video-fullscreen');
+  if (process.platform !== 'darwin') {
+    await assert.rejects(access(root), { code: 'ENOENT' });
+    await assert.rejects(access(probe), { code: 'ENOENT' });
+    return;
+  }
+  const invalid = spawnSync(probe, ['--synthetic-invalid'], { env: { LC_ALL: 'C' }, timeout: 5000, maxBuffer: 16, killSignal: 'SIGKILL' });
+  assert.ifError(invalid.error);
+  assert.equal(invalid.status, 64);
+  assert.equal(invalid.stdout.length + invalid.stderr.length, 0);
+  assert.deepEqual((await readdir(root)).sort(), ['index.html', 'preload.cjs', 'quota_source.py', 'renderer.js', 'style.css']);
+  assert.match(await readFile(resolve(root, 'preload.cjs'), 'utf8'), /exposeInMainWorld\("petVideoPreview"/);
+});
+
+
+test('the macOS service build carries the pinned SDK worker only on the trusted side', async () => {
+  const service = resolve('apps/app-service/dist');
+  const worker = resolve(service, 'harness-worker.mjs');
+  for (const name of ['main.cjs', 'preload.cjs']) assert.doesNotMatch(await readFile(resolve(out, name), 'utf8'), /dsh-sdk-client|PET_HARNESS_TURN_TOKEN/);
+  assert.match(await readFile(resolve(service, 'entry.cjs'), 'utf8'), /createHarnessRuntime[\s\S]*harness-worker\.mjs/);
+  if (process.platform !== 'darwin') {
+    await assert.rejects(access(worker), { code: 'ENOENT' });
+    return;
+  }
+  assert.deepEqual(await readFile(worker), await readFile('apps/app-service/src/agent/harness-worker.mjs'));
+  // Direct invocation without its owning IPC channel cannot start the SDK.
+  const rejected = spawnSync(process.execPath, [worker], { timeout: 2000, maxBuffer: 1024 });
+  assert.ifError(rejected.error);
+  assert.equal(rejected.status, 1);
+  assert.equal(rejected.stdout.length + rejected.stderr.length, 0);
 });

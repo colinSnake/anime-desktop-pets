@@ -2,7 +2,7 @@ import { useEffect, useId, useState } from 'react';
 import { isRecordInput, MEMORY_LIMIT, type Memory } from '../../../../packages/contracts/src/character-records.ts';
 import { memoryChangedOnDisk, memoryEditInput, memoryMode, memoryValue, type MemoryForm, type MemoryMode, type MemorySession } from './character-record-editors.ts';
 import { RecordPanelState, useRecordState, type RecordInstance } from './RecordPanelState.tsx';
-import { DisabledAction, EmptyState, InlineFooter, ModulePage, OptionRow, PageTabs, Panel, PreviewNotice, Split, ToggleRow, type Draft } from './WorkspacePanels.tsx';
+import { DisabledAction, Disclosure, EmptyState, InlineFooter, ModulePage, OptionRow, PageTabs, Panel, PreviewNotice, type Draft } from './WorkspacePanels.tsx';
 
 import { ChatShareControl } from './ChatShareControl.tsx';
 import { RecordDeleteConfirmation } from './RecordDeleteConfirmation.tsx';
@@ -75,16 +75,19 @@ function MemoryList({ mode, status, state, disabled, session, active }: {
             onClick={() => { void session?.review(memory.id, pending ? 'confirmMemory' : 'withdrawMemory'); }}>{action}</button>
           {session && <button className="button secondary" type="button" disabled={disabled || !!editing}
             aria-label={`编辑，第 ${index + 1} 条`} onClick={() => session.startEdit(memory.id)}>编辑</button>}
-          {session && <button className="button secondary" type="button" aria-expanded={confirming} aria-label={`删除${kind}，第 ${index + 1} 条`}
-            disabled={disabled || editing?.id === memory.id} onClick={() => confirming ? session.cancelDelete() : session.requestDelete(memory.id)}>删除{kind}</button>}
         </OptionRow>
-        {session && confirming && <RecordDeleteConfirmation kind={kind} disabled={disabled || editing?.id === memory.id}
+        {session && <Disclosure title={pending ? '历史与删除' : '历史、授权与删除'}>
+          <div className="module-actions"><button className="button secondary" type="button" aria-expanded={confirming} aria-label={`删除${kind}，第 ${index + 1} 条`}
+            disabled={disabled || editing?.id === memory.id} onClick={() => confirming ? session.cancelDelete() : session.requestDelete(memory.id)}>删除{kind}</button>
+            <MemoryHistory key={`${snapshot?.petID}:${session.recordGeneration}`} session={session} memory={memory} index={index} disabled={disabled} editing={!!editing} />
+          </div>
+          {confirming && <RecordDeleteConfirmation kind={kind} disabled={disabled || editing?.id === memory.id}
           cancel={() => session.cancelDelete()} confirm={() => { void session.confirmDelete(memory.id); }} />}
-        {session && !pending && <ChatShareControl key={`share:${session.petID}:${session.recordGeneration}`} enabled={memory.chatShare === true}
+          {!pending && <ChatShareControl key={`share:${session.petID}:${session.recordGeneration}`} enabled={memory.chatShare === true}
           locked={disabled || confirming || !active} canGrant={editing?.id !== memory.id && !isExpired(memory)}
           scope={mode === 'knowledge' ? '仅在相关且仍有效时授权此条知识的正文和依据' : '仅在相关时授权此条个人记忆的正文'}
           onChange={value => { void session.setChatShare(memory.id, value); }} />}
-        {session && <MemoryHistory key={`${snapshot?.petID}:${session.recordGeneration}`} session={session} memory={memory} index={index} disabled={disabled} editing={!!editing} />}
+        </Disclosure>}
       </section>;
     }) : <EmptyState title={snapshot ? pending ? '没有待确认资料' : '没有已确认资料' : pending ? '尚未读取待确认资料' : '尚未读取已确认资料'}
       detail={pending ? '加入的记忆先进入这里，由你逐条确认。' : '撤回确认会把这条资料移回待确认。'} />}
@@ -114,7 +117,7 @@ export function MemoryPage({ mode, onMode, personal, knowledge, connected = fals
       petID: snapshot.petID, expectedRevision: snapshot.revision, draft: memoryValue(draft.value, tab),
     });
     const title = showEdit ? isKnowledge ? '编辑角色知识' : '编辑个人记忆' : isKnowledge ? '添加角色知识' : '添加个人记忆';
-    return <Split main={<Panel title={title} description={showEdit ? '内容变更后会回到待确认。' : isKnowledge ? '为角色补充有依据、可核对的资料。' : '记录一条希望角色记住的事实、偏好或经历。'}>
+    const fields = <>
       <MemoryFields draft={draft} mode={tab} disabled={showEdit ? !!state.busy : locked} />
       {showEdit ? <InlineFooter hint={invalidDate ? '请用 YYYY-MM-DD 填写有效期。' : memoryChangedOnDisk(editing, snapshot) ?
         '已保存的资料有更新或已不可用。可以复制草稿，再放弃编辑。' : '内容修改后需要重新确认。'}>
@@ -127,20 +130,22 @@ export function MemoryPage({ mode, onMode, personal, knowledge, connected = fals
         {editing && <p className="module-copy">另一分类有正在编辑的草稿。请先在该分类保存或放弃编辑。</p>}
         {isKnowledge && <KnowledgeImportPanel session={session} state={state} active={mode === tab} locked={locked} />}
       </>}
-    </Panel>} aside={<>
+    </>;
+    return <>
+      {showEdit ? <Panel title={title} focusHeading>{fields}</Panel> : <Disclosure title={title}>{fields}</Disclosure>}
       {isKnowledge && mode === tab && <KnowledgeSearchPanel key={`${session?.petID}:${session?.recordGeneration}`}
         session={session} locked={!connected || locked} />}
       <MemoryList mode={tab} active={mode === tab} status="candidate" state={state} disabled={locked} session={session} />
       <MemoryList mode={tab} active={mode === tab} status="confirmed" state={state} disabled={locked} session={session} />
-    </>} />;
+    </>;
   }
-  return <ModulePage title="记忆" description="分开管理个人记忆与角色知识，先审阅，再决定留存。" preview={!connected}>
+  return <ModulePage title="记忆" description="分开管理个人记忆与角色知识，先审阅，再决定留存。">
     {connected ? <RecordPanelState state={state} instance={instance} reload={session ? () => { void session.load(); } : undefined} /> :
       <PreviewNotice>可试填两类草稿；现有记忆、审核与导入尚未连接，草稿不会保存或在线分享。</PreviewNotice>}
     <PageTabs label="记忆类别" selected={mode} onSelect={next => { if (next !== mode) session?.cancelDelete(); onMode(next); }} items={[
       { id: 'personal', title: '个人记忆', content: editor('personal', personal) },
       { id: 'knowledge', title: '角色知识', content: editor('knowledge', knowledge) },
     ]} />
-    <Panel title="审核偏好"><ToggleRow label="自动审核" detail="当前只接受手动审核。确认资料不会自动开启在线聊天授权。" /></Panel>
+    <p className="module-copy">确认只影响本机资料。在线聊天授权需逐条开启。</p>
   </ModulePage>;
 }

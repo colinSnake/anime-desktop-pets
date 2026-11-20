@@ -1,4 +1,4 @@
-import { constants } from 'node:fs';
+import { constants, renameSync } from 'node:fs';
 import { open, lstat, mkdir, rename, unlink } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { isAbsolute, join, parse, resolve, sep } from 'node:path';
@@ -7,12 +7,12 @@ import { definition, revision, shape, theme, type PetError, type Theme } from '.
 import type { PetRegistry } from './pet-registry.ts';
 
 export class WorkspaceError extends Error { constructor(readonly code: PetError) { super(code); } }
-export type WorkspaceState = { schemaVersion: 1; revision: number; theme: Theme; registry: PetRegistry };
+export type WorkspaceState = { schemaVersion: 1; revision: number; theme: Theme; registry: PetRegistry; autoStartConfigured?: true };
 const empty = (): WorkspaceState => ({ schemaVersion: 1, revision: 0, theme: 'system', registry: { schemaVersion: 1, instances: [] } });
 const limit = 128 * 1024;
 const missing = (error: unknown) => !!error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT';
 function decode(value: unknown): WorkspaceState {
-  if (!shape(value, ['schemaVersion', 'revision', 'theme', 'registry']) || value.schemaVersion !== 1 || !revision(value.revision) || !theme(value.theme)) throw new WorkspaceError('storage');
+  if (!shape(value, ['schemaVersion', 'revision', 'theme', 'registry', 'autoStartConfigured']) || value.schemaVersion !== 1 || !revision(value.revision) || !theme(value.theme) || (Object.hasOwn(value, 'autoStartConfigured') && value.autoStartConfigured !== true)) throw new WorkspaceError('storage');
   const r = value.registry;
   if (!shape(r, ['schemaVersion', 'instances']) || r.schemaVersion !== 1 || !Array.isArray(r.instances) || r.instances.length > 32 || !r.instances.every(definition) || new Set(r.instances.map(i => i.id)).size !== r.instances.length) throw new WorkspaceError('storage');
   return value as WorkspaceState;
@@ -62,7 +62,7 @@ export class WorkspaceStore {
       return decode(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, bytesRead))));
     } finally { await handle?.close(); }
   }
-  async write(state: WorkspaceState) {
+  async write(state: WorkspaceState, requireCurrent?: () => void) {
     decode(state);
     await this.acquire();
     const file = join(this.root, 'workspace-state.json');
@@ -78,7 +78,12 @@ export class WorkspaceStore {
       await this.beforeCommit?.();
       await this.directory();
       await this.read();
-      await rename(tmp, file);
+      if (requireCurrent) {
+        // Only the final metadata operation is synchronous, so a service-side
+        // stop/pause cannot be delivered between the epoch guard and the commit.
+        requireCurrent();
+        renameSync(tmp, file);
+      } else await rename(tmp, file);
     } finally { await handle?.close(); await unlink(tmp).catch(e => { if (!missing(e)) throw e; }); }
   }
   async close() {

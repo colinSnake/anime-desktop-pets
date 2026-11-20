@@ -5,7 +5,7 @@ import { emptyGoal, goalChangedOnDisk, goalFormOf, goalValue, type GoalForm, typ
 import { ChatShareControl } from './ChatShareControl.tsx';
 import { RecordDeleteConfirmation } from './RecordDeleteConfirmation.tsx';
 import { RecordPanelState, useRecordState, type RecordInstance } from './RecordPanelState.tsx';
-import { Choice, DisabledAction, Disclosure, EmptyState, Field, InlineFooter, ModulePage, OptionRow, PageTabs, Panel, PreviewNotice, Split, patch, type Draft } from './WorkspacePanels.tsx';
+import { Choice, DisabledAction, Disclosure, EmptyState, Field, InlineFooter, ModulePage, OptionRow, PageTabs, Panel, PreviewNotice, patch, type Draft } from './WorkspacePanels.tsx';
 
 export type GoalMode = 'capabilities' | 'plan';
 const statuses = goalStatuses.map(value => ({ value, label: value }));
@@ -30,7 +30,6 @@ function GoalList({ records, locked, draft, deleteID, session }: {
           <p className="module-copy">此目标暂无步骤。</p>}
       </Disclosure>
     </section>) : <EmptyState title={records ? '还没有已保存的目标' : '尚未读取目标'} detail="这里显示各目标已保存的进度。" />}
-    <InlineFooter hint="当前可单独授权目标；普通在线聊天尚未开放。"><DisabledAction>建议步骤</DisabledAction></InlineFooter>
   </Panel>;
 }
 
@@ -39,7 +38,7 @@ function GoalEditor({ draft, records, connected, locked, stale, canSave, save, d
 }) {
   const editStep = (key: number, changes: Partial<Pick<GoalStepForm, 'text' | 'done'>>) => draft.update(previous => ({ ...previous, changed: true,
     steps: previous.steps.map(step => step.key === key ? { ...step, ...changes } : step) }));
-  return <Split main={<Panel title={draft.value.editing ? '编辑目标' : '目标草稿'} description="写下想完成的事，规划小步骤，并手动记录进度。">
+  const fields = <>
     {stale && <p role="alert" className="error">已保存的目标有更新或已不可用。草稿仍在，请先核对；放弃草稿后可重新打开已保存版本。</p>}
     <fieldset className="module-stack module-form" disabled={locked}>
       <Field label="目标名称" placeholder="例如：每周整理一次学习笔记" limit={120} value={draft.value.title} onChange={title => patch(draft, { title, changed: true })} />
@@ -63,28 +62,32 @@ function GoalEditor({ draft, records, connected, locked, stale, canSave, save, d
         <button type="button" className="button primary" disabled={!canSave} onClick={save}>保存目标</button>
       </> : <DisabledAction primary>保存目标</DisabledAction>}
     </InlineFooter>
-  </Panel>} aside={<GoalList records={records} locked={locked} draft={draft} deleteID={deleteID} session={session} />} />;
+  </>;
+  return <>
+    {draft.value.editing ? <Panel title="编辑目标" focusHeading>{fields}</Panel> : <Disclosure title="添加目标">{fields}</Disclosure>}
+    <GoalList records={records} locked={locked} draft={draft} deleteID={deleteID} session={session} />
+  </>;
 }
 
-const capabilities = [
-  ['在线对话', '当前聊天页支持编辑消息草稿和查看会话；正式发送尚未接入。'],
-  ['语音识别与朗读', '尚未接入语音运行时，不会探测麦克风或语音模型。'],
-  ['直播互动', '尚未连接直播平台，不会读取弹幕或发送内容。'],
-  ['任务跟随', '尚未接入任务来源，不会读取旧任务或启动后台执行。'],
-] as const;
 function Capabilities({ workspace, connected }: { workspace?: WorkspaceData; connected: boolean }) {
   const linkage = workspace?.linkage;
   const label = linkage ? { active: '未暂停', pausing: '正在暂停', paused: '已暂停', 'stop-unconfirmed': '停止未确认' }[linkage] : '尚未读取';
-  return <Split main={<Panel title="工作区能力" description="查看哪些功能已经接入，以及它们可以访问什么。">
-    <OptionRow title="自有桌宠" detail={workspace ? `当前工作区有 ${workspace.instances.length} 个实例配置；分别在「我的桌宠」查看运行状态。` : '尚未读取当前工作区的实例与暂停状态。'}><span className="badge">{label}</span></OptionRow>
-    <OptionRow title="本机记忆与目标回顾" detail={connected ? '可管理所选实例的记忆和目标；聊天中的显式本机查询只读取当前聊天角色。' : '当前无法读取本机角色资料。'}><span className="badge">{connected ? '手动管理' : '尚未接入'}</span></OptionRow>
-    {capabilities.map(([title, detail]) => <OptionRow title={title} detail={detail} key={title}><span className="badge">尚未接入</span></OptionRow>)}
-  </Panel>} aside={<Panel title="角色行动边界"><p className="module-copy">目标用于手动记录与回顾。角色不会自行改写计划、执行任务或使用需要单独授权的服务。</p></Panel>} />;
+  return <>
+    <Panel title="工作区状态">
+      <OptionRow title="桌宠联动" detail={workspace ? `已配置 ${workspace.instances.length} 个实例。` : '正在等待工作区状态。'}><span className="badge">{label}</span></OptionRow>
+      <OptionRow title="本机角色资料" detail={connected ? '可管理当前实例的记忆和目标。' : '当前工作区无法读取角色资料。'} />
+    </Panel>
+    <Disclosure title="功能与授权范围">
+      <OptionRow title="在线文字聊天" detail="使用已保存的模型路由；身份、记忆、知识及目标须分别授权。" />
+      <OptionRow title="气泡播报" detail="可在兼容的 Mac 上为本次会话启用；麦克风和语音对话尚未接入。" />
+      <OptionRow title="任务与直播" detail="Codex 任务阶段可驱动自有桌宠动画；直播平台尚未接入。目标计划仅手动更新。" />
+    </Disclosure>
+  </>;
 }
 
-export function GoalsPage({ mode, onMode, draft: fallback, workspace, connected = false, instance, session }: {
+export function GoalsPage({ mode, onMode, draft: fallback, workspace, connected = false, instance, session, planOnly = false }: {
   mode: GoalMode; onMode(mode: GoalMode): void; draft: Draft<GoalForm>; workspace?: WorkspaceData;
-  connected?: boolean; instance?: RecordInstance; session?: GoalSession;
+  connected?: boolean; instance?: RecordInstance; session?: GoalSession; planOnly?: boolean;
 }) {
   const state = useRecordState(session), snapshot = state?.snapshot;
   useEffect(() => () => session?.cancelDelete(), [session]);
@@ -94,14 +97,16 @@ export function GoalsPage({ mode, onMode, draft: fallback, workspace, connected 
   const input = { petID: snapshot?.petID, expectedRevision: snapshot?.revision, draft: goalValue(draft.value) };
   const canSave = !!snapshot && !locked && !stale && draft.value.changed && (draft.value.editing ?
     isRecordInput('editGoal', { ...input, id: draft.value.editing.id }) : snapshot.records.length < GOAL_LIMIT && isRecordInput('addGoal', input));
-  return <ModulePage title="能力与目标" description="查看角色能做的事，整理你想和它一起跟进的计划。" preview={!connected}>
+  const plan = <>
+    {connected && <RecordPanelState state={state} instance={instance} reload={session ? () => { void session.load(); } : undefined} />}
+    <GoalEditor draft={draft} records={snapshot?.records} locked={locked} stale={stale} connected={connected} canSave={canSave} deleteID={state?.deleteID} session={session} save={() => { void session?.save(); }} />
+  </>;
+  if (planOnly) return <ModulePage title="目标" description="查看已保存的计划，手动更新目标和步骤进度。">{plan}</ModulePage>;
+  return <ModulePage title="能力与目标" description="查看角色能做的事，整理你想和它一起跟进的计划。">
     {!connected && <PreviewNotice>目标和步骤可试填；尚未接入角色资料，草稿不会改变角色行为。</PreviewNotice>}
     <PageTabs label="能力与目标" selected={mode} onSelect={next => { if (next !== mode) session?.cancelDelete(); onMode(next); }} items={[
       { id: 'capabilities', title: '可用能力', content: <Capabilities workspace={workspace} connected={connected} /> },
-      { id: 'plan', title: '目标计划', content: <>
-        {connected && <RecordPanelState state={state} instance={instance} reload={session ? () => { void session.load(); } : undefined} />}
-        <GoalEditor draft={draft} records={snapshot?.records} locked={locked} stale={stale} connected={connected} canSave={canSave} deleteID={state?.deleteID} session={session} save={() => { void session?.save(); }} />
-      </> },
+      { id: 'plan', title: '目标计划', content: plan },
     ]} />
   </ModulePage>;
 }

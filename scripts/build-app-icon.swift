@@ -192,21 +192,7 @@ func main() throws {
     """
     try (svg + "\n").write(to: directory.appendingPathComponent("app-icon.svg"), atomically: true, encoding: .utf8)
     try png(side: 1024).write(to: directory.appendingPathComponent("app-icon.png"))
-    let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("anime-pets-icon-" + UUID().uuidString)
-    try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: temporary) }
-    let iconset = temporary.appendingPathComponent("AppIcon.iconset")
-    try FileManager.default.createDirectory(at: iconset, withIntermediateDirectories: true)
-    for size in [16, 32, 128, 256, 512] {
-        try png(side: size).write(to: iconset.appendingPathComponent("icon_\(size)x\(size).png"))
-        try png(side: size * 2).write(to: iconset.appendingPathComponent("icon_\(size)x\(size)@2x.png"))
-    }
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/iconutil")
-    process.arguments = ["-c", "icns", iconset.path, "-o", directory.appendingPathComponent("AppIcon.icns").path]
-    try process.run(); process.waitUntilExit()
-    guard process.terminationStatus == 0 else { throw NSError(domain: "AppIcon", code: Int(process.terminationStatus)) }
-    print("Exported original App icon: SVG, 1024px PNG and multi-size ICNS → \(directory.path)")
+    print("Exported original App icon: SVG and 1024px PNG → \(directory.path)")
 }
 
 do { try main() } catch { fputs("App icon: \(error)\n", stderr); exit(1) }

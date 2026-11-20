@@ -9,9 +9,10 @@ export type PackageImportResult = { ok: true; items: { name: string; status: 'ad
 export type AppliedDisplayPreferences = { size: number; hideInFullscreen: boolean; visible: boolean };
 export type BehaviorPreferences = Pick<PetPreferences, 'scheduledActivity' | 'movement'>;
 export type RuntimeBehaviorState = ({ status: 'applied' } & BehaviorPreferences) | { status: 'failed' };
+export type RuntimeMenuFeedback = 'apply-failed' | 'save-failed' | 'rollback-failed';
 export type RuntimePositionFeedback = { x: number; y: number; status: 'saving' | 'saved' | 'failed' };
 export type LinkageState = 'active' | 'pausing' | 'paused' | 'stop-unconfirmed';
-export type WorkspaceData = { revision: number; theme: Theme; catalog: CatalogEntry[]; instances: (PetDefinition & { phase: PetPhase; applied?: AppliedDisplayPreferences; behavior?: RuntimeBehaviorState; positionFeedback?: RuntimePositionFeedback })[]; maximumRunning: 3; linkage: LinkageState };
+export type WorkspaceData = { playerMode?: 'video'; revision: number; theme: Theme; catalog: CatalogEntry[]; instances: (PetDefinition & { phase: PetPhase; applied?: AppliedDisplayPreferences; behavior?: RuntimeBehaviorState; positionFeedback?: RuntimePositionFeedback; menuFeedback?: RuntimeMenuFeedback })[]; maximumRunning: 3; linkage: LinkageState };
 export const PET_ERRORS = ['unavailable', 'invalid', 'conflict', 'not-found', 'limit', 'active', 'busy', 'storage', 'package-unavailable', 'apply-failed'] as const;
 export type PetError = typeof PET_ERRORS[number];
 export type PetResult = { ok: true; workspace: WorkspaceData } | { ok: false; error: PetError };
@@ -86,12 +87,14 @@ export function isPackageImportResult(v: unknown): v is PackageImportResult {
     (item.status === 'failed' ? item.package === undefined : item.status === 'added' && packageReference(item.package)));
 }
 export function isWorkspaceData(v: unknown): v is WorkspaceData {
-  return shape(v, ['revision', 'theme', 'catalog', 'instances', 'maximumRunning', 'linkage']) && revision(v.revision) && theme(v.theme) && v.maximumRunning === 3 && ['active', 'pausing', 'paused', 'stop-unconfirmed'].includes(String(v.linkage)) && Array.isArray(v.catalog) && v.catalog.length <= 32 && v.catalog.every(catalogEntry) && new Set(v.catalog.map(c => `${c.id}@${c.version}`)).size === v.catalog.length && Array.isArray(v.instances) && v.instances.length <= 32 && v.instances.every(row => {
-    if (!shape(row, ['id', 'package', 'displayName', 'enabled', 'autoStartOnLaunch', 'preferences', 'phase', 'applied', 'behavior', 'positionFeedback'])) return false;
-    const { phase, applied, behavior, positionFeedback, ...d } = row;
+  return shape(v, ['revision', 'theme', 'catalog', 'instances', 'maximumRunning', 'linkage', 'playerMode']) && (v.playerMode === undefined || v.playerMode === 'video') && revision(v.revision) && theme(v.theme) && v.maximumRunning === 3 && ['active', 'pausing', 'paused', 'stop-unconfirmed'].includes(String(v.linkage)) && Array.isArray(v.catalog) && v.catalog.length <= 32 && v.catalog.every(catalogEntry) && new Set(v.catalog.map(c => `${c.id}@${c.version}`)).size === v.catalog.length && Array.isArray(v.instances) && v.instances.length <= 32 && v.instances.every(row => {
+    if (!shape(row, ['id', 'package', 'displayName', 'enabled', 'autoStartOnLaunch', 'preferences', 'phase', 'applied', 'behavior', 'positionFeedback', 'menuFeedback'])) return false;
+    const { phase, applied, behavior, positionFeedback, menuFeedback, ...d } = row;
     return definition(d) && typeof phase === 'string' && ['not-connected', 'stopped', 'starting', 'running', 'stopping', 'failed'].includes(phase) &&
       (applied === undefined || (shape(applied, ['size', 'hideInFullscreen', 'visible']) && Number.isInteger(applied.size) && Number(applied.size) >= 128 && Number(applied.size) <= 384 && typeof applied.hideInFullscreen === 'boolean' && typeof applied.visible === 'boolean')) &&
-      (behavior === undefined || (shape(behavior, ['status']) && behavior.status === 'failed') || (shape(behavior, ['status', 'scheduledActivity', 'movement']) && behavior.status === 'applied' && typeof behavior.scheduledActivity === 'boolean' && typeof behavior.movement === 'boolean')) &&
+      (behavior === undefined || (shape(behavior, ['status']) && behavior.status === 'failed') ||
+        (shape(behavior, ['status', 'scheduledActivity', 'movement']) && behavior.status === 'applied' && typeof behavior.scheduledActivity === 'boolean' && typeof behavior.movement === 'boolean')) &&
+      (menuFeedback === undefined || menuFeedback === 'apply-failed' || menuFeedback === 'save-failed' || menuFeedback === 'rollback-failed') &&
       (positionFeedback === undefined || (shape(positionFeedback, ['x', 'y', 'status']) && Number.isSafeInteger(positionFeedback.x) && Number.isSafeInteger(positionFeedback.y) && Math.abs(Number(positionFeedback.x)) <= 1_000_000 && Math.abs(Number(positionFeedback.y)) <= 1_000_000 && typeof positionFeedback.status === 'string' && ['saving', 'saved', 'failed'].includes(positionFeedback.status)));
   }) && new Set(v.instances.map(row => row.id)).size === v.instances.length;
 }

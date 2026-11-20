@@ -1,5 +1,5 @@
-export type ComposerKey = { key: string; shiftKey: boolean; ctrlKey: boolean; metaKey: boolean; altKey: boolean; isComposing: boolean; keyCode: number };
-/** 原生 textarea 负责选择/粘贴/撤销；仅接管无修饰Enter和Escape。 */
+export type ComposerKey = { key: string; shiftKey: boolean; ctrlKey: boolean; metaKey: boolean; altKey: boolean; isComposing: boolean; repeat?: boolean; keyCode: number };
+/** 普通编辑交给编辑器；仅接管无修饰 Enter 和 Escape。 */
 export class ComposerKeyboard {
  private composing = false;
  private endedAt = -Infinity;
@@ -9,6 +9,6 @@ export class ComposerKeyboard {
   if (this.composing || event.isComposing || event.keyCode === 229 || now - this.endedAt < 10) return 'native';
   if (event.key === 'Escape') return 'blur';
   if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return 'native';
-  return canSend ? 'send' : 'block';
+  return canSend && !event.repeat ? 'send' : 'block';
  }
 }

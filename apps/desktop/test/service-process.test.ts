@@ -1,3 +1,4 @@
+import type { TaskAnimation } from '../../app-service/src/task-animation.ts';
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fork, type ChildProcess } from "node:child_process";
@@ -135,7 +136,7 @@ test("shutdown cancels an in-flight Python probe and reaps the worker before ser
   }
 });
 
-import { appendFile, copyFile, mkdir, mkdtemp, readdir, readFile, realpath, writeFile, rm } from "node:fs/promises";
+import { appendFile, copyFile, mkdir, mkdtemp, readFile, realpath, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -218,30 +219,6 @@ test("shutdown surfaces a service cleanup failure instead of reporting graceful 
   await assert.rejects(service.close(), /cleanup/);
 });
 
-test("trusted player bootstrap reaches fixed HTTP actions while non-macOS playback stays blocked", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pet-service-player-"));
-  const worker = join(root, "ready.py");
-  await writeFile(worker, await readFile(resolve("apps/app-service/test/fixtures/player-fixture.py")));
-  let child!: ChildProcess;
-  const service = new ServiceProcess(() => {
-    child = fork(resolve("apps/app-service/src/entry.ts"), [], { execArgv: ["--import", "tsx"], stdio: ["ignore", "ignore", "ignore", "ipc"] });
-    return transport(child);
-  }, { guardianPath, workerPath: resolve("apps/runtime-bridge/worker.py"), python: process.env.PET_PYTHON,
-    player: { workerPath: worker, config: { source: root, assets: root, profileRoot: join(root, "sessions") } } });
-  try {
-    await service.start();
-    const initial = await service.request("snapshot");
-    assert.equal(initial.player?.status, process.platform === "darwin" ? "stopped" : "blocked");
-    const started = await service.request("start-player");
-    assert.equal(started.player?.status, process.platform === "darwin" ? "running" : "blocked");
-    assert.equal((await service.request("stop-player")).player?.status, process.platform === "darwin" ? "stopped" : "blocked");
-    assert.equal((await service.request("probe")).runtime.status, "ready");
-    assert.ok(!JSON.stringify(started).includes(root));
-    await service.close();
-    assert.equal(child.exitCode, 0);
-  } finally { await service.close(); await rm(root, { recursive: true, force: true }); }
-});
-
 test('fixed pet transport reaches the real isolated service and persists across service restarts', async t => {
   const { mkdtemp, realpath, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
@@ -291,12 +268,8 @@ test('macOS task reads require the fixed parent command and only owned pets rece
   const day = join(home, '.codex', 'sessions', '2026', '11', '18');
   await mkdir(day, { recursive: true });
   await mkdir(runtime, { recursive: true });
-  const playerWorker = join(runtime, 'task-animation.py');
-  const profileRoot = join(root, 'players');
   const pkg = { id: 'local.development.longmei', version: '0.0.0-dev' };
-  await copyFile('apps/app-service/test/fixtures/player-fixture.py', playerWorker);
-  await Promise.all(['task_reader_worker.py', 'task_reader.py'].map(name => copyFile(`apps/runtime-bridge/${name}`, join(runtime, name))));
-  await copyFile('apps/pet-runtime/bailong/dragon_tasks.py', join(runtime, 'dragon_tasks.py'));
+  await Promise.all(['task_reader_worker.py', 'task_reader.py', 'task_events.py'].map(name => copyFile(`apps/runtime-bridge/${name}`, join(runtime, name))));
   await writeFile(join(runtime, '..', 'codex-presence'), '#!/bin/sh\nprintf "running\\n"\n', { mode: 0o700 });
   await writeFile(join(day, 'rollout-synthetic.jsonl'), [
     { type: 'session_meta', payload: { source: 'vscode' } },
@@ -304,12 +277,19 @@ test('macOS task reads require the fixed parent command and only owned pets rece
   ].map(value => JSON.stringify(value)).join('\n') + '\n');
   let child!: ChildProcess;
   const states: string[] = [];
+  const poses: { id: string; task: TaskAnimation }[] = [];
+  const { WorkspaceVideoHost } = await import('../src/workspace-video-host.ts');
+  const videoHost = new WorkspaceVideoHost((input, ended) => ({
+    ready: Promise.resolve(true),
+    stop() { ended('stopped'); return true; },
+    applyTaskAnimation(task) { poses.push({ id: input.id, task }); return true; },
+  }));
   const service = new ServiceProcess(() => {
     child = fork(resolve('apps/app-service/src/entry.ts'), [], { execArgv: ['--import', 'tsx'], stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
     return transport(child);
   }, { guardianPath, workerPath: join(runtime, 'worker.py'), python: process.env.PET_PYTHON, taskFollowingHome: home,
     workspace: { root: join(root, 'workspace'), catalog: [{ ...pkg, name: 'synthetic', launchable: true }] },
-    player: { workerPath: playerWorker, config: { source: root, assets: root, profileRoot } },
+    videoHost,
     onTaskFollowingState: state => states.push(state) });
   t.after(async () => { try { await service.close(); } finally { await rm(root, { recursive: true, force: true }); } });
   const settle = () => new Promise(resolve => setTimeout(resolve, 80));
@@ -320,11 +300,10 @@ test('macOS task reads require the fixed parent command and only owned pets rece
   };
   assert.equal(service.setTaskFollowing(true), false);
   await service.start();
-  const added = await service.petRequest('add', { expectedRevision: 0, package: pkg }); assert.ok(added.ok);
-  const id = added.workspace.instances[0]!.id;
-  const revision = added.workspace.revision;
-  assert.ok((await service.petRequest('start', { expectedRevision: revision, id })).ok);
-  assert.equal((await service.request('start-player')).player?.status, 'running');
+  const initial = await service.petRequest('list'); assert.ok(initial.ok);
+  assert.equal(initial.workspace.instances.length, 1);
+  const id = initial.workspace.instances[0]!.id;
+  const revision = initial.workspace.revision;
   async function waitFor<T>(read: () => Promise<T | undefined>): Promise<T> {
     const until = performance.now() + 5000;
     while (performance.now() < until) {
@@ -334,17 +313,7 @@ test('macOS task reads require the fixed parent command and only owned pets rece
     }
     assert.fail('synthetic task delivery timed out');
   }
-  const ownedRoot = join(profileRoot, 'instances', id);
-  const framePath = await waitFor(async () => {
-    try { const [session] = await readdir(ownedRoot); return session && join(ownedRoot, session, 'task-frames.jsonl'); }
-    catch { return; }
-  });
-  const lastTask = async () => {
-    let text: string;
-    try { text = await readFile(framePath, 'utf8'); } catch { return; }
-    const row = text.trimEnd().split('\n').at(-1);
-    return row ? (JSON.parse(row) as { task?: { state: string; startSerial: number; expiresAt: number } }).task : undefined;
-  };
+  const lastTask = async () => poses.at(-1)?.task;
   await waitFor(async () => (await lastTask())?.state === 'disabled' ? true : undefined);
   child.send({ type: 'codex-task-following', enabled: true, path: home });
   await settle(); assert.deepEqual(states, []);
@@ -354,8 +323,8 @@ test('macOS task reads require the fixed parent command and only owned pets rece
   assert.equal(cold.startSerial, 0);
   await appendFile(join(day, 'rollout-synthetic.jsonl'), JSON.stringify({ type: 'event_msg', payload: { type: 'task_started', turn_id: 'next', text: 'never sent' } }) + '\n');
   await waitFor(async () => (await lastTask())?.startSerial === 1 ? true : undefined);
-  const diagnostic = (await readdir(profileRoot)).find(name => name.startsWith('session-'))!;
-  await assert.rejects(readFile(join(profileRoot, diagnostic, 'task-frames.jsonl')), { code: 'ENOENT' });
+  assert.deepEqual([...new Set(poses.map(pose => pose.id))], [id]);
+  assert.doesNotMatch(JSON.stringify(poses), /never sent|fixture|rollout/);
   assert.equal(service.setTaskFollowing(false), true);
   await waitFor(async () => (await lastTask())?.state === 'disabled' ? true : undefined);
   assert.equal(service.setTaskFollowing(true), true);
@@ -371,4 +340,60 @@ test('macOS task reads require the fixed parent command and only owned pets rece
   await waitForState('working');
   assert.equal(service.setTaskFollowing(false), true);
   await waitForState('off');
+});
+
+test('workspace video uses the private utility channel for frames, pause and shutdown', { skip: process.platform !== 'darwin' }, async t => {
+  const { WorkspaceVideoHost } = await import('../src/workspace-video-host.ts');
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'pet-workspace-video-'));
+  const pkg = { id: 'local.development.longmei', version: '0.0.0-dev' };
+  const frames: Array<() => void> = [];
+  const stopped: string[] = [];
+  const videoHost = new WorkspaceVideoHost((input, ended) => ({
+    ready: new Promise<boolean>(resolve => frames.push(() => resolve(true))),
+    stop() { stopped.push(input.id); ended('stopped'); return true; },
+    applyDisplay: () => true, applyBehavior: () => true, setVisible: () => true,
+  }));
+  const service = new ServiceProcess(() => transport(fork(resolve('apps/app-service/src/entry.ts'), [], {
+    execArgv: ['--import', 'tsx'], stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+  })), { guardianPath, workerPath: resolve('apps/runtime-bridge/worker.py'), videoHost,
+    workspace: { root, catalog: [{ ...pkg, name: '合成视频桌宠', launchable: true }] } });
+  t.after(async () => { try { await service.close(); } finally { await rm(root, { recursive: true, force: true }); } });
+  await service.start();
+  assert.equal(Object.hasOwn(await service.request('snapshot'), 'player'), false);
+  const first = await service.petRequest('list');
+  assert.ok(first.ok);
+  assert.equal(first.workspace.instances.length, 1);
+  const { id, autoStartOnLaunch } = first.workspace.instances[0]!;
+  assert.equal(autoStartOnLaunch, true);
+  const { revision: expectedRevision } = first.workspace;
+  const begin = () => service.petRequest('start', { id, expectedRevision });
+  async function waitFor(read: () => boolean | Promise<boolean>) {
+    const until = performance.now() + 2000;
+    while (!(await read())) {
+      assert.ok(performance.now() < until, 'video state timed out');
+      await new Promise(resolve => setTimeout(resolve, 15));
+    }
+  }
+  assert.equal(first.workspace.instances[0]!.phase, 'starting');
+  assert.equal(first.workspace.playerMode, 'video');
+  await waitFor(() => frames.length === 1);
+  frames[0]!();
+  await waitFor(async () => {
+    const current = await service.petRequest('list');
+    return current.ok && current.workspace.instances[0]?.phase === 'running';
+  });
+  for (const action of ['applyDisplay', 'applyBehavior', 'visibility'] as const) {
+    const result = await service.petRequest(action, { id, expectedRevision, ...(action === 'visibility' ? { visible: false } : {}) });
+    assert.ok(result.ok);
+    assert.equal(result.workspace.revision, expectedRevision);
+    assert.equal(result.workspace.instances[0]!.behavior?.status, 'applied');
+    if (action === 'visibility') assert.equal(result.workspace.instances[0]!.applied?.visible, false);
+  }
+  assert.ok((await service.petRequest('pause', { expectedRevision })).ok);
+  assert.deepEqual(stopped, [id]);
+  assert.ok((await service.petRequest('resume', { expectedRevision })).ok);
+  assert.ok((await begin()).ok);
+  await waitFor(() => frames.length === 2);
+  await service.close(); // The pending opening must receive its stop acknowledgement before exit.
+  assert.deepEqual(stopped, [id, id]);
 });

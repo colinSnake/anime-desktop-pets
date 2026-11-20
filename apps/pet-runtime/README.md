@@ -1,7 +1,6 @@
 # Python 桌宠运行时
 
-本目录保存 Python/PySide6 桌宠辅助应用的业务源码，当前仍通过固定上游源码和 PyInstaller 生成 helper，
-不是一个已经可以独立 `pip install` 的发布包。
+本目录保留旧 Python/PySide6 桌宠辅助应用的代码，作为历史对照和辅助素材工具。常规 Electron 工作区不启动或打包该播放器；`pets/` 中非 Qt 的素材校验和导入仍由新工作区独立使用。
 
 - `bailong/`：龙妹播放、帧缓存、行为、UI 和呈现时钟增强。
 - 待机问候复用现有桌面气泡，延迟出现并低频轮换；任务、交互、隐藏和减少动态效果状态优先。用户交互后延长自主动作等待、偏向待机动作，并推迟问候；安静时段仍通过洗牌队列覆盖互动与待机动作。
@@ -10,16 +9,6 @@
 
 固定上游清单、来源说明和补丁位于根目录 `integrations/bailong/`。
 根 `scripts/build-pet-runtime.py` 将这里的模块复制到私有生成源码目录，再冻结 helper；
-不要编辑生成目录或参考仓库。修改业务源码后，先重建 helper，再重建宿主。
-在仓库根目录执行：
+不要编辑生成目录或参考仓库。当前 Electron 播放器使用固定 WebM 归档，不需要这个冻结 helper。参见[视频迁移清单](../../docs/Electron视频播放器迁移验收清单.md)。
 
-```sh
-python3 scripts/build-pet-runtime.py build \
-  --source-revision 8e5466d9a438deb6cb43f460e7f5a9bdb9d7a578
-./scripts/build.sh --enhanced-pet
-./scripts/test.sh
-./scripts/test-multi-pet.sh
-```
-
-PySide6 测试须使用 `.local/pet-build/venv/` 专用环境，根 shell 测试入口会选用该环境；
-没有依赖时的跳过不能算完整通过。数据、素材与专用环境不随源码迁移。
+PySide6 测试须使用 `.local/pet-build/venv/` 专用环境。`QT_QPA_PLATFORM=offscreen QT_STYLE_OVERRIDE=Fusion ./scripts/test.sh` 会选择该环境；缺少依赖时跳过不能算通过。冻结 helper 构建使用已审核本机字体，详见[构建指南](../../docs/桌宠增强与性能构建.md)。数据、素材与专用环境不随源码迁移。

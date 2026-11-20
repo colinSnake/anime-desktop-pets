@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { CharacterError, HISTORY_LIMIT, MEMORY_LIMIT, GOAL_LIMIT, invalid, credentialLike,
+import { CharacterError, HISTORY_LIMIT, MEMORY_LIMIT, GOAL_LIMIT, invalid, credentialLike, characterIsEmpty,
   type CharacterState, type Command, type IdentityDraft, type MemoryDraft, type GoalDraft, type Memory, type Goal } from './records.ts';
 
-import { knowledgeCollision, normalizeMemoryText } from '../../../../packages/contracts/src/character-records.ts';
+import { chatMemoryDraft, knowledgeCollision, normalizeMemoryText } from '../../../../packages/contracts/src/character-records.ts';
 import { chatIdentity, safeChatFields } from './chat-context-policy.ts';
 import type { ChatShare } from '../../../../packages/contracts/src/characters.ts';
 import { knowledgeBatchIssue } from '../../../../packages/contracts/src/knowledge-import.ts';
@@ -54,6 +54,21 @@ const goalContent = ({ title, details, status, steps }: Goal) => ({ title, detai
 
 export function transition(state: CharacterState, command: Command, now: string): void {
   switch (command.type) {
+    case 'importLegacy': {
+      if (!characterIsEmpty(state)) throw new CharacterError('character_conflict');
+      const { identity, memories, goals } = command.value;
+      state.identity = identity ? { ...identityDraft(identity), ...stamped(now) } : null;
+      state.memories = memories.map(draft => ({ current: { ...memoryContent(draft), ...stamped(now), id: randomUUID(), status: 'candidate' }, history: [] }));
+      state.goals = goals.map(draft => goalDraft(draft, now));
+      state.legacyImport = true;
+      break;
+    }
+    case 'undoLegacyImport':
+      if (!state.legacyImport) throw new CharacterError('character_conflict');
+      state.identity = null;
+      state.memories = [];
+      state.goals = [];
+      break;
     case 'setIdentityChatShare': {
       const current = state.identity;
       if (!current) throw missing();
@@ -83,6 +98,16 @@ export function transition(state: CharacterState, command: Command, now: string)
       if (command.type === 'saveIdentity' && state.identity && isDeepStrictEqual(draft, identityDraft(state.identity))) return;
       if (state.identity) archive(state.identityHistory, state.identity);
       state.identity = { ...draft, ...stamped(now, state.identity ?? undefined) };
+      break;
+    }
+    case 'saveChatMemory': {
+      const draft = chatMemoryDraft(command.value);
+      if (credentialLike(draft)) throw new CharacterError('credential_like_memory');
+      const key = normalizeMemoryText(draft.text);
+      if (state.memories.some(({ current }) => current.id === command.id || (current.kind !== '知识' && normalizeMemoryText(current.text) === key)))
+        throw new CharacterError('memory_duplicate');
+      if (state.memories.length >= MEMORY_LIMIT) throw limit();
+      state.memories.push({ current: { ...draft, ...stamped(now), id: command.id, status: 'confirmed', confirmedAt: now }, history: [] });
       break;
     }
     case 'addMemory': {
@@ -138,5 +163,6 @@ export function transition(state: CharacterState, command: Command, now: string)
       break;
     }
   }
+  if (command.type !== 'importLegacy') delete state.legacyImport;
   state.revision++;
 }

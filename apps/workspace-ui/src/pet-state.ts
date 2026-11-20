@@ -51,8 +51,8 @@ export class PetWorkspaceController {
         const next = workspace.instances.find(pet => pet.id === id);
         const retained = { ...draft, preferences: { ...draft.preferences } };
         if (prior && next) {
-          for (const key of ['x', 'y'] as const) {
-            if (draft.preferences[key] === prior.preferences[key]) retained.preferences[key] = next.preferences[key];
+          for (const key of ['x', 'y', 'size', 'hideInFullscreen', 'scheduledActivity', 'movement'] as const) {
+            if (draft.preferences[key] === prior.preferences[key]) Object.assign(retained.preferences, { [key]: next.preferences[key] });
           }
         }
         drafts[id] = retained;
@@ -113,7 +113,7 @@ export class PetWorkspaceController {
         this.update({ runtimeStale: true }); return false;
       }
       this.accept(result.workspace);
-      this.update({ runtimeStale: false, needsRefresh: false, error: undefined });
+      this.update({ runtimeStale: false });
       return true;
     } finally { this.refreshingRuntime = false; }
   }
@@ -174,7 +174,7 @@ export class PetWorkspaceController {
     }
     this.update({ operation: undefined, deleteId: action === 'delete' ? undefined : this.state.deleteId,
       runtimeStale: false,
-      notice: action === 'pause' ? '暂停已确认；仅解除门禁不会自动启动实例。' : action === 'resume' ? '暂停门禁已解除；实例仍保持停止，需手动启动。' : action === 'start' ? '已请求启动隔离开发实例；等待真实首帧确认，保存的显示偏好将在启动时应用。' : action === 'stop' ? '已请求停止自有实例；等待播放器与进程退出确认。' : action === 'applyDisplay' ? '播放器已确认应用当前保存的显示偏好。' : action === 'applyBehavior' ? '播放器已确认应用当前保存的行为偏好。' : action === 'visibility' ? '播放器已确认本会话显隐状态。' : action === 'theme' ? '界面主题已保存。' : action === 'delete' ? '已删除实例配置；素材与历史数据保持原样。' : action === 'save' ? '已保存。运行中的实例需单独应用显示或行为偏好。' : '配置已登记 · 待应用。不会启动桌宠。' });
+      notice: action === 'pause' ? '暂停已确认；仅解除门禁不会自动启动实例。' : action === 'resume' ? '暂停门禁已解除；实例仍保持停止，需手动启动。' : action === 'start' ? (before.playerMode === 'video' ? '已请求启动视频实例；等待首帧确认。' : '已请求启动隔离开发实例；等待真实首帧确认，保存的显示偏好将在启动时应用。') : action === 'stop' ? (before.playerMode === 'video' ? '已请求停止视频实例；等待窗口关闭确认。' : '已请求停止自有实例；等待播放器与进程退出确认。') : action === 'applyDisplay' ? '播放器已确认应用当前保存的显示偏好。' : action === 'applyBehavior' ? '播放器已确认应用当前保存的行为偏好。' : action === 'visibility' ? '播放器已确认本会话显隐状态。' : action === 'theme' ? '界面主题已保存。' : action === 'delete' ? '已删除实例配置；素材与历史数据保持原样。' : action === 'save' ? '已保存。运行中的实例需单独应用显示或行为偏好。' : '配置已登记 · 待应用。不会启动桌宠。' });
     return true;
   }
   async save() {

@@ -101,3 +101,13 @@ test('probe transport only accepts results for the requested connection version 
   }
   assert.deepEqual(await requestModelProbe(connection, input, signal, async () => Response.json(success, { status: 503 })), unavailable);
 });
+
+
+test('trusted probe transport allows the service streaming deadline plus bridge margin and accepts fixed diagnostics', async t => {
+  const input = { connectionID: 'saved-a', expectedRevision: 4, entryID: 'entry-a', modelID: 'draft-model' };
+  const signal = new AbortController().signal;
+  const deadline = t.mock.method(AbortSignal, 'timeout', () => signal);
+  const diagnostic = { version: 1, ok: false, error: 'output_budget_exhausted' };
+  assert.deepEqual(await requestModelProbe(connection, input, signal, async () => Response.json(diagnostic, { status: 502 })), diagnostic);
+  assert.deepEqual(deadline.mock.calls.map(call => call.arguments), [[62_000]]);
+});

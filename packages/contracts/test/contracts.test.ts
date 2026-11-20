@@ -42,9 +42,8 @@ test("rejects arrays masquerading as scalar status and platform names", () => {
   );
 });
 
-test("optional player snapshots reject unknown states, credentials, paths, and unbounded text", () => {
-  const player = { kind: "qt-player", status: "running", detail: "首帧" };
-  assert.equal(isSnapshot({ ...value, player }), true);
-  for (const invalid of [null, [], { ...player, status: "ready" }, { ...player, token: "secret" }, { ...player, pid: 123 }, { ...player, detail: "x".repeat(2049) }])
-    assert.equal(isSnapshot({ ...value, player: invalid }), false);
+test("rejects the obsolete standalone Qt field even if no path or secret is present", () => {
+  for (const player of [undefined, null, { kind: "qt-player", status: "running", detail: "首帧" }]) {
+    assert.equal(isSnapshot({ ...value, player }), false);
+  }
 });

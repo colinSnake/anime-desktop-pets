@@ -160,31 +160,15 @@ test("runtime failures return sanitized errors rather than process output", asyn
   }
 });
 
-test("player routes accept only explicit empty actions, redact paths, and close with runtime", async () => {
-  let starts = 0, stops = 0, closes = 0;
-  const { app: unused } = setup(); await unused.close();
-  const player = {
-    snapshot: () => ({ kind: "qt-player" as const, status: "stopped" as const, detail: "隔离播放器" }),
-    start: async () => { starts++; return { kind: "qt-player" as const, status: "running" as const, detail: "首帧" }; },
-    stop: async () => { stops++; return player.snapshot(); },
-    applyDisplayPreferences: async () => true, applyBehaviorPreferences: async () => true,
-    setVisible: async () => true,
-    close: async () => { closes++; },
-  };
-  const app = createService({ token, player, runtime: { snapshot: () => ({ kind: "diagnostic", status: "idle", detail: "诊断" }), probe: async () => ({ kind: "diagnostic", status: "ready", detail: "诊断" }), close: async () => {} } });
+test("standalone Qt routes and snapshot fields are retired", async () => {
+  const { app } = setup();
   try {
-    assert.equal((await app.inject({ url: "/v1/snapshot", headers })).json().player.status, "stopped");
+    const snapshot = await app.inject({ url: "/v1/snapshot", headers });
+    assert.equal(snapshot.statusCode, 200);
+    assert.equal(Object.hasOwn(snapshot.json(), "player"), false);
     for (const action of ["start", "stop"]) {
-      for (const payload of [{ source: "/private" }, { command: "exec" }, [], null]) {
-        assert.equal((await app.inject({ url: `/v1/player/${action}`, method: "POST", headers: { ...headers, "content-type": "application/json" }, payload: JSON.stringify(payload) })).statusCode, 400);
-      }
-      assert.equal((await app.inject({ url: `/v1/player/${action}`, method: "POST", headers: { ...headers, origin: "null" }, payload: {} })).statusCode, 403);
+      const response = await app.inject({ url: `/v1/player/${action}`, method: "POST", headers, payload: {} });
+      assert.equal(response.statusCode, 404);
     }
-    assert.equal(starts, 0); assert.equal(stops, 0);
-    const started = await app.inject({ url: "/v1/player/start", method: "POST", headers, payload: {} });
-    assert.equal(started.json().player.status, "running");
-    await app.inject({ url: "/v1/player/stop", method: "POST", headers, payload: {} });
-    assert.equal(starts, 1); assert.equal(stops, 1);
   } finally { await app.close(); }
-  assert.equal(closes, 1);
 });

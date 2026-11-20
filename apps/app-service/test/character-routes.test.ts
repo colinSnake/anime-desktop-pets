@@ -382,3 +382,24 @@ test('chat approval uses fixed authenticated, revision-bound operations and neve
   assert.equal((await request('goals/chat-share', { ...grant(7, true), id: goal.id })).json().snapshot.records[0].chatShare, true);
   assert.equal((await request('chat/send', { message: '合成问题' })).statusCode, 404);
 });
+
+test('legacy handoff only accepts authenticated, registered, revision-scoped commands and returns no records', { skip: process.platform === 'win32' }, async t => {
+  const { app, workspace, repository, id, other, request, failSync } = await setupRecordRoutes(t);
+  const status = () => request('legacy-handoff', {});
+  const write = { expectedRevision: 0, command: { type: 'importLegacy', value: { identity, memories: [], goals: [] } } };
+  assert.equal((await app.inject({ url: `/v1/characters/${id}/legacy-handoff`, method: 'POST', headers: { host: '127.0.0.1' }, payload: write })).statusCode, 401);
+  assert.equal((await request('legacy-handoff', write, 'not-registered')).statusCode, 404);
+  assert.equal((await request('legacy-handoff', { ...write, path: '/synthetic' })).statusCode, 400);
+  assert.equal((await request('legacy-handoff', { ...write, command: { type: 'saveIdentity', value: identity } })).statusCode, 400);
+  assert.deepEqual((await status()).json(), { ok: true, status: { revision: 0, mode: 'empty' } });
+  assert.deepEqual((await request('legacy-handoff', write)).json(), { ok: true, status: { revision: 1, mode: 'undoable' } });
+  assert.deepEqual((await request('legacy-handoff', write)).json(), { ok: false, error: 'conflict' });
+  assert.equal((await repository.read(other)).revision, 0);
+  failSync();
+  assert.deepEqual((await request('legacy-handoff', { expectedRevision: 1, command: { type: 'undoLegacyImport' } })).json(), { ok: false, error: 'write-outcome-unknown' });
+  assert.deepEqual((await status()).json(), { ok: true, status: { revision: 2, mode: 'empty' } });
+  const deletion = workspace.mutate('delete', { expectedRevision: 2, id });
+  assert.equal((await request('legacy-handoff', { ...write, expectedRevision: 2 })).statusCode, 404);
+  assert.ok((await deletion).ok);
+  assert.equal((await repository.read(id)).identity, null);
+});

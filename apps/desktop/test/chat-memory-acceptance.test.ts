@@ -1,0 +1,65 @@
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { mkdtemp, realpath, rename, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import { createService } from '../../app-service/src/server.ts';
+import { CharacterRepository } from '../../app-service/src/characters/repository.ts';
+import { PetWorkspace } from '../../app-service/src/pet-workspace.ts';
+import { requestCharacterRecords } from '../src/character-transport.ts';
+
+const pkg = { id: 'qa-pet', version: '1.0.0' };
+const snapshot = () => ({ kind: 'diagnostic', status: 'idle', detail: '' } as const);
+
+test('fixed chat confirmation persists one private record atomically under the current registered instance', { skip: process.platform === 'win32' }, async t => {
+ const root = await mkdtemp(join(await realpath(tmpdir()), 'pet-chat-memory-'));
+ const token = 'e'.repeat(64);
+ const workspace = new PetWorkspace({ root, catalog: [{ ...pkg, name: '合成桌宠' }] });
+ let loseRenameReceipt = false;
+ const repository = new CharacterRepository(join(root, 'characters'), { io: { rename: async (from, to) => {
+  await rename(from, to);
+  if (loseRenameReceipt) throw Error('synthetic missing receipt');
+ } } });
+ const app = createService({ token, workspace, characters: repository, runtime: { snapshot, probe: async () => snapshot(), close: async () => {} } });
+ t.after(async () => { await app.close(); await rm(root, { recursive: true, force: true }); });
+ const add = async (revision: number) => {
+  const added = await workspace.mutate('add', { expectedRevision: revision, package: pkg });
+  assert.ok(added.ok);
+  return added.workspace.instances.at(-1)!.id;
+ };
+ const petID = await add(0), other = await add(1);
+ const address = await app.listen({ host: '127.0.0.1', port: 0 });
+ const session = { port: Number(new URL(address).port), token };
+ const input = { petID, messageID: randomUUID(), expectedRevision: 0, text: '我偏好简短回复' };
+ const save = (patch: Record<string, unknown> = {}) => requestCharacterRecords(session, 'saveChatMemory', { ...input, ...patch });
+ assert.deepEqual(await save({ text: 'password: synthesized' }), { ok: false, error: 'credential-like' });
+ assert.deepEqual(await save({ chatShare: true }), { ok: false, error: 'invalid' });
+ assert.deepEqual(await save({ messageID: 'unbound' }), { ok: false, error: 'invalid' });
+ assert.deepEqual(await save({ text: '字'.repeat(301) }), { ok: false, error: 'invalid' });
+ const [first, second] = await Promise.all([save(), save()]);
+ const result = first.ok ? first : second;
+ assert.ok(result.ok);
+ assert.equal('durability' in result && result.durability, 'confirmed');
+ assert.deepEqual(first.ok ? second : first, { ok: false, error: 'conflict' });
+ const state = await new CharacterRepository(join(root, 'characters')).read(petID);
+ assert.equal(state.revision, 1);
+ assert.equal(state.memories.length, 1);
+ const memory = state.memories[0]!.current;
+ assert.equal(memory.id, input.messageID);
+ assert.equal(memory.text, input.text);
+ assert.equal(memory.status, 'confirmed');
+ assert.equal(memory.chatShare, undefined);
+ assert.deepEqual(state.memories[0]!.history, []);
+ assert.deepEqual((await repository.read(other)).memories, []);
+ assert.deepEqual(await save({ expectedRevision: 1, text: '另一条发言' }), { ok: false, error: 'duplicate' });
+ assert.deepEqual(await save({ expectedRevision: 1, messageID: randomUUID(), text: '我偏好简短回复。' }), { ok: false, error: 'duplicate' });
+ loseRenameReceipt = true;
+ const uncertainID = randomUUID();
+ const uncertain = await save({ expectedRevision: 1, messageID: uncertainID, text: '另一条本机记忆' });
+ assert.ok(uncertain.ok && 'durability' in uncertain);
+ assert.equal(uncertain.durability, 'unconfirmed');
+ assert.deepEqual((await repository.read(petID)).memories.map(row => row.current.id), [input.messageID, uncertainID]);
+ assert.ok((await workspace.mutate('delete', { expectedRevision: 2, id: petID })).ok);
+ assert.deepEqual(await save({ expectedRevision: 2, messageID: randomUUID() }), { ok: false, error: 'not-found' });
+});

@@ -1,19 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import type { PlayerSnapshot } from '../../../packages/contracts/src/index.ts';
+import type { OwnedSnapshot } from '../src/pet-lifecycle.ts';
 import type { PetDefinition } from '../../../packages/contracts/src/pets.ts';
 import { PetLifecycle } from '../src/pet-lifecycle.ts';
 import { defaultPreferences } from '../src/pet-registry.ts';
 const pet = (id = 'pet-one'): PetDefinition => ({ id, package: {id:'local.dev',version:'0.0.0-dev'}, enabled:true, autoStartOnLaunch:true, preferences:defaultPreferences() });
 function player() {
- let status: PlayerSnapshot['status'] = 'stopped';
+ let status: OwnedSnapshot['status'] = 'stopped';
  let ready!: () => void; let stopped!: () => void;
  const calls: string[] = [];
- const snapshot = (): PlayerSnapshot => ({ kind:'qt-player', status, detail:'synthetic' });
+ const snapshot = (): OwnedSnapshot => ({ status });
  const controller = {
   snapshot,
-  start() { calls.push('start'); status='starting'; return new Promise<PlayerSnapshot>(resolve => { ready=() => { status='running'; resolve(snapshot()); }; }); },
-  stop() { calls.push('stop'); status='stopping'; return new Promise<PlayerSnapshot>(resolve => { stopped=() => { status='stopped'; resolve(snapshot()); }; }); },
+  start() { calls.push('start'); status='starting'; return new Promise<OwnedSnapshot>(resolve => { ready=() => { status='running'; resolve(snapshot()); }; }); },
+  stop() { calls.push('stop'); status='stopping'; return new Promise<OwnedSnapshot>(resolve => { stopped=() => { status='stopped'; resolve(snapshot()); }; }); },
   async applyDisplayPreferences(value: {size:number;hideInFullscreen:boolean}) { calls.push(`apply:${value.size}:${value.hideInFullscreen}`); return status==='running'; },
   async applyBehaviorPreferences() { return status==='running'; },
   async setVisible(visible: boolean) { calls.push(`visible:${visible}`); return status==='running'; },
@@ -52,7 +52,7 @@ test('stop can cancel starting without awaiting first frame; stale start complet
 });
 test('rejection remains failed and shutdown tries every owner even if one close throws synchronously', async () => {
  let closed=0;
- const life=new PetLifecycle({supports:()=>true,create:p => ({snapshot:()=>({kind:'qt-player',status:'stopped',detail:''}),start:async()=>{throw Error('/private');},stop:async()=>{throw Error('/private');},applyDisplayPreferences:async()=>false,applyBehaviorPreferences:async()=>false,setVisible:async()=>false,close:()=>{closed++;if(p.id==='a')throw Error('/private');return Promise.resolve();}})});
+ const life=new PetLifecycle({supports:()=>true,create:p => ({snapshot:()=>({status:'stopped'}),start:async()=>{throw Error('/private');},stop:async()=>{throw Error('/private');},applyDisplayPreferences:async()=>false,applyBehaviorPreferences:async()=>false,setVisible:async()=>false,close:()=>{closed++;if(p.id==='a')throw Error('/private');return Promise.resolve();}})});
  life.start(pet('a'));life.start(pet('b'));await settle();
  assert.equal(life.phase(pet('a')),'failed');life.stop(pet('a'));await settle();assert.equal(life.phase(pet('a')),'failed');
  await assert.rejects(life.close(),/instance_cleanup_failed/); assert.equal(closed,2);
@@ -147,7 +147,7 @@ test('pause closes the start gate before stopping every owned runtime and resume
 
 test('unconfirmed pause stop keeps its runtime failed and consumes the owned slot', async () => {
  const own=player();
- const life=new PetLifecycle({supports:()=>true,create:()=>({...own.controller,stop:async()=>({kind:'qt-player',status:'error',detail:'synthetic'})})});
+ const life=new PetLifecycle({supports:()=>true,create:()=>({...own.controller,stop:async()=>({status:'error'})})});
  life.start(pet());own.ready();await settle();
  assert.equal(await life.pauseAll(),false);
  assert.equal(life.phase(pet()),'failed');

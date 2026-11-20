@@ -14,7 +14,7 @@ async function fixture(t: TestContext, replacement?: string) {
   if (replacement) await writeFile(worker, replacement);
   else {
     await Promise.all(['task_reader_worker.py', 'task_reader.py'].map(name => copyFile(`apps/runtime-bridge/${name}`, join(root, name))));
-    await copyFile('apps/pet-runtime/bailong/dragon_tasks.py', join(root, 'dragon_tasks.py'));
+    await copyFile('apps/runtime-bridge/task_events.py', join(root, 'task_events.py'));
   }
   const day = join(root, '.codex', 'sessions', '2026', '11', '18');
   await mkdir(day, { recursive: true });

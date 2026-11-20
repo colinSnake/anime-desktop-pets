@@ -1,14 +1,25 @@
-import type { PlayerController, PlayerSnapshot, PlayerInitialPreferences } from '../../../packages/contracts/src/index.ts';
-import type { PetDefinition, PetError, PetPhase, RuntimeBehaviorState } from '../../../packages/contracts/src/pets.ts';
+import type { BehaviorPreferences, PetDefinition, PetError, PetPhase, PetPreferences, RuntimeBehaviorState, RuntimeMenuFeedback } from '../../../packages/contracts/src/pets.ts';
 
 import type { TaskSnapshot } from './codex-task-lease.ts';
 import { TASK_ANIMATION_MS, taskAnimationOff, type TaskAnimation } from './task-animation.ts';
 
-type OwnedPlayer = PlayerController & { applyTaskAnimation?(value: TaskAnimation): void };
+export type OwnedStatus = 'stopped' | 'starting' | 'running' | 'stopping' | 'error';
+export type OwnedSnapshot = { status: OwnedStatus };
+export type OwnedPlayer = {
+  snapshot(): OwnedSnapshot;
+  start(preferences: PetPreferences): Promise<OwnedSnapshot>;
+  stop(): Promise<OwnedSnapshot>;
+  applyDisplayPreferences(value: { size: number; hideInFullscreen: boolean }): Promise<boolean>;
+  applyBehaviorPreferences(value: BehaviorPreferences): Promise<boolean>;
+  setVisible(visible: boolean): Promise<boolean>;
+  setPositionListener?(listener: (position: Position) => void): void;
+  close(): Promise<void>;
+  applyTaskAnimation?(value: TaskAnimation): void;
+};
 type Position = { x: number; y: number };
-type Owned = { controller: OwnedPlayer; taskStartFloor: number; pending?: 'starting' | 'stopping'; epoch: number; positionEpoch: number; failed: boolean; applied?: { size: number; hideInFullscreen: boolean; visible: boolean }; behavior?: RuntimeBehaviorState; positionFeedback?: Position & { status: 'saving' | 'saved' | 'failed' } };
-function phase(status: PlayerSnapshot['status']): PetPhase {
-  return status === 'error' ? 'failed' : status === 'blocked' || status === 'unconfigured' ? 'not-connected' : status;
+type Owned = { controller: OwnedPlayer; taskStartFloor: number; pending?: 'starting' | 'stopping'; epoch: number; positionEpoch: number; failed: boolean; applied?: { size: number; hideInFullscreen: boolean; visible: boolean }; behavior?: RuntimeBehaviorState; confirmedBehavior?: BehaviorPreferences; menuFeedback?: RuntimeMenuFeedback; positionFeedback?: Position & { status: 'saving' | 'saved' | 'failed' } };
+function phase(status: OwnedStatus): PetPhase {
+  return status === 'error' ? 'failed' : status;
 }
 /** Volatile ownership only. No source discovery, data adoption, configuration writes or auto-start. */
 export class PetLifecycle {
@@ -28,6 +39,17 @@ export class PetLifecycle {
     if (this.closing || this.phase(pet) !== 'running') return undefined;
     const value = this.owned.get(pet.id)?.behavior;
     return value && { ...value };
+  }
+  confirmedBehavior(pet: PetDefinition) {
+    const value = this.owned.get(pet.id)?.confirmedBehavior;
+    return value && { ...value };
+  }
+  menuFeedback(pet: PetDefinition) {
+    return this.phase(pet) === 'running' ? this.owned.get(pet.id)?.menuFeedback : undefined;
+  }
+  setMenuFeedback(pet: PetDefinition, feedback: RuntimeMenuFeedback | undefined) {
+    const own = this.owned.get(pet.id);
+    if (own) own.menuFeedback = feedback;
   }
   positionFeedback(pet: PetDefinition) { const value = this.owned.get(pet.id)?.positionFeedback; return value && { ...value }; }
   setPositionWriter(writer: (id: string, position: Position) => Promise<boolean>) { this.positionWriter = writer; }
@@ -63,14 +85,15 @@ export class PetLifecycle {
       this.owned.set(pet.id, own);
       own.controller.setPositionListener?.(position => { void this.persistPosition(pet.id, own!, position); });
     }
-    own.behavior = undefined; // A new session has no confirmation until its own first frame.
+    own.menuFeedback = own.behavior = own.confirmedBehavior = undefined; // A new session has no confirmation until its own first frame.
     const preferences = structuredClone(pet.preferences);
-    this.command(own, 'start', 'starting', () => {
+    this.command(own, { kind: 'start', preferences, onStarted: () => {
       own!.applied = { size: preferences.size, hideInFullscreen: preferences.hideInFullscreen, visible: true };
-      own!.behavior = { status: 'applied', scheduledActivity: preferences.scheduledActivity, movement: preferences.movement };
+      own!.confirmedBehavior = { scheduledActivity: preferences.scheduledActivity, movement: preferences.movement };
+      own!.behavior = { status: 'applied', ...own!.confirmedBehavior };
       own!.taskStartFloor = this.highestTaskStart;
       this.sendTaskAnimation(own!);
-    }, preferences);
+    } });
   }
   private async persistPosition(id: string, own: Owned, position: Position) {
     const epoch = ++own.positionEpoch;
@@ -85,7 +108,7 @@ export class PetLifecycle {
     if (this.closing) return 'unavailable';
     const own = this.owned.get(pet.id);
     if (!own || this.phase(pet) === 'stopped' || own.pending === 'stopping') return;
-    this.command(own, 'stop', 'stopping');
+    this.command(own, { kind: 'stop' });
   }
   async pauseAll(): Promise<boolean> {
     if (this.closing) return false;
@@ -113,8 +136,10 @@ export class PetLifecycle {
   async applyDisplayPreferences(pet: PetDefinition): Promise<PetError | undefined> {
     const own = this.owned.get(pet.id);
     if (!own || this.phase(pet) !== 'running') return 'active';
+    const epoch = own.epoch;
     try {
-      if (!await own.controller.applyDisplayPreferences({ size: pet.preferences.size, hideInFullscreen: pet.preferences.hideInFullscreen })) return 'apply-failed';
+      if (!await own.controller.applyDisplayPreferences({ size: pet.preferences.size, hideInFullscreen: pet.preferences.hideInFullscreen }) ||
+          this.closing || own.epoch !== epoch || this.phase(pet) !== 'running') return 'apply-failed';
       own.applied = { ...(own.applied ?? { visible: true }), size: pet.preferences.size, hideInFullscreen: pet.preferences.hideInFullscreen };
       return;
     } catch { return 'apply-failed'; }
@@ -128,31 +153,35 @@ export class PetLifecycle {
     let confirmed = false;
     try { confirmed = await own.controller.applyBehaviorPreferences(preferences); } catch { /* no unconfirmed success */ }
     if (this.closing || own.epoch !== epoch || this.phase(pet) !== 'running') return 'apply-failed';
-    own.behavior = confirmed ? { status: 'applied', ...preferences } : { status: 'failed' };
+    if (confirmed) own.confirmedBehavior = preferences;
+    own.behavior = !confirmed ? { status: 'failed' } : { status: 'applied', ...preferences };
     return confirmed ? undefined : 'apply-failed';
   }
   async setVisible(pet: PetDefinition, visible: boolean): Promise<PetError | undefined> {
     const own = this.owned.get(pet.id);
     if (!own || this.phase(pet) !== 'running') return 'active';
+    const epoch = own.epoch;
     try {
-      if (!await own.controller.setVisible(visible)) return 'apply-failed';
+      if (!await own.controller.setVisible(visible) || this.closing || own.epoch !== epoch || this.phase(pet) !== 'running') return 'apply-failed';
       own.applied = { ...(own.applied ?? { size: pet.preferences.size, hideInFullscreen: pet.preferences.hideInFullscreen }), visible };
       return;
     } catch { return 'apply-failed'; }
   }
-  private command(own: Owned, command: 'start' | 'stop', pending: 'starting' | 'stopping', onStarted?: () => void, preferences?: PlayerInitialPreferences) {
+  private command(own: Owned, command: { kind: 'start'; preferences: PetPreferences; onStarted: () => void } | { kind: 'stop' }) {
     const epoch = ++own.epoch;
-    own.pending = pending;
+    own.pending = command.kind === 'start' ? 'starting' : 'stopping';
     // Invoked synchronously to preserve start/stop ordering. Only completion is async.
-    let operation: Promise<PlayerSnapshot>;
-    try { operation = command === 'start' ? own.controller.start(preferences) : own.controller.stop(); }
+    let operation: Promise<OwnedSnapshot>;
+    try { operation = command.kind === 'start' ? own.controller.start(command.preferences) : own.controller.stop(); }
     catch { operation = Promise.reject(new Error('instance_unavailable')); }
     void operation.then(result => {
       if (own.epoch !== epoch) return;
       own.pending = undefined;
-      own.failed = result.status !== (command === 'start' ? 'running' : 'stopped');
-      if (command === 'stop' && !own.failed) { own.applied = undefined; own.behavior = undefined; }
-      else if (!own.failed) onStarted?.();
+      own.failed = result.status !== (command.kind === 'start' ? 'running' : 'stopped');
+      if (!own.failed) {
+        if (command.kind === 'stop') { own.applied = undefined; own.behavior = undefined; }
+        else command.onStarted();
+      }
     }, () => {
       if (own.epoch === epoch) { own.pending = undefined; own.failed = true; }
     });

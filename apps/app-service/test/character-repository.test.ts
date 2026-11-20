@@ -296,3 +296,59 @@ test('unconfirmed publication blocks online context reads without hiding local r
   await assert.rejects(repo.readForOnlineChat(pet), code('character_publication_uncertain'));
   assert.equal((await repo.readForOnlineChat(other)).revision, 0);
 });
+
+const legacyBatch = {
+  identity: identity('旧角色'),
+  memories: [{ kind: '事实', text: '本机合成记忆', source: '合成', citation: '', version: '' }],
+  goals: [{ ...goal('已完成的旧步骤'), steps: [{ text: '已完成的旧步骤', isComplete: true }] }],
+};
+
+test('legacy import publishes a single private batch and can undo it after reopening', posix, async t => {
+  const { repo, open } = await fixture(t);
+  const operation = { type: 'importLegacy', value: legacyBatch };
+  const { state } = await repo.apply(pet, 0, operation);
+  assert.equal(state.revision, 1);
+  assert.equal(state.legacyImport, true);
+  assert.equal(state.identity?.name, '旧角色');
+  assert.equal(state.memories[0]?.current.status, 'candidate');
+  assert.equal(state.goals[0]?.steps[0]?.isComplete, true);
+  assert.ok([state.identity, state.memories[0]?.current, state.goals[0]].every(record => record?.chatShare === undefined));
+  assert.equal((await repo.read(other)).revision, 0);
+  const reopened = open();
+  assert.equal((await reopened.read(pet)).legacyImport, true);
+  await assert.rejects(reopened.apply(pet, 0, { type: 'undoLegacyImport' }), code('character_conflict'));
+  const { state: undone } = await reopened.apply(pet, 1, { type: 'undoLegacyImport' });
+  assert.deepEqual(undone, { schemaVersion: 1, petID: pet, revision: 2, identity: null, identityHistory: [], memories: [], goals: [] });
+  await assert.rejects(reopened.apply(pet, 2, { type: 'undoLegacyImport' }), code('character_conflict'));
+  assert.equal((await reopened.apply(pet, 2, operation)).state.revision, 3);
+});
+
+test('legacy import refuses occupied destinations, forged grants and undo after edits', posix, async t => {
+  const { repo } = await fixture(t);
+  await assert.rejects(repo.apply(pet, 0, { type: 'importLegacy', value: { ...legacyBatch, identity: { ...legacyBatch.identity, chatShare: true } } }), code('invalid_character_data'));
+  await assert.rejects(repo.apply(pet, 0, { type: 'importLegacy', value: { ...legacyBatch, memories: [{ ...legacyBatch.memories[0], text: 'API key 示例' }] } }), code('invalid_character_data'));
+  await repo.apply(other, 0, { type: 'saveIdentity', value: identity('保留') });
+  await assert.rejects(repo.apply(other, 1, { type: 'importLegacy', value: legacyBatch }), code('character_conflict'));
+  assert.equal((await repo.read(other)).identity?.name, '保留');
+  await repo.apply(pet, 0, { type: 'importLegacy', value: legacyBatch });
+  await repo.apply(pet, 1, { type: 'saveIdentity', value: identity('后来调整') });
+  await assert.rejects(repo.apply(pet, 2, { type: 'undoLegacyImport' }), code('character_conflict'));
+  assert.equal((await repo.read(pet)).identity?.name, '后来调整');
+  assert.equal((await repo.read(pet)).legacyImport, undefined);
+});
+
+test('failed legacy publication writes none of the batch and leaves an undoable batch intact', posix, async t => {
+  let fail = true;
+  const { repo } = await fixture(t, { rename: async (from, to) => {
+    if (fail) throw Error('injected before publication');
+    await rename(from, to);
+  } });
+  const operation = { type: 'importLegacy', value: legacyBatch };
+  await assert.rejects(repo.apply(pet, 0, operation), code('character_storage_unavailable'));
+  assert.equal((await repo.read(pet)).revision, 0);
+  fail = false;
+  const { state } = await repo.apply(pet, 0, operation);
+  fail = true;
+  await assert.rejects(repo.apply(pet, 1, { type: 'undoLegacyImport' }), code('character_storage_unavailable'));
+  assert.deepEqual(await repo.read(pet), state);
+});

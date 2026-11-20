@@ -56,7 +56,7 @@ docs(workflow): 记录 Git 提交与验证规范
 
 ## 3. 验证结果必须真实
 
-- 源码回归入口：`./scripts/test.sh`；多宠和 IPC 回归入口：`./scripts/test-multi-pet.sh`。
+- Python 运行时和本地离线检查使用 `QT_QPA_PLATFORM=offscreen QT_STYLE_OVERRIDE=Fusion ./scripts/test.sh`。
 - 现有构建的只读状态可用 `./scripts/petctl.sh --check`，不启动正常桌宠。
 - 看实际退出码、失败和跳过信息，不把缺少运行环境导致的跳过写成完整通过。
 - 只有本轮执行过的命令才写“本轮通过”；引用历史构建、自检或基准时明确日期、版本与来源。

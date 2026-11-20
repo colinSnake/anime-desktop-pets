@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import type { TextChatRuntime } from "./agent/text-chat-runtime.ts";
 import { registerOnlineChat } from "./online-chat.ts";
 import { registerCharacterRoutes } from "./characters/routes.ts";
 import type { CharacterRepository } from "./characters/repository.ts";
@@ -12,7 +13,6 @@ import { timingSafeEqual } from "node:crypto";
 import {
   PROTOCOL_VERSION,
   type RuntimeController,
-  type PlayerController,
   type Snapshot,
 } from "../../../packages/contracts/src/index.ts";
 import { platformCapabilities } from "./platform.ts";
@@ -20,19 +20,19 @@ import { platformCapabilities } from "./platform.ts";
 export function createService({
   token,
   runtime,
-  player,
   workspace,
   models,
   speech,
   characters,
+  chatRuntime,
 }: {
   token: string;
   runtime: RuntimeController;
-  player?: PlayerController;
   workspace?: PetWorkspace;
   models?: ModelManagement;
   speech?: BubbleSpeech;
   characters?: CharacterRepository;
+  chatRuntime?: TextChatRuntime;
 }) {
   if (!/^[a-f0-9]{64}$/.test(token))
     throw new Error("Invalid session credential");
@@ -84,7 +84,6 @@ export function createService({
     service: { status: "ready" },
     platform: platformCapabilities(process.platform, process.env),
     runtime: runtime.snapshot(),
-    ...(player ? { player: player.snapshot() } : {}),
   });
   const empty = { type: "object", additionalProperties: false } as const;
   app.get("/v1/snapshot", { schema: { querystring: empty } }, async () =>
@@ -98,27 +97,19 @@ export function createService({
       return { ...snapshot(), runtime: status } satisfies Snapshot;
     },
   );
-  for (const action of ["start", "stop"] as const) {
-    app.post(`/v1/player/${action}`, { schema: { querystring: empty, body: empty } }, async (_request, reply) => {
-      if (!player) throw new Error("player_unconfigured");
-      if (action === "start" && workspace && !workspace.canStartOwnedPlayer())
-        return reply.code(409).send({ error: "linkage_paused" });
-      const status = await player[action]();
-      return { ...snapshot(), player: status } satisfies Snapshot;
-    });
-  }
   registerPetRoutes(app, workspace);
   registerModelManagement(app, models);
-  registerOnlineChat(app, models, workspace, characters);
+  const chat = registerOnlineChat(app, models, workspace, characters, chatRuntime);
   registerSpeechRoutes(app, speech);
   registerCharacterRoutes(app, workspace, characters);
   app.addHook("preClose", async () => {
+    const chatCleanup = await Promise.allSettled([chat?.close()]);
     // Schedule each closer independently: a synchronous throw or rejection must not
     // interrupt another owner draining writes / releasing its lease before process.exit.
     const results = await Promise.allSettled([
-      () => runtime.close(), () => player?.close(), () => workspace?.close(), () => models?.close(), () => speech?.close(), () => characters?.close(),
+      () => runtime.close(), () => workspace?.close(), () => models?.close(), () => speech?.close(), () => characters?.close(),
     ].map(close => Promise.resolve().then(close)));
-    if (results.some(result => result.status === "rejected")) throw new Error("service_cleanup_failed");
+    if ([...chatCleanup, ...results].some(result => result.status === "rejected")) throw new Error("service_cleanup_failed");
   });
   return app;
 }

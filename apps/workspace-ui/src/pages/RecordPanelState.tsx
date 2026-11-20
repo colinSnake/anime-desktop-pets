@@ -21,7 +21,7 @@ const messages: Record<RecordError, string> = {
 };
 export type RecordInstance = { id: string; displayName?: string };
 export function RecordPanelState({ state, instance, reload }: { state?: Pick<RecordState<CharacterRecord, object>, 'error' | 'busy' | 'snapshot' | 'notice'>; instance?: RecordInstance; reload?: () => void }) {
-  const text = !instance ? '请先在「我的桌宠」选择一个实例。' : state?.busy === 'write' ? '正在保存本机资料…' : state?.busy === 'read' || (!state?.snapshot && !state?.error) ? '正在读取本机资料…' :
+  const text = !instance ? '请先在「桌宠」选择一个实例。' : state?.busy === 'write' ? '正在保存本机资料…' : state?.busy === 'read' || (!state?.snapshot && !state?.error) ? '正在读取本机资料…' :
     state?.error ? '' : state?.notice === 'shared' ? '已保存在线聊天授权。' : state?.notice === 'unshared' ? '已撤回在线聊天授权。' :
       state?.notice === 'deleted' ? '已删除所选资料。' : state?.notice === 'saved' ? '已保存到当前实例。' : state?.notice === 'unchanged' ? '资料没有变化。' :
       state?.notice === 'reloaded' ? '已重新读取。请核对列表后再提交草稿。' : '只管理当前实例的本机资料。';

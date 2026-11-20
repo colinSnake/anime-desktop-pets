@@ -54,6 +54,8 @@ test('macOS Keychain helper build failure cannot publish the service or desktop 
       await mkdir(join(root, 'apps', name, 'dist'), { recursive: true });
       await writeFile(join(root, 'apps', name, 'dist', 'previous'), name);
     }
+    await mkdir(join(root, 'apps/app-service/src/agent'), { recursive: true });
+    await writeFile(join(root, 'apps/app-service/src/agent/harness-worker.mjs'), '// synthetic build input');
     await assert.rejects(buildCrossPlatform(root, {
       bundle: async ({ outfile }) => writeFile(outfile, 'new output'),
       buildKeychainHelper: async (_root, output) => { assert.match(output,/[/\\]service[/\\]model-keychain$/); throw new Error('synthetic_native_build_failure'); },
@@ -71,6 +73,8 @@ test('macOS presence helper build failure preserves both outputs', { skip: proce
       await mkdir(join(root, 'apps', name, 'dist'), { recursive: true });
       await writeFile(join(root, 'apps', name, 'dist', 'previous'), name);
     }
+    await mkdir(join(root, 'apps/app-service/src/agent'), { recursive: true });
+    await writeFile(join(root, 'apps/app-service/src/agent/harness-worker.mjs'), '// synthetic build input');
     await assert.rejects(buildCrossPlatform(root, {
       bundle: async ({ outfile }) => writeFile(outfile, 'new output'),
       buildKeychainHelper: async (_root, output) => writeFile(output, 'synthetic keychain helper'),

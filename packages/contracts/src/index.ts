@@ -16,22 +16,6 @@ export interface RuntimeController {
   probe(): Promise<RuntimeSnapshot>;
   close(): Promise<void>;
 }
-export type PlayerSnapshot = {
-  kind: "qt-player";
-  status: "unconfigured" | "blocked" | "stopped" | "starting" | "running" | "stopping" | "error";
-  detail: string;
-};
-export type PlayerInitialPreferences = import("./pets.ts").PetPreferences;
-export interface PlayerController {
-  snapshot(): PlayerSnapshot;
-  start(preferences?: PlayerInitialPreferences): Promise<PlayerSnapshot>;
-  stop(): Promise<PlayerSnapshot>;
-  applyDisplayPreferences(value: { size: number; hideInFullscreen: boolean }): Promise<boolean>;
-  applyBehaviorPreferences(value: import("./pets.ts").BehaviorPreferences): Promise<boolean>;
-  setVisible(visible: boolean): Promise<boolean>;
-  setPositionListener?(listener: (position: { x: number; y: number }) => void): void;
-  close(): Promise<void>;
-}
 export type Snapshot = {
   protocolVersion: typeof PROTOCOL_VERSION;
   product: "桌边小崽";
@@ -39,9 +23,11 @@ export type Snapshot = {
   service: { status: "ready" };
   platform: PlatformCapabilities;
   runtime: RuntimeSnapshot;
-  player?: PlayerSnapshot;
 };
+export type WorkspaceFolderResult = "opened" | "not-ready" | "busy" | "unavailable";
 export interface DesktopBridge {
+  openWorkspaceData?(): Promise<WorkspaceFolderResult>;
+  legacyCharacterHandoff?: import("./legacy-character-snapshot.ts").LegacyHandoffBridge;
   characters?: import("./characters.ts").CharactersBridge;
   speech?: import("./speech.ts").SpeechBridge;
   onlineChat?: import("./online-chat.ts").OnlineChatBridge;
@@ -49,8 +35,6 @@ export interface DesktopBridge {
   pets?: import("./pets.ts").PetsBridge;
   snapshot(): Promise<Snapshot>;
   probeRuntime(): Promise<Snapshot>;
-  startPlayer(): Promise<Snapshot>;
-  stopPlayer(): Promise<Snapshot>;
 }
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -66,7 +50,7 @@ export function isSnapshot(value: unknown): value is Snapshot {
     return false;
   const { platform, runtime, service } = value;
   return (
-    (value.player === undefined || isPlayerSnapshot(value.player)) &&
+    !Object.hasOwn(value, "player") &&
     record(service) &&
     service.status === "ready" &&
     record(platform) &&
@@ -84,11 +68,4 @@ export function isSnapshot(value: unknown): value is Snapshot {
     ["idle", "probing", "ready", "error", "stopped"].includes(runtime.status) &&
     shortText(runtime.detail, 2048)
   );
-}
-
-export function isPlayerSnapshot(value: unknown): value is PlayerSnapshot {
-  return record(value) && Object.keys(value).length === 3 &&
-    value.kind === "qt-player" && typeof value.status === "string" &&
-    ["unconfigured", "blocked", "stopped", "starting", "running", "stopping", "error"].includes(value.status) &&
-    shortText(value.detail, 2048);
 }

@@ -15,6 +15,9 @@ const errors: Record<CharacterError['code'], RecordError> = {
 };
 function commandFor(action: RecordAction, value: unknown): { expectedRevision: number; command: Command } | undefined {
   switch (action) {
+    case 'saveChatMemory':
+      if (isRecordInput(action, value)) return { expectedRevision: value.expectedRevision, command: { type: action, id: value.messageID, value: value.text } };
+      return;
     case 'addMemory':
       if (isRecordInput(action, value)) return { expectedRevision: value.expectedRevision, command: { type: action, value: value.draft } };
       return;

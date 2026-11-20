@@ -1,3 +1,4 @@
+import { registerLegacyHandoffRoute } from './legacy-handoff-route.ts';
 import { registerLocalChatRoute } from './local-chat.ts';
 import { registerCharacterRecordRoutes } from './record-routes.ts';
 import type { FastifyInstance } from 'fastify';
@@ -19,6 +20,7 @@ export function registerCharacterRoutes(app: FastifyInstance, workspace?: PetWor
   if (!workspace || !repository) return;
   registerCharacterRecordRoutes(app, workspace, repository);
   registerLocalChatRoute(app, workspace, repository);
+  registerLegacyHandoffRoute(app, workspace, repository);
   const querystring = { type: 'object', additionalProperties: false } as const;
   app.get<{ Params: { id: string } }>('/v1/characters/:id/identity', { schema: { querystring } }, async (request, reply) => {
     try {

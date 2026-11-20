@@ -73,28 +73,26 @@ test('package import route is authenticated, bounded, and returns only validated
  assert.doesNotMatch(response.body, /selected|private|command/);
 });
 
-test('session pause stops the service-owned diagnostic player and its start route remains gated', async t => {
+test('session pause gates instances until the auxiliary speech drain confirms', async t => {
  const root=await mkdtemp(join(await realpath(tmpdir()),'pet-pause-route-'));
- const token='4'.repeat(64);let status:'stopped'|'running'|'stopping'='stopped';const isStopping=()=>status==='stopping';let starts=0,stops=0;let finishStop!:()=>void;
- const player={snapshot:()=>({kind:'qt-player' as const,status,detail:''}),start:async()=>{starts++;status='running';return {kind:'qt-player' as const,status,detail:''};},stop:()=>{stops++;status='stopping';return new Promise<{kind:'qt-player';status:'stopped';detail:string}>(resolve=>{finishStop=()=>{status='stopped';resolve({kind:'qt-player',status,detail:''});};});},applyDisplayPreferences:async()=>false,applyBehaviorPreferences:async()=>false,setVisible:async()=>false,close:async()=>{status='stopped';}};
- const workspace=new PetWorkspace({root,catalog:[],stopAdditional:async()=>{const result=await player.stop();return result.status==='stopped';}});
- const app=createService({token,workspace,player,runtime:{snapshot:()=>({kind:'diagnostic',status:'idle',detail:''}),probe:async()=>({kind:'diagnostic',status:'ready',detail:''}),close:async()=>{}}});
- t.after(async()=>{finishStop?.();await app.close();await rm(root,{recursive:true,force:true});});
+ const token='4'.repeat(64); let drains=0;
+ let finishStop!: (ok: boolean) => void;
+ const drain=new Promise<boolean>(resolve=>{finishStop=resolve;});
+ const workspace=new PetWorkspace({root,catalog:[],stopAdditional:()=>{drains++;return drain;}});
+ const app=createService({token,workspace,runtime:{snapshot:()=>({kind:'diagnostic',status:'idle',detail:''}),probe:async()=>({kind:'diagnostic',status:'ready',detail:''}),close:async()=>{}}});
+ t.after(async()=>{finishStop(true);await app.close();await rm(root,{recursive:true,force:true});});
  const headers={host:'127.0.0.1',authorization:`Bearer ${token}`};
- assert.equal((await app.inject({method:'POST',url:'/v1/player/start',headers,payload:{}})).statusCode,200);
  const pausedPromise=app.inject({method:'POST',url:'/v1/pets/pause',headers,payload:{expectedRevision:0}});
- for(let turn=0;turn<100&&(workspace.canStartOwnedPlayer()||!isStopping());turn++) await new Promise(resolve=>setTimeout(resolve,5));
+ for(let turn=0;turn<100&&drains===0;turn++) await new Promise(resolve=>setTimeout(resolve,5));
  assert.equal(workspace.canStartOwnedPlayer(),false);
- assert.equal(isStopping(),true);
- const duringPause=await app.inject({method:'POST',url:'/v1/player/start',headers,payload:{}});
- assert.equal(duringPause.statusCode,409);assert.equal(starts,1);
+ assert.equal(drains,1);
  const resumeDuringPause=app.inject({method:'POST',url:'/v1/pets/resume',headers,payload:{expectedRevision:0}});
- const resumeStatus=await Promise.race([resumeDuringPause.then(response=>response.statusCode),new Promise<number>(resolve=>setTimeout(()=>resolve(0),25))]);
+ const resumeStatus=await Promise.race([resumeDuringPause.then(response=>response.statusCode),new Promise<number>(resolve=>setTimeout(()=>resolve(0),100))]);
  assert.equal(resumeStatus,409);
- finishStop();
+ finishStop(true);
  const paused=await pausedPromise;
  assert.equal(paused.statusCode,200);assert.equal(paused.json().workspace.linkage,'paused');assert.equal(paused.json().workspace.revision,0);
- const rejected=await app.inject({method:'POST',url:'/v1/player/start',headers,payload:{}});
- assert.equal(rejected.statusCode,409);assert.deepEqual(rejected.json(),{error:'linkage_paused'});
- assert.equal(starts,1);assert.equal(stops,1);
+ assert.equal(workspace.canStartOwnedPlayer(),false);
+ assert.equal((await app.inject({method:'POST',url:'/v1/pets/resume',headers,payload:{expectedRevision:0}})).statusCode,200);
+ assert.equal(workspace.canStartOwnedPlayer(),true);
 });

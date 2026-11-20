@@ -37,3 +37,11 @@ class WorkerTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class GuardianTests(unittest.TestCase):
+    def test_retired_qt_player_mode_is_rejected(self):
+        worker = WORKER.resolve()
+        command = [sys.executable, '-I', str(worker.with_name('guardian.py')), str(worker), '--player']
+        result = subprocess.run(command, input='', text=True, capture_output=True, timeout=5)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (1, '', ''))

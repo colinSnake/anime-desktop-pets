@@ -24,7 +24,9 @@ export function platformCapabilities(
           ? "x11"
           : "unknown";
   const limitations = [
-    "桌宠播放器、任务跟随和语音尚未接入跨平台宿主；本页只验证诊断协议。",
+    os === "macos"
+      ? "视频桌宠的可用性及启停请查看「桌宠」；此处只检查诊断协议。"
+      : "当前平台尚不支持启动视频桌宠；本页只检查诊断协议。",
   ];
   if (os === "linux")
     limitations.push(

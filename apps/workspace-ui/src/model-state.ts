@@ -9,11 +9,23 @@ export const modelPresets = {
   deepseek: { name: 'DeepSeek', apiProtocol: 'chat-completions', baseURL: 'https://api.deepseek.com/v1' },
   anthropic: { name: 'Anthropic', apiProtocol: 'anthropic', baseURL: 'https://api.anthropic.com/v1' },
   google: { name: 'Google Gemini', apiProtocol: 'gemini', baseURL: 'https://generativelanguage.googleapis.com/v1beta' },
-  custom: { name: '自定义连接', apiProtocol: 'chat-completions', baseURL: '' },
+  custom: { name: '自定义模型 API', apiProtocol: 'chat-completions', baseURL: '' },
 } as const;
 
-type DraftState = { edit: ModelDraft; expectedRevision: number; isNew: boolean; detach: boolean; proposedProtocol?: ModelProtocol };
-type Operation = { kind: 'load' | 'save' | 'key' | 'default' | 'remove'; id?: string };
+export const modelProviderTemplates = {
+  openai: { ...modelPresets.openai, preset: 'openai', apiProtocol: 'chat-completions' },
+  deepseek: { ...modelPresets.deepseek, preset: 'deepseek' },
+  anthropic: { ...modelPresets.anthropic, name: 'Anthropic Claude', preset: 'anthropic' },
+  google: { ...modelPresets.google, preset: 'google', apiProtocol: 'chat-completions', baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai' },
+  qwen: { name: '阿里云百炼 · 通义千问', preset: 'custom', apiProtocol: 'chat-completions', baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
+  moonshot: { name: '月之暗面 · Kimi', preset: 'custom', apiProtocol: 'chat-completions', baseURL: 'https://api.moonshot.cn/v1' },
+  zhipu: { name: '智谱 · GLM', preset: 'custom', apiProtocol: 'chat-completions', baseURL: 'https://open.bigmodel.cn/api/paas/v4' },
+  minimax: { name: 'MiniMax', preset: 'custom', apiProtocol: 'chat-completions', baseURL: 'https://api.minimax.io/v1' },
+} as const;
+export type ModelProviderTemplate = keyof typeof modelProviderTemplates;
+
+type DraftState = { edit: ModelDraft; expectedRevision: number; isNew: boolean; detach: boolean; provider?: ModelProviderTemplate; proposedProtocol?: ModelProtocol };
+type Operation = { kind: 'load' | 'save' | 'key' | 'default' | 'remove' | 'remove-entry'; id?: string };
 type Feedback = { text: string; id?: string; error?: boolean };
 type Discovery = {
   id: string;
@@ -21,10 +33,12 @@ type Discovery = {
 } & ({ kind: 'pending' } | { kind: 'error'; message: string } | {
   kind: 'candidates'; revision: number; candidates: ModelCandidate[]; truncated: boolean; selected: ReadonlySet<string>;
 });
-export type ConnectionTest = { input: ModelProbeOperation } & ({ kind: 'confirm' | 'pending' } | { kind: 'result'; result: ModelProbeReply });
+export type ConnectionTest = { input: ModelProbeOperation } & ({ kind: 'confirm' | 'pending'; explicitEntry?: boolean } | { kind: 'result'; result: ModelProbeReply });
+export const probeResultKey = (id: string, entry: string) => JSON.stringify([id, entry]);
 export type ModelWorkspaceState = {
   discovery?: Discovery;
   connectionTest?: ConnectionTest;
+  probeResults?: ReadonlyMap<string, Extract<ConnectionTest, { kind: 'result' }>>;
   configuration?: SavedModelConfiguration;
   drafts: ReadonlyMap<string, DraftState>;
   expanded: ReadonlySet<string>;
@@ -75,7 +89,9 @@ export class ModelWorkspaceController {
   private readonly listeners = new Set<() => void>();
   private requested = false;
   private cancellationSent = false;
+  private visibilityGeneration = 0;
   constructor(private readonly bridge?: ModelsBridge, private readonly makeID: () => string = () => crypto.randomUUID()) {}
+  get canTest(): boolean { return !!this.bridge?.testConnection && !!this.bridge.cancelConnectionTest; }
   get available(): boolean { return !!this.bridge; }
   getSnapshot = (): ModelWorkspaceState => this.state;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -84,6 +100,7 @@ export class ModelWorkspaceController {
   private canWrite() { return !!this.bridge && !!this.state.configuration && !this.state.operation && !this.state.needsRefresh && !this.state.requiresRestart; }
   open(): void { if (!this.requested) void this.load(); }
   leave(): void {
+    this.visibilityGeneration++;
     this.cancelDiscovery();
     this.cancelConnectionTest();
     if (this.state.operation?.kind !== 'key' || this.cancellationSent) return;
@@ -101,8 +118,9 @@ export class ModelWorkspaceController {
     if (!this.state.drafts.has(id)) this.storeDraft(id, toDraft(saved));
     this.update({ expanded: new Set(this.state.expanded).add(id) });
   }
-  add(preset: ModelDraft['preset']): string | undefined {
-    if (!this.canWrite() || this.state.configuration!.connections.length + [...this.state.drafts.values()].filter(draft => draft.isNew).length >= 32) return;
+  add(preset: ModelDraft['preset'], alternativeDraftID?: string): string | undefined {
+    if (!this.canWrite() || this.state.configuration!.connections.length + [...this.state.drafts.values()]
+      .filter(draft => draft.isNew && draft.edit.id !== alternativeDraftID).length >= 32) return;
     const id = this.makeID(), entry = newEntry(this.makeID());
     const { name, apiProtocol, baseURL } = modelPresets[preset];
     this.storeDraft(id, { isNew: true, expectedRevision: 0, detach: false, edit: {
@@ -110,6 +128,14 @@ export class ModelWorkspaceController {
     } });
     this.update({ expanded: new Set(this.state.expanded).add(id), expandedModels: new Map(this.state.expandedModels).set(id, new Set([entry.entryID])) });
     return id;
+  }
+  selectProvider(id: string, provider: ModelProviderTemplate): void {
+    const template = modelProviderTemplates[provider];
+    this.change(id, draft => !draft.isNew || draft.provider === provider ? draft : { ...draft, provider, proposedProtocol: undefined, edit: {
+      ...draft.edit, displayName: template.name, preset: template.preset, apiProtocol: template.apiProtocol,
+      baseURL: template.baseURL, authMode: 'apiKey', compatibility: {},
+      models: [newEntry(draft.edit.defaultModelEntryID)],
+    } });
   }
   toggleConnection(id: string): void {
     if (this.state.expanded.has(id)) this.cancelDiscovery(id);
@@ -152,12 +178,13 @@ export class ModelWorkspaceController {
   patchEntry(id: string, entry: string, fields: Partial<Omit<ModelEntry, 'entryID'>>): void {
     this.change(id, draft => ({ ...draft, edit: { ...draft.edit, models: draft.edit.models.map(model => model.entryID === entry ? { ...model, ...fields, entryID: model.entryID } : model) } }));
   }
-  addEntry(id: string): void {
+  addEntry(id: string): string | undefined {
     const draft = this.state.drafts.get(id);
     if (!draft || draft.edit.models.length >= 33 || this.state.operation || this.stale(id)) return;
     const item = newEntry(this.makeID());
     this.change(id, value => ({ ...value, edit: { ...value.edit, models: [...value.edit.models, item] } }));
     this.toggleModel(id, item.entryID);
+    return item.entryID;
   }
   removeEntry(id: string, entry: string, replacement?: string): void {
     const before = this.state.drafts.get(id);
@@ -179,19 +206,37 @@ export class ModelWorkspaceController {
   }
   cancelProtocol(id: string): void { this.change(id, draft => ({ ...draft, proposedProtocol: undefined })); }
   detachKey(id: string, detach: boolean): void { this.change(id, draft => ({ ...draft, detach })); }
-  async save(id: string, useClipboard = false): Promise<void> {
+  async save(id: string, useClipboard = false, testAfterSave?: readonly string[]): Promise<boolean> {
     const draft = this.state.drafts.get(id);
-    if (!draft || !this.canWrite() || this.stale(id) || draft.proposedProtocol) return;
+    if (!draft || !this.canWrite() || this.stale(id) || draft.proposedProtocol) return false;
     const { edit, expectedRevision } = draft;
-    if (!edit.displayName.trim() || !edit.baseURL.trim() || edit.models.some(model => !model.displayName.trim() || !model.modelID.trim())) {
-      this.update({ feedback: { id, error: true, text: '请填写连接名称、接入地址和每个模型的名称及 API ID。' } }); return;
+    if (!edit.displayName.trim() || !edit.baseURL.trim() || edit.models.some(model => !model.displayName.trim() || !model.modelID.trim()
+      || [model.contextWindow, model.maxOutputTokens].some(value => value !== undefined && (!Number.isInteger(value) || value < 1 || value > 2147483647)))) {
+      this.update({ feedback: { id, error: true, text: '请检查连接名称、接入地址及各模型的名称、API ID 和 Token 容量。' } }); return false;
     }
     if (useClipboard ? edit.authMode !== 'apiKey' || draft.detach : keyNeedsDecision(draft, this.saved(id)) && !draft.detach) {
-      this.update({ feedback: { id, error: true, text: '地址、协议或鉴权已变更。请明确解除旧凭证绑定，或用新 Key 保存。' } }); return;
+      this.update({ feedback: { id, error: true, text: '地址、协议或鉴权已变更。请明确解除旧凭证绑定，或用新 Key 保存。' } }); return false;
     }
+    const generation = this.visibilityGeneration;
     const input = { connection: edit, expectedRevision };
-    await this.perform({ kind: useClipboard ? 'key' : 'save', id }, () => useClipboard
+    const published = await this.perform({ kind: useClipboard ? 'key' : 'save', id }, () => useClipboard
       ? this.bridge!.prepareKeySave(input) : this.bridge!.save({ ...input, credential: { kind: draft.detach ? 'remove' : 'keep' } }));
+    if (published && testAfterSave?.length) {
+      const revision = this.saved(id)?.revision;
+      let started = false;
+      for (const entry of new Set(testAfterSave)) {
+        if (generation !== this.visibilityGeneration || this.saved(id)?.revision !== revision || this.connectionTestBlockedReason(id, entry)) break;
+        this.prepareConnectionTest(id, entry);
+        started = true;
+        const outcome = await this.confirmConnectionTest(id);
+        if (!outcome?.ok) break; // Stop when a result cannot be confirmed; never retry on its own.
+      }
+      const feedback = this.state.feedback;
+      if (started && feedback?.id === id && !feedback.error) this.update({ feedback: { ...feedback,
+        text: feedback.text.replace('已保存本地配置，尚未测试连接。', '已保存本地配置，测试状态见服务商列表。'),
+      } });
+    }
+    return published;
   }
   async setDefault(id: string | null, entry?: string): Promise<void> {
     if (!this.canWrite()) return;
@@ -203,13 +248,24 @@ export class ModelWorkspaceController {
     const input: ModelDefault = id === null ? { expectedRevision, connectionID: null } : { expectedRevision, connectionID: id, entryID: entryID! };
     await this.perform({ kind: 'default', id: id ?? undefined }, () => this.bridge!.setDefault(input));
   }
-  async remove(id: string, replacementDefault?: string | null): Promise<void> {
+  async remove(id: string, replacementDefault?: string | null): Promise<boolean> {
     const saved = this.saved(id);
-    if (!this.canWrite() || !saved) return;
+    if (!this.canWrite() || !saved) return false;
     const { defaultConnectionID } = this.state.configuration!;
     const expectedRevision = saved.revision;
-    if (defaultConnectionID === id ? replacementDefault === undefined || (replacementDefault !== null && (replacementDefault === id || !this.saved(replacementDefault))) : replacementDefault !== undefined) return;
-    await this.perform({ kind: 'remove', id }, () => this.bridge!.remove({ connectionID: id, expectedRevision, ...(replacementDefault === undefined ? {} : { replacementDefault }) }));
+    if (defaultConnectionID === id ? replacementDefault === undefined || (replacementDefault !== null && (replacementDefault === id || !this.saved(replacementDefault))) : replacementDefault !== undefined) return false;
+    return this.perform({ kind: 'remove', id }, () => this.bridge!.remove({ connectionID: id, expectedRevision, ...(replacementDefault === undefined ? {} : { replacementDefault }) }));
+  }
+  async deleteModel(id: string, revision: number, entry: string, replacement?: string | null): Promise<boolean> {
+    const saved = this.saved(id);
+    if (!this.canWrite() || !saved || saved.revision !== revision || this.state.drafts.has(id)
+      || !saved.models.some(model => model.entryID === entry)) return false;
+    if (saved.models.length === 1) return this.remove(id, replacement);
+    const models = saved.models.filter(model => model.entryID !== entry);
+    if (saved.defaultModelEntryID === entry ? !models.some(model => model.entryID === replacement) : replacement !== undefined) return false;
+    const { edit } = toDraft(saved);
+    const connection = { ...edit, models, defaultModelEntryID: replacement ?? saved.defaultModelEntryID };
+    return this.perform({ kind: 'remove-entry', id }, () => this.bridge!.save({ connection, expectedRevision: revision, credential: { kind: 'keep' } }));
   }
   discoveryBlockedReason(id: string): string | undefined {
     const saved = this.saved(id), draft = this.state.drafts.get(id);
@@ -222,16 +278,16 @@ export class ModelWorkspaceController {
     if (this.state.operation || this.state.discovery?.kind === 'pending' || this.state.connectionTest?.kind === 'pending') return '已有模型操作在处理。';
     return undefined;
   }
-  private testInput(id: string): ModelProbeInput | undefined {
+  private testInput(id: string, entryID?: string): ModelProbeInput | undefined {
     const saved = this.saved(id), connection = this.state.drafts.get(id)?.edit ?? saved;
-    const entry = connection?.models.find(item => item.entryID === connection.defaultModelEntryID);
+    const entry = connection?.models.find(item => item.entryID === (entryID ?? connection.defaultModelEntryID));
     if (!saved || !connection || !entry) return;
     const input = { connectionID: id, expectedRevision: saved.revision, entryID: entry.entryID, modelID: entry.modelID,
       ...(entry.maxOutputTokens === undefined ? {} : { maxOutputTokens: entry.maxOutputTokens }),
       ...connection.compatibility, ...entry.compatibility };
     return validProbeInput(input) ? input : undefined;
   }
-  connectionTestBlockedReason(id: string): string | undefined {
+  connectionTestBlockedReason(id: string, entryID?: string): string | undefined {
     const saved = this.saved(id), draft = this.state.drafts.get(id);
     if (!this.bridge?.testConnection || !this.bridge.cancelConnectionTest) return '此工作区未接入连接测试。';
     if (!saved) return '请先保存连接，再测试。';
@@ -239,31 +295,48 @@ export class ModelWorkspaceController {
     if (draft && (draft.detach || draft.proposedProtocol || draft.edit.baseURL !== saved.baseURL ||
         draft.edit.apiProtocol !== saved.apiProtocol || draft.edit.authMode !== saved.authMode)) return '请先保存地址、协议或凭证变更，再测试。';
     if (saved.credentialState === 'missing') return '请先保存此连接的 API Key，再测试。';
-    if (!this.testInput(id)) return '请填写有效的连接默认模型 API ID 和输出设置。';
+    if (!this.testInput(id, entryID)) return '请填写有效的模型 API ID 和输出设置。';
     if (this.state.operation || this.state.discovery?.kind === 'pending' || this.state.connectionTest?.kind === 'pending') return '已有模型操作在处理。';
   }
-  prepareConnectionTest(id: string): void {
-    if (this.connectionTestBlockedReason(id)) return;
-    this.update({ connectionTest: { kind: 'confirm', input: { ...this.testInput(id)!, operationID: this.makeID() } } });
+  savedDefaultTestBlockedReason(id: string, expectedRevision: number): string | undefined {
+    const saved = this.saved(id);
+    if (!saved || saved.revision !== expectedRevision) return '请先核对已保存的连接版本。';
+    if (this.state.drafts.has(id)) return '请先保存或取消此连接的草稿。';
+    return this.connectionTestBlockedReason(id);
   }
-  async confirmConnectionTest(id: string): Promise<void> {
+  async testSavedDefault(id: string, expectedRevision: number): Promise<ModelProbeReply | undefined> {
+    if (this.savedDefaultTestBlockedReason(id, expectedRevision)) return;
+    this.prepareConnectionTest(id);
+    return this.confirmConnectionTest(id);
+  }
+  prepareConnectionTest(id: string, entryID?: string): void {
+    if (this.connectionTestBlockedReason(id, entryID)) return;
+    this.update({ connectionTest: { kind: 'confirm', explicitEntry: entryID !== undefined, input: { ...this.testInput(id, entryID)!, operationID: this.makeID() } } });
+  }
+  async confirmConnectionTest(id: string): Promise<ModelProbeReply | undefined> {
     const current = this.state.connectionTest;
-    if (current?.kind !== 'confirm' || current.input.connectionID !== id || this.connectionTestBlockedReason(id)) return;
+    if (current?.kind !== 'confirm' || current.input.connectionID !== id || this.connectionTestBlockedReason(id, current.input.entryID)) return;
     const { operationID, ...input } = current.input;
-    if (JSON.stringify(input) !== JSON.stringify(this.testInput(id))) { this.cancelConnectionTest(id); return; }
+    if (JSON.stringify(input) !== JSON.stringify(this.testInput(id, current.explicitEntry ? input.entryID : undefined))) { this.cancelConnectionTest(id); return; }
     const pending = { kind: 'pending', input: current.input } as const;
     this.update({ connectionTest: pending });
     let result: ModelProbeReply;
     try { const reply = await this.bridge!.testConnection!(pending.input); result = isProbeReply(reply, input) ? reply : probeError('unavailable'); }
     catch { result = probeError('unavailable'); }
     if (this.state.connectionTest !== pending || this.saved(id)?.revision !== input.expectedRevision) return;
-    this.update({ connectionTest: { kind: 'result', input: pending.input, result } });
+    const completed = { kind: 'result', input: pending.input, result } as const;
+    this.update({ connectionTest: completed, probeResults: this.state.drafts.has(id) ? this.state.probeResults
+      : new Map(this.state.probeResults).set(probeResultKey(id, input.entryID), completed) });
+    return result;
   }
   cancelConnectionTest(id?: string, showCancellation = false): void {
     const current = this.state.connectionTest;
     if (!current || id !== undefined && id !== current.input.connectionID) return;
-    this.update({ connectionTest: showCancellation && current.kind === 'pending'
-      ? { kind: 'result', input: current.input, result: probeError('cancelled') } : undefined });
+    const cancelled = showCancellation && current.kind === 'pending'
+      ? { kind: 'result', input: current.input, result: probeError('cancelled') } as const : undefined;
+    this.update({ connectionTest: cancelled, ...(cancelled && !this.state.drafts.has(current.input.connectionID) ? {
+      probeResults: new Map(this.state.probeResults).set(probeResultKey(current.input.connectionID, current.input.entryID), cancelled),
+    } : {}) });
     if (current.kind === 'pending') void this.bridge?.cancelConnectionTest?.(current.input.operationID).catch(() => {});
   }
   async discover(id: string): Promise<void> {
@@ -309,7 +382,7 @@ export class ModelWorkspaceController {
     this.storeDraft(id, { ...draft, edit: { ...draft.edit, models: [...draft.edit.models, ...entries] } });
     this.update({ feedback: { id, text: `已将 ${entries.length} 个模型加入草稿，保存配置后才会写入。` } });
   }
-  private async perform(operation: Operation, run: () => Promise<ModelWorkspaceReply>): Promise<void> {
+  private async perform(operation: Operation, run: () => Promise<ModelWorkspaceReply>): Promise<boolean> {
     this.cancelDiscovery();
     this.cancelConnectionTest();
     if (operation.kind === 'key') this.cancellationSent = false;
@@ -324,11 +397,11 @@ export class ModelWorkspaceController {
       this.update({ operation: undefined, needsRefresh: kind === 'load' || ['storage_unavailable', 'configuration_conflict', 'publication_uncertain', 'write_outcome_unknown'].includes(result.error),
         requiresRestart: this.state.requiresRestart || result.error === 'publication_uncertain',
         feedback: { id, text: messages[result.error] + suffix, error: result.error !== 'key_input_cancelled' } });
-      return;
+      return false;
     }
     const drafts = new Map(this.state.drafts);
     if (id && (kind === 'save' || kind === 'key' || kind === 'remove')) drafts.delete(id);
-    const note = kind === 'remove' ? '连接已从本地配置移除。' : kind === 'default' ? '已更新本地默认值。' : '已保存本地配置，尚未测试连接。';
+    const note = kind === 'remove-entry' ? '模型已从本地配置移除。' : kind === 'remove' ? '连接已从本地配置移除。' : kind === 'default' ? '已更新本地默认值。' : '已保存本地配置，尚未测试连接。';
     const durability = result.durability === 'unconfirmed' ? ' 文件发布后未确认磁盘同步，请重新读取核对。' : '';
     const retained = result.retainedCredentialVersions ? ' 旧凭证条目仍保留。' : '';
     const known = new Map(result.configuration.connections.map(connection => [connection.id, connection.models]));
@@ -340,8 +413,12 @@ export class ModelWorkspaceController {
       const entryIDs = new Set(entries.map(item => item.entryID));
       return [[id, new Set([...items].filter(entry => entryIDs.has(entry)))]] as const;
     }));
-    this.update({ configuration: result.configuration, drafts, expanded, expandedModels, needsRefresh: !!durability,
+    const revisions = new Map(result.configuration.connections.map(connection => [connection.id, connection.revision]));
+    const probeResults = new Map([...(this.state.probeResults ?? [])].filter(([, item]) =>
+      revisions.get(item.input.connectionID) === item.input.expectedRevision));
+    this.update({ configuration: result.configuration, drafts, expanded, expandedModels, probeResults, needsRefresh: !!durability,
       requiresRestart: this.state.requiresRestart || result.writesBlocked === true, operation: undefined,
       feedback: kind === 'load' ? undefined : { id: kind === 'remove' ? undefined : id, text: note + durability + retained } });
+    return true;
   }
 }

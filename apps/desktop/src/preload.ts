@@ -2,6 +2,9 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { DesktopBridge } from "../../../packages/contracts/src/index.ts";
 
 const bridge: DesktopBridge = Object.freeze({
+  ...(process.platform === 'darwin' ? {
+    legacyCharacterHandoff: (input: Parameters<NonNullable<DesktopBridge['legacyCharacterHandoff']>>[0]) => ipcRenderer.invoke('pet:legacy-character-handoff', input),
+  } : {}),
   ...(process.platform === 'darwin' ? { characters: Object.freeze({
     readIdentity: input => ipcRenderer.invoke('pet:characters-readIdentity', input),
     saveIdentity: input => ipcRenderer.invoke('pet:characters-saveIdentity', input),
@@ -15,6 +18,7 @@ const bridge: DesktopBridge = Object.freeze({
     restoreMemory: input => ipcRenderer.invoke('pet:characters-restoreMemory', input),
     selectKnowledgeFile: () => ipcRenderer.invoke('pet:characters-selectKnowledgeFile'),
     addKnowledgeBatch: input => ipcRenderer.invoke('pet:characters-addKnowledgeBatch', input),
+    saveChatMemory: input => ipcRenderer.invoke('pet:characters-saveChatMemory', input),
     addMemory: input => ipcRenderer.invoke('pet:characters-addMemory', input),
     confirmMemory: input => ipcRenderer.invoke('pet:characters-confirmMemory', input),
     withdrawMemory: input => ipcRenderer.invoke('pet:characters-withdrawMemory', input),
@@ -66,9 +70,8 @@ const bridge: DesktopBridge = Object.freeze({
     pause: (input) => ipcRenderer.invoke("pet:pets-pause", input),
     resume: (input) => ipcRenderer.invoke("pet:pets-resume", input),
   } satisfies NonNullable<DesktopBridge["pets"]>),
+  openWorkspaceData: () => ipcRenderer.invoke("pet:open-workspace-data"),
   snapshot: () => ipcRenderer.invoke("pet:snapshot"),
   probeRuntime: () => ipcRenderer.invoke("pet:probe-runtime"),
-  startPlayer: () => ipcRenderer.invoke("pet:start-player"),
-  stopPlayer: () => ipcRenderer.invoke("pet:stop-player"),
 });
 contextBridge.exposeInMainWorld("petDesktop", bridge);

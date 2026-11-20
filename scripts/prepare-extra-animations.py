@@ -12,7 +12,7 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_ARCHIVE = ROOT / '.local/animation-sources/bailong-desktop-pet-v0.5.1-windows-x64-webm.zip'
+DEFAULT_ARCHIVE = ROOT / '.local/pets/longmei/videos/bailong-desktop-pet-v0.5.1-windows-x64-webm.zip'
 DEFAULT_OUT = ROOT / '.local/animation-sources/jingh12312-v0.5.1-extra'
 EXPECTED_BYTES = 236968505
 EXPECTED_SHA256 = '4b636bf1e92a82a798b01be09cbd658cbfc46c548dd1a38acee31368b9c78580'

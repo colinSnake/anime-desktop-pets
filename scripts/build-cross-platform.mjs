@@ -1,12 +1,19 @@
 /** 构建仅写本次暂存目录，全部成功后提升；不启动桌面或生成安装包。 */
 import { build as bundle } from 'esbuild';
 import { build as buildUI } from 'vite';
-import { mkdir, mkdtemp, copyFile, rename, rm, access } from 'node:fs/promises';
+import { mkdir, mkdtemp, copyFile, rename, rm, access, lstat, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { stageStartupVideo } from './stage-startup-video.mjs';
+import { stageVideoUI } from './stage-video-ui.mjs';
+
+const approvedLongmeiCovers = new Set([
+  '42616c6d59356906d5477a85a52647a044cf5dcfa995fa2dd82be62845887104', // Original / rollback.
+  '0e91b704b1114522001d4211c9590cf02861075b52428102ec2731d6fb5e2c88', // Local 2× cover.
+]);
 
 async function buildMacHelper(root, source, output) {
   const arch = process.arch === 'arm64' ? 'arm64' : process.arch === 'x64' ? 'x86_64' : undefined;
@@ -61,27 +68,41 @@ export async function buildCrossPlatform(root, tools = { bundle, buildUI }) {
       });
     }
     if (process.platform === 'darwin') {
+      await copyFile(join(root, 'apps/app-service/src/agent/harness-worker.mjs'), join(service, 'harness-worker.mjs'));
       for (const [source, output, build] of [
         ['apps/app-service/native/model-keychain.swift', join(service, 'model-keychain'), tools.buildKeychainHelper],
         ['apps/desktop/native/codex-presence.swift', join(desktop, 'codex-presence'), tools.buildPresenceHelper],
         ['apps/desktop/native/codex-window-bounds.swift', join(desktop, 'codex-window-bounds'), tools.buildWindowBoundsHelper],
+        ['apps/desktop/native/video-fullscreen.swift', join(desktop, 'video-fullscreen'), tools.buildVideoFullscreenHelper],
       ]) {
         if (build) await build(root, output);
         else await buildMacHelper(root, source, output);
         await access(output);
       }
       await stageStartupVideo(root, join(desktop, 'startup'));
+      await stageVideoUI(root, join(desktop, 'video'), tools.bundle);
       for (const name of ['task_reader.py', 'task_reader_worker.py']) {
         await copyFile(join(root, 'apps/runtime-bridge', name), join(desktop, 'runtime', name));
       }
-      await copyFile(join(root, 'apps/pet-runtime/bailong/dragon_tasks.py'), join(desktop, 'runtime', 'dragon_tasks.py'));
+      await copyFile(join(root, 'apps/runtime-bridge/task_events.py'), join(desktop, 'runtime', 'task_events.py'));
     }
     const branding = join(desktop, 'branding');
     await mkdir(branding);
     for (const icon of ['app-icon.png', 'petStatusTemplate.png', 'petStatusTemplate@2x.png']) {
       await copyFile(join(root, 'resources', 'branding', icon), join(branding, icon));
     }
-    for (const name of ['worker.py', 'guardian.py', 'player_worker.py', 'player_protocol.py', 'player_adapter.py', 'pet_cover.py']) {
+    // Only the locally approved ignored still may be staged. It is not downloaded or distributed.
+    const cover = join(root, '.local', 'pets', 'longmei', 'cover.png');
+    if (process.platform === 'darwin' && (await lstat(cover).catch(() => undefined))?.isFile()) {
+      const info = await lstat(cover);
+      if (info.size <= 1024 * 1024) {
+        const data = await readFile(cover);
+        if (approvedLongmeiCovers.has(createHash('sha256').update(data).digest('hex'))) {
+          await writeFile(join(branding, 'pet-cover.png'), data);
+        }
+      }
+    }
+    for (const name of ['worker.py', 'guardian.py']) {
       await copyFile(join(root, 'apps/runtime-bridge', name), join(desktop, 'runtime', name));
     }
     const speech = join(desktop, 'runtime', 'speech');
@@ -94,13 +115,13 @@ export async function buildCrossPlatform(root, tools = { bundle, buildUI }) {
       await copyFile(join(root, 'apps/pet-runtime/pets', name), join(desktop, 'runtime', name));
     }
     await tools.buildUI({
-      configFile: false, root: join(root, 'apps/workspace-ui'), base: './',
+      configFile: join(root, 'apps/workspace-ui/vite.config.mjs'), root: join(root, 'apps/workspace-ui'),
       build: { outDir: join(desktop, 'ui'), emptyOutDir: true, sourcemap: false },
     });
     const uiAssets = join(desktop, 'ui', 'assets');
     await mkdir(uiAssets, { recursive: true });
     await copyFile(join(root, 'resources', 'branding', 'app-icon.svg'), join(uiAssets, 'app-icon.svg'));
-    for (const path of ['main.cjs', 'preload.cjs', 'ui/index.html', 'runtime/worker.py', 'runtime/guardian.py', 'runtime/player_worker.py', 'runtime/player_protocol.py', 'runtime/player_adapter.py', 'runtime/pet_cover.py', 'runtime/pet_sources.py', 'runtime/pet_library.py', 'runtime/pet_reference_lock.py']) await access(join(desktop, path));
+    for (const path of ['main.cjs', 'preload.cjs', 'ui/index.html', 'runtime/worker.py', 'runtime/guardian.py', 'runtime/pet_sources.py', 'runtime/pet_library.py', 'runtime/pet_reference_lock.py']) await access(join(desktop, path));
     await access(join(service, 'entry.cjs'));
     await publishBuild([
       { stage: service, target: join(root, 'apps/app-service/dist'), backup: join(staging, 'service-previous') },

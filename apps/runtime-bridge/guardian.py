@@ -13,8 +13,7 @@ MAX_LINE = 4096
 
 
 def main():
-    player = len(sys.argv) == 3 and sys.argv[2] == '--player'
-    if (len(sys.argv) != 2 and not player) or not os.path.isabs(sys.argv[1]):
+    if len(sys.argv) != 2 or not os.path.isabs(sys.argv[1]):
         return 1
     stopped = threading.Event()
     parent_ended = threading.Event()
@@ -85,7 +84,7 @@ def main():
         # its pipe here: a blocked writer must not block the independent reaper.
         if child.poll() is None:
             try:
-                child.wait(timeout=2.0 if player else 0.15)
+                child.wait(timeout=0.15)
             except subprocess.TimeoutExpired:
                 stopped.set()
                 child.terminate()

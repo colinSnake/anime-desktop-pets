@@ -5,7 +5,7 @@ import os
 import stat
 import time
 
-from dragon_tasks import Cursor, MAX_FILES, POLL_BYTES, STALE_SECONDS, TAIL_BYTES, TaskSnapshot
+from task_events import Cursor, MAX_FILES, POLL_BYTES, STALE_SECONDS, TAIL_BYTES, TaskSnapshot
 
 MAX_ENTRIES = 20_000
 MAX_HEADER = 16_384

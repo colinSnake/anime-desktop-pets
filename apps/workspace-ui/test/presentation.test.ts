@@ -1,3 +1,4 @@
+import { renderWorkspace } from './render-workspace.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
@@ -14,10 +15,30 @@ const workspace: WorkspaceData = { revision: 0, theme: 'system', maximumRunning:
 
 test('sidebar removes the slogan and theme selector while preserving navigation', () => {
   const html = renderToStaticMarkup(createElement(WorkspaceView, { ...diagnostics }));
-  assert.doesNotMatch(html, /让喜欢的角色，陪在桌边。/);
   assert.match(html, /工作区侧栏/);
   const sidebar = html.match(/<aside[\s\S]*?<\/aside>/)?.[0];
-  assert.ok(sidebar); assert.doesNotMatch(sidebar, /界面主题|workspace-theme|theme-toggle/);
+  assert.ok(sidebar); assert.doesNotMatch(sidebar, /让喜欢的角色，陪在桌边。|界面主题|workspace-theme|theme-toggle/);
+});
+
+test('workspace document uses only the product name, not the old title banner', async () => {
+  const html = await readFile(new URL('../index.html', import.meta.url), 'utf8');
+  assert.match(html, /<title>桌边小崽<\/title>/);
+});
+
+test('every page shows a read-only breadcrumb with the current page marked', async () => {
+  const pages = [
+    ['pets', '桌宠'], ['chat', '聊天'], ['identity', '身份'], ['memory', '记忆'], ['goals', '能力与目标'],
+    ['models', '模型管理'], ['speech', '语音互动'], ['live', '直播管理'], ['advanced', '高级'],
+  ] as const;
+  for (const [initialPage, label] of pages) {
+    const html = await renderWorkspace(createElement(WorkspaceView, { ...diagnostics, initialPage }));
+    const breadcrumb = html.match(/<nav[^>]+aria-label="当前位置"[^>]*>[\s\S]*?<\/nav>/)?.[0];
+    assert.ok(breadcrumb, `${initialPage} should render a breadcrumb`);
+    assert.match(breadcrumb, /<ol\b/);
+    assert.match(breadcrumb, />工作区<\//);
+    assert.match(breadcrumb, new RegExp(`aria-current="page">${label}</span>`));
+    assert.doesNotMatch(breadcrumb, /<(?:button|a)\b/);
+  }
 });
 
 test('scrollbars are 4px both ways with rounded thumbs; sidebar stays scrollable without bars', async () => {
@@ -29,7 +50,7 @@ test('scrollbars are 4px both ways with rounded thumbs; sidebar stays scrollable
   assert.match(css, /\.sidebar(?:::-webkit-scrollbar| nav::-webkit-scrollbar)[^{]*\{[^}]*display:\s*none/);
 });
 
-test('development pet cards request only a fixed same-origin cover, never a filesystem path', async () => {
+test('the development pet scene requests only a fixed same-origin cover, never a filesystem path', async () => {
   const controller = new PetWorkspaceController({ list: async () => ({ ok: true, workspace }) } as PetsBridge);
   await controller.load(); controller.edit({ displayName: '未保存名称' });
   const html = renderToStaticMarkup(createElement(WorkspaceView, { ...diagnostics, petState: controller.getSnapshot(), petController: controller }));

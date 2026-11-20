@@ -1,3 +1,4 @@
+import { renderWorkspace } from './render-workspace.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createElement } from 'react';
@@ -91,12 +92,23 @@ test('theme persistence is service-backed and does not replace an unsaved pet dr
 });
 
 const diagnostics = { busy: false, error: '', onRefresh() {}, onProbe() {}, onStartPlayer() {}, onStopPlayer() {} };
-test('SSR starts on pets with all nine navigation entries and truthful empty catalog', () => {
+test('SSR starts on pets with six top-level navigation entries and truthful empty catalog', async () => {
   const html = renderToStaticMarkup(createElement(WorkspaceView, diagnostics));
-  for (const title of ['我的桌宠', '聊天', '身份', '记忆', '能力与目标', '模型管理', '语音互动', '直播管理', '高级']) assert.ok(html.includes(title), title);
-  assert.match(html, /aria-current="page"[^>]*>.*我的桌宠/);
-  const speech = renderToStaticMarkup(createElement(WorkspaceView, {...diagnostics,initialPage:'speech'}));
-  assert.match(speech, /disabled=""[^>]*>保存语音设置/); assert.match(html, /尚未连接桌面宿主/);
+  const sidebar = (markup: string) => markup.match(/<aside class="sidebar"[^>]*>.*?<\/aside>/)?.[0];
+  const navigation = sidebar(html);
+  assert.ok(navigation);
+  assert.deepEqual([...navigation.matchAll(/<button class="nav-item"[^>]*><span class="nav-icon"[^>]*>.*?<\/span>([^<]+)/g)].map(match => match[1]),
+    ['桌宠', '聊天', '模型管理', '语音互动', '直播管理', '高级']);
+  assert.match(navigation, /aria-current="page"[^>]*>.*桌宠/);
+  assert.match(html, /<h1>桌宠<\/h1>/);
+  assert.doesNotMatch(html, /我的桌宠/);
+  const speech = await renderWorkspace(createElement(WorkspaceView, {...diagnostics,initialPage:'speech'}));
+  const withoutSelection = (markup: string | undefined) => markup?.replace(' aria-current="page"', '');
+  for (const initialPage of ['chat', 'models', 'speech', 'live', 'advanced'] as const) {
+    const markup = renderToStaticMarkup(createElement(WorkspaceView, { ...diagnostics, initialPage }));
+    assert.equal(withoutSelection(sidebar(markup)), withoutSelection(navigation), initialPage);
+  }
+  assert.match(speech, /disabled=""[^>]*><svg[^>]*>.*?<\/svg><span>启用气泡播报/); assert.match(html, /尚未连接桌面宿主/);
   assert.doesNotMatch(html, /启动开发桌宠/);
 });
 
@@ -106,6 +118,7 @@ test('on-demand settings preserve editing and the page preserves safe deletion a
   const settings = renderToStaticMarkup(createElement(PetSettings, {state:controller.getSnapshot(), controller, onClose(){}}));
   assert.match(settings, /value="草稿"/); assert.match(html, /未保存/);
   assert.match(settings, /min="128"/); assert.match(settings, /max="384"/);
+  assert.match(settings, /随应用启动/); assert.match(settings, /下次打开应用时自动启动/);
   assert.match(html, /只删除.*配置/); assert.match(html, /不.*删除.*素材/);
   assert.match(html, /role="dialog"/); assert.match(html, /添加桌宠/);
   assert.doesNotMatch(html, /没有可添加的角色，请检查启动命令中的素材目录/);
@@ -156,10 +169,13 @@ test('imported package references are labeled unavailable and cannot trigger pla
  assert.match(html, /disabled=""[^>]*>启动/);
 });
 
-test('compact cards and on-demand name validation stay semantic', async () => {
+test('the current pet scene and on-demand name validation stay semantic', async () => {
   const controller = new PetWorkspaceController(bridge()); await controller.load(); controller.edit({ displayName: 'x'.repeat(81) });
   const html = renderToStaticMarkup(createElement(WorkspaceView, { ...diagnostics, petState: controller.getSnapshot(), petController: controller }));
-  assert.match(html, /<article[^>]*aria-label="小一"/); assert.match(html, /未接入播放器/);
+  const stageTitle = html.match(/<section class="pet-stage"[^>]*aria-labelledby="([^"]+)"/)?.[1];
+  assert.ok(stageTitle);
+  assert.ok(html.includes(`<h2 id="${stageTitle}">小一</h2>`));
+  assert.match(html, /未接入播放器/);
   const settings = renderToStaticMarkup(createElement(PetSettings, {state:controller.getSnapshot(), controller, onClose(){}}));
   assert.match(settings, /aria-invalid="true"/); assert.match(settings, /名称需为 1–80 个字符/);
   assert.match(settings, /disabled=""[^>]*>保存设置/);
@@ -200,9 +216,9 @@ test('background phase refresh cannot overwrite a newer control response or clea
 test('runtime control shows explicit development start/stop and refuses failed deletion', () => {
  const render=(phase:WorkspaceData['instances'][number]['phase'])=>{
   const controller=new PetWorkspaceController(bridge());
-  return renderToStaticMarkup(createElement(WorkspaceView,{petState:{workspace:{...workspace,instances:[{...workspace.instances[0]!,phase}]},selectedId:'pet-one',drafts:{'pet-one':{...workspace.instances[0]!,displayName:'小一'}},notice:'',needsRefresh:false},petController:controller,busy:false,error:'',onRefresh(){},onProbe(){},onStartPlayer(){},onStopPlayer(){}}));
+  return renderToStaticMarkup(createElement(WorkspaceView,{petState:{workspace:{...workspace,instances:[{...workspace.instances[0]!,phase}]},selectedId:'pet-one',drafts:{'pet-one':{...workspace.instances[0]!,displayName:'小一'}},notice:'',needsRefresh:false},petController:controller,busy:false,error:'',onRefresh(){},onProbe(){}}));
  };
- assert.match(render('stopped'),/>启动</);assert.match(render('starting'),/取消启动/);assert.match(render('running'),/>停止</);assert.match(render('failed'),/确认停止/);
+ assert.match(render('stopped'),/>启动桌宠</);assert.match(render('starting'),/取消启动/);assert.match(render('running'),/>停止桌宠</);assert.match(render('failed'),/确认停止/);
  assert.match(render('failed'),/disabled=""[^>]*>删除实例/);
 });
 test('instance lifecycle feedback never claims configuration is being saved', () => {
@@ -233,23 +249,33 @@ test('on-demand settings distinguish saved display settings from confirmed runti
  const html=renderToStaticMarkup(createElement(PetSettings,{state:{workspace:data,selectedId:'pet-one',drafts:{'pet-one':{...data.instances[0]!,displayName:'小一'}},notice:'',needsRefresh:false},controller,onClose(){}}));
  assert.match(html,/已保存<\/strong>：200 px/);assert.match(html,/运行时已应用<\/strong>：256 px/);
  assert.match(html,/显示偏好待应用/);
- assert.match(html,/<h3[^>]*>活动<\/h3>[\s\S]*自主活动[\s\S]*桌面移动/);
+ assert.match(html,/<h3[^>]*>行为<\/h3>[\s\S]*自主活动[\s\S]*桌面移动/);
  assert.doesNotMatch(html,/应用启动时自动出现/);
  assert.match(html,/隐藏实例/);
 });
 
-test('loading a runtime-saved position revision preserves an unsaved renderer draft', async () => {
+test('refresh adopts native menu and drag edits without replacing unsaved fields', async () => {
  let current = workspace;
  const controller = new PetWorkspaceController(bridge({ list: async () => ({ ok: true, workspace: current }) }));
  await controller.load();
  controller.edit({ displayName: '尚未保存的名称', preferences: { ...workspace.instances[0]!.preferences, size: 300 } });
- current = { ...workspace, revision: 1, instances: [{ ...workspace.instances[0]!, preferences: { ...workspace.instances[0]!.preferences, x: 140, y: 260 } }] };
+ current = { ...workspace, revision: 1, instances: [{ ...workspace.instances[0]!, preferences: { ...workspace.instances[0]!.preferences, x: 140, y: 260, size: 320, movement: true } }] };
  assert.equal(await controller.refreshRuntime(), true);
  assert.equal(controller.getSnapshot().workspace!.instances[0]!.preferences.x, 140);
  assert.equal(controller.getSnapshot().drafts['pet-one']!.displayName, '尚未保存的名称');
  assert.equal(controller.getSnapshot().drafts['pet-one']!.preferences.size, 300);
  assert.equal(controller.getSnapshot().drafts['pet-one']!.preferences.x, 140);
+ assert.equal(controller.getSnapshot().drafts['pet-one']!.preferences.movement, true);
  assert.equal(isDraftDirty(controller.getSnapshot(), 'pet-one'), true);
+});
+
+test('a native menu rollback failure is visible without exposing arbitrary service messages', async () => {
+ const row = { ...workspace.instances[0]!, phase: 'running' as const, menuFeedback: 'rollback-failed' as const };
+ const listing = { ...workspace, instances: [row] };
+ const controller = new PetWorkspaceController(bridge({ list: async () => ok(listing) }));
+ assert.equal(await controller.load(), true);
+ const html = renderToStaticMarkup(createElement(WorkspaceView, { ...diagnostics, petState: controller.getSnapshot(), petController: controller }));
+ assert.match(html, /右键设置未保存，运行值可能与保存值不同/);
 });
 
 test('on-demand settings separate saved position from runtime position and surface persistence failure', () => {
@@ -315,9 +341,4 @@ test('linkage page exposes conservative stop-unconfirmed state and manual-only r
  assert.match(render('paused'),/解除暂停/);
  assert.match(render('paused'),/需逐个手动启动/);
  assert.match(render('active'),/暂停联动/);
-});
-
-test('advanced diagnostic player start is visibly disabled behind the linkage gate', () => {
- const html=renderToStaticMarkup(createElement(WorkspaceView,{...diagnostics,initialPage:'advanced',snapshot:{protocolVersion:1,product:'桌边小崽',stage:'foundation',service:{status:'ready'},platform:{os:'macos',session:'native',desktopPet:'not-integrated',limitations:[]},runtime:{kind:'diagnostic',status:'idle',detail:''},player:{kind:'qt-player',status:'stopped',detail:''}},petState:{workspace:{...workspace,linkage:'paused'},drafts:{},notice:'',needsRefresh:false},petController:new PetWorkspaceController(bridge())}));
- assert.match(html,/disabled=""[^>]*>启动开发桌宠/);
 });
