@@ -542,10 +542,30 @@ test('compiled preload exposes only fixed online chat methods on macOS', async (
   assert.doesNotMatch(preload, /\/v1\/chat|127\.0\.0\.1|mcred-v1/);
 });
 
+test('compiled macOS preload exposes only the four fixed pet Agent task methods', async () => {
+  const { runInNewContext } = await import('node:vm');
+  const preload = await readFile(`${out}/preload.cjs`, 'utf8');
+  const methods = ['create', 'list', 'read', 'cancel'];
+  for (const platform of ['darwin', 'win32', 'linux']) {
+    let bridge; const calls = [];
+    runInNewContext(preload, { process: { platform }, require: () => ({
+      contextBridge: { exposeInMainWorld: (_name, value) => { bridge = value; } },
+      ipcRenderer: { invoke: async (...args) => calls.push(args) },
+    }) });
+    if (platform !== 'darwin') { assert.equal(bridge.agentTasks, undefined); continue; }
+    assert.deepEqual(Object.keys(bridge.agentTasks), methods);
+    const input = { petID: 'pet-synthetic' };
+    for (const method of methods) await bridge.agentTasks[method](input, 'pet:ignored');
+    assert.deepEqual(calls, methods.map(method => [`pet:agent-tasks-${method}`, input]));
+  }
+  assert.doesNotMatch(preload, /\/v1\/agent-tasks|clipboard|agent-tasks\.sqlite/);
+});
+
 test('workspace video stages its fixed surface without media or workspace preload access', async () => {
   const pkg = JSON.parse(await readFile('package.json', 'utf8'));
   const root = resolve(out, 'video');
-  assert.match(pkg.scripts['dev:desktop'], /run-pet-video-preview\.mjs --workspace$/);
+  assert.match(pkg.scripts['dev:desktop'], /run-pet-video-preview\.mjs --workspace --hmr$/);
+  assert.match(pkg.scripts['dev:desktop:static'], /run-pet-video-preview\.mjs --workspace$/);
   assert.match(pkg.scripts['dev:desktop:codex'], /run-pet-video-preview\.mjs --workspace --launch-codex$/);
   const main = await readFile(resolve(out, 'main.cjs'), 'utf8');
   assert.match(main, /PET_WORKSPACE_VIDEO_DIR/);

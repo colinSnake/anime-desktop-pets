@@ -1,8 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import type { ChatHistory } from './chat-history.ts';
 import { chatHistoryPaths, historyStatus, isHistoryInput, type ChatHistoryError } from '../../../packages/contracts/src/chat-history.ts';
+import { chatRequestWithAttachmentsBytes, validateChatAttachments } from '../../../packages/contracts/src/chat-attachments.ts';
 import { TextChatTurns, type TextChatRuntime } from './agent/text-chat-runtime.ts';
-import { chatPaths, chatRequestBytes, chatStatus, validOnlineChatInput, validChatReplyText, type ChatError, type ChatListResult, type ChatSendResult, type ChatErrorCode, type ChatExchange, type OnlineChatInput } from '../../../packages/contracts/src/online-chat.ts';
+import { chatPaths, chatStatus, validOnlineChatInput, validChatReplyText, type ChatError, type ChatListResult, type ChatSendResult, type ChatErrorCode, type ChatExchange, type OnlineChatInput } from '../../../packages/contracts/src/online-chat.ts';
 import { safeChatFields } from './characters/chat-context-policy.ts';
 import { CharacterError } from './characters/records.ts';
 import { withOnlineChatContext } from './characters/online-chat-context.ts';
@@ -46,6 +47,13 @@ export async function sendOnlineChat(models: ModelManagement, workspace: PetWork
         return { ok: true, requestID, text: saved.text, replayable: saved.replayable, recovered: true };
       }
     }
+    const validatedAttachments = validateChatAttachments(turn.attachments, text);
+    if (!validatedAttachments.ok) throw new ModelError('invalid_request');
+    const resolvedRoute = await models.assertChatRoute(route);
+    if (validatedAttachments.attachments.some(file => file.mediaType !== 'text/plain' &&
+        (resolvedRoute.apiProtocol !== 'responses' || !resolvedRoute.inputModalities?.includes(file.mediaType === 'application/pdf' ? 'pdf' : 'image')))) {
+      throw new ModelError('invalid_request');
+    }
     const complete = (turnSignal: AbortSignal) => models.completeChat(route, async (dispatch, owned) => {
       try {
         const messages = history.filter(pair => safeChatFields([pair.user, pair.assistant])).flatMap(({ user, assistant }): ModelMessage[] => [
@@ -56,7 +64,7 @@ export async function sendOnlineChat(models: ModelManagement, workspace: PetWork
           const hasContext = Object.keys(context).length > 0;
           if (hasContext) attached = { revision: characterRevision, data: JSON.stringify(context) };
           dispatch({ ...(hasContext ? { system: contextInstruction, referenceData: context } : {}), messages: [...messages, {
-            role: 'user', text,
+            role: 'user', text, ...(validatedAttachments.attachments.length ? { attachments: validatedAttachments.attachments } : {}),
           }] });
         });
       } catch (error) {
@@ -101,7 +109,7 @@ export async function sendOnlineChat(models: ModelManagement, workspace: PetWork
       after: verifyCurrent,
     });
     if (!validChatReplyText(reply)) throw new ModelError('invalid_response');
-    const final = { ok: true, requestID, text: reply.trim(), replayable: !attached } as const;
+    const final = { ok: true, requestID, text: reply.trim(), replayable: !attached && !validatedAttachments.attachments.length } as const;
     if (signal.aborted) throw new ModelError('cancelled');
     if (!store || !conversation) return final;
     if (!historyReadable) return { ...final, historyStatus: 'unconfirmed' };
@@ -129,7 +137,7 @@ export function registerOnlineChat(app: FastifyInstance, models?: ModelManagemen
     catch (error) { result = failure(error); }
     return reply.code(result.ok ? 200 : chatStatus[result.error]).send(result);
   });
-  app.post(chatPaths.send, { bodyLimit: chatRequestBytes, schema }, async (request, reply) => {
+  app.post(chatPaths.send, { bodyLimit: chatRequestWithAttachmentsBytes, schema }, async (request, reply) => {
     if (!turns || shutdown.signal.aborted) return reply.code(chatStatus.unavailable).send({ ok: false, error: 'unavailable' });
     const input = request.body;
     if (!validOnlineChatInput(input)) return reply.code(chatStatus.invalid_request).send({ ok: false, error: 'invalid_request' });

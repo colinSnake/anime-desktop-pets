@@ -25,7 +25,7 @@ test('Agent overview is a single dialog with four ordinary detail buttons and no
 
 test('Agent close control is an icon button with a screen reader label', () => {
   const html = renderToStaticMarkup(createElement(PetAgentPanel, { name: '合成实例', chat, onClose() {}, renderDetail: () => null }));
-  assert.match(html, /<button[^>]*class="workspace-drawer-close"[^>]*aria-label="关闭"[^>]*><svg[^>]*aria-hidden="true"[^>]*><path[^>]*><\/path><\/svg><\/button>/);
+  assert.match(html, /<button[^>]*class="dialog-close"[^>]*aria-label="关闭桌宠 Agent"[^>]*><svg[^>]*aria-hidden="true"[^>]*><path[^>]*><\/path><\/svg><\/button>/);
 });
 
 test('overview distinguishes loading, unavailable, confirmed empty and stale failed reads', () => {

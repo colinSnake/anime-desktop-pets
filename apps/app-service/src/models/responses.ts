@@ -5,7 +5,15 @@ export const responses: ProtocolAdapter = {
     const input = snapshotInput(route, original), items: JsonObject[] = [];
     for (const m of input.messages) {
       if (m.role === 'tool') items.push({ type: 'function_call_output', call_id: m.toolCallID, output: m.text });
-      else if (m.role === 'user') items.push({ role: 'user', content: [{ type: 'input_text', text: modelUserText(input, m) }] });
+      else if (m.role === 'user') {
+        const content: JsonObject[] = [{ type: 'input_text', text: modelUserText(input, m, false) }];
+        for (const attachment of m.attachments ?? []) {
+          if (attachment.mediaType === 'text/plain') content.push({ type: 'input_text', text: `${attachment.name}\n${attachment.text ?? ''}` });
+          else if (attachment.mediaType === 'application/pdf') content.push({ type: 'input_file', filename: attachment.name, file_data: `data:application/pdf;base64,${attachment.data}` });
+          else content.push({ type: 'input_image', image_url: `data:${attachment.mediaType};base64,${attachment.data}` });
+        }
+        items.push({ role: 'user', content });
+      }
       else {
         const data = recalled(m, route);
         if (Array.isArray(data)) items.push(...data as JsonObject[]);
@@ -16,6 +24,7 @@ export const responses: ProtocolAdapter = {
       }
     }
     return { path: '/responses', headers: {}, body: { model: route.modelID, input: items, store: false, include: ['reasoning.encrypted_content'], max_output_tokens: route.tokenBudget,
+      ...(route.reasoningEffort ? { reasoning: { effort: route.reasoningEffort } } : {}),
       ...(input.system ? { instructions: input.system } : {}), ...(input.tools ? { tools: input.tools.map(t => ({ type: 'function', ...t, strict: false })) } : {}) } };
   },
   decode(route, raw) {

@@ -51,14 +51,27 @@ for (const [protocol, suffix, header, value, body] of [
   assert.equal(list.ok && list.configuration.revision, 1); assert.equal(list.ok && list.configuration.connections[0]?.models.some(m => m.modelID === 'example'), false);
 });
 
-test('unauthenticated, extra fields, stale revisions and missing Key are rejected before credential access', use, async t => {
+test('unauthenticated, extra fields and stale revisions are rejected before credential access', use, async t => {
   const f = await fixture(t, async () => assert.fail('must not send'));
   const input = await f.write('responses', 0, false);
   const noAuth = await f.app.inject({ method: 'POST', url: path, headers: { host: auth.host }, payload: input });
   assert.equal(noAuth.statusCode, 401);
   for (const fields of [{ key: secret }, { baseURL: 'https://other.invalid' }, { headers: {} }, { cursor: 'next' }]) assert.equal((await f.post({ ...input, ...fields })).statusCode, 400);
   assert.equal((await f.post({ ...input, expectedRevision: 2 })).json().error, 'configuration_conflict');
-  assert.equal((await f.post(input)).json().error, 'credentials_unavailable'); assert.equal(f.reads(), 0);
+  assert.equal(f.reads(), 0);
+});
+
+test('discovery without a Key sends no authentication header and returns provider feedback', use, async t => {
+  let calls = 0;
+  const f = await fixture(t, async (url, init) => {
+    assert.equal(url, `${savedDraft('anthropic').baseURL}/models?limit=100`);
+    assert.equal(new Headers(init?.headers).has('x-api-key'), false);
+    return ++calls === 1 ? Response.json({ data: [{ id: 'example' }] }) : new Response('private provider details', { status: 401 });
+  });
+  const input = await f.write('anthropic', 0, false);
+  assert.equal((await f.post(input)).json().ok, true);
+  assert.deepEqual((await f.post(input)).json(), { version: 1, ok: false, error: 'authentication_failed' });
+  assert.equal(calls, 2); assert.equal(f.reads(), 0);
 });
 
 test('credentials reflected in candidate metadata and unsafe IDs never reach the UI', use, async t => {

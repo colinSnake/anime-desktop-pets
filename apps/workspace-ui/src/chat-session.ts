@@ -3,6 +3,8 @@ import { emptyChatState } from './empty-chat.ts';
 import { isRecordReadResult, isRecordWriteResult, isRecordSnapshot, matchesChatMemory, parseChatMemoryCommand, type Memory, type RecordSnapshot } from '../../../packages/contracts/src/character-records.ts';
 import { canReloadMemory, type ChatMemoryBridge, type ChatMemoryProposal } from './chat-memory.ts';
 import { acceptedChatText, isChatListResult, isChatSendResult, sameChatRoute, validOnlineChatInput, type ChatErrorCode, type ChatExchange, type ChatConversation, type ChatOption, type ChatRoute, type OnlineChatBridge } from '../../../packages/contracts/src/online-chat.ts';
+import { attachmentModality, validateChatAttachments, type ChatAttachment } from '../../../packages/contracts/src/chat-attachments.ts';
+import type { InputModality } from '../../../packages/contracts/src/models.ts';
 import { isLocalChatResult, parseLocalChatCommand, type LocalChatBridge, type LocalChatInput } from '../../../packages/contracts/src/local-chat.ts';
 import { acceptedDraft, sameDraft, textDraft, type ChatDraft } from './chat-draft.ts';
 
@@ -11,12 +13,12 @@ export type ChatTurn = { id: string; role: 'user' | 'assistant'; text: string; c
 export type ChatRequest = { characterId: string; model: string; text: string; history: ChatTurn[] };
 export type LocalChatShortcut = '你是谁' | '查看目标进度' | '查角色知识：' | '查个人记忆：' | '记住：';
 export type ChatCharacter = { id: string; name: string };
-export type ChatModel = { id: string; name: string; ready?: boolean; isDefault?: boolean };
+export type ChatModel = { id: string; name: string; ready?: boolean; isDefault?: boolean; inputModalities?: InputModality[]; taskRoute?: Omit<ChatRoute, 'useDefault'>; taskToolsUnverified?: boolean };
 export type ChatAdapter = { models: ChatModel[]; reply(request: ChatRequest, signal: AbortSignal): Promise<string> };
-export type ChatSession = { draft: string; draftSnapshot: ChatDraft; turns: ChatTurn[]; pending: boolean; failed: boolean; status: string; model?: string; confirmingClear: boolean; editorKey?: string; title?: string; hasEarlier?: boolean; canReturnToCurrent?: boolean };
+export type ChatSession = { draft: string; draftSnapshot: ChatDraft; turns: ChatTurn[]; attachments: Pick<ChatAttachment, 'name' | 'mediaType'>[]; pending: boolean; failed: boolean; status: string; model?: string; confirmingClear: boolean; editorKey?: string; title?: string; hasEarlier?: boolean; canReturnToCurrent?: boolean };
 export type ChatWorkspaceState = { characters: ChatCharacter[]; selectedId?: string; models: ChatModel[]; available: boolean; localAvailable: boolean; memoryAvailable?: boolean; online?: boolean; persistentConversations?: boolean; canRetry?: boolean; detachedDrafts: { id: string; label: string; enabled: boolean }[]; session: ChatSession };
-type Attempt = { draft: ChatDraft; userTurn: ChatTurn; history: ChatTurn[]; local?: LocalChatInput; model?: string; route?: ChatRoute; exchanges?: ChatExchange[]; transmitted?: true };
-type Session = Omit<ChatSession, 'draft' | 'editorKey'> & { editorKey: string; attempt?: Attempt; active?: { abort: AbortController }; conversation?: ChatConversation; lastSavedRequestID?: string; chooseModel?: true; detachedFrom?: string };
+type Attempt = { draft: ChatDraft; userTurn: ChatTurn; history: ChatTurn[]; local?: LocalChatInput; model?: string; route?: ChatRoute; exchanges?: ChatExchange[]; transmitted?: true; attachmentsUsed?: true };
+type Session = Omit<ChatSession, 'draft' | 'editorKey' | 'attachments'> & { attachments: ChatAttachment[]; editorKey: string; attempt?: Attempt; active?: { abort: AbortController }; conversation?: ChatConversation; lastSavedRequestID?: string; chooseModel?: true; detachedFrom?: string };
 type PetSessions = { base: Session; current: Session; cached: Map<string, Session> };
 const maxCachedConversations = 12;
 const segmenter = new Intl.Segmenter('zh', { granularity: 'grapheme' });
@@ -56,7 +58,7 @@ const chatFailureMessage: Partial<Record<ChatErrorCode, string>> = {
  timed_out: '等待回复超时，服务商可能仍在处理已收到的请求。',
  unavailable: '暂时无法使用本机模型服务，请稍后重试。',
 };
-const emptySession = (model?: string): Session => ({ draftSnapshot: textDraft(''), turns: [], pending: false, failed: false, status: '', model, confirmingClear: false, editorKey: crypto.randomUUID() });
+const emptySession = (model?: string): Session => ({ draftSnapshot: textDraft(''), turns: [], attachments: [], pending: false, failed: false, status: '', model, confirmingClear: false, editorKey: crypto.randomUUID() });
 
 
 export class ChatWorkspaceController {
@@ -86,15 +88,18 @@ export class ChatWorkspaceController {
  }
  private selectedOption(own: Session) {
   if (own.chooseModel) return;
-  return this.options.find(option => own.model ? routeID(option.route) === own.model : option.isDefault);
+  const explicit = own.model ? this.options.find(option => option.ready && routeID(option.route) === own.model) : undefined;
+  return explicit ?? this.options.find(option => option.ready && option.isDefault) ?? this.options.find(option => option.ready);
  }
  private route(own: Session): ChatRoute | undefined {
   const selected = this.selectedOption(own);
-  return selected?.ready ? { ...selected.route, ...(!own.model ? { useDefault: true } : {}) } : undefined;
+  if (!selected?.ready) return undefined;
+  const explicit = !!own.model && routeID(selected.route) === own.model;
+  return { ...selected.route, ...(!explicit && selected.isDefault ? { useDefault: true } : {}) };
  }
  private retryable(own: Session) {
   const attempt = own.attempt;
-  if (!attempt) return false;
+  if (!attempt || attempt.attachmentsUsed) return false;
   if (attempt.local) return !!this.local;
   if (attempt.route) {
    const current = this.route(own);
@@ -166,6 +171,7 @@ export class ChatWorkspaceController {
  private park(entry: PetSessions): boolean {
   if (!this.canPark(entry)) return false;
   const { current, base, cached } = entry;
+  current.attachments = [];
   if (current !== base && (current.detachedFrom || current.conversation?.mode === 'resume') && cached.size < maxCachedConversations) cached.set(current.editorKey, current);
   return true;
  }
@@ -196,12 +202,12 @@ export class ChatWorkspaceController {
   const entry = this.currentSet();
   const own = entry?.current;
   const selection = own && this.selectedOption(own);
-  const session: ChatSession = own ? { draft: own.draftSnapshot.text, draftSnapshot: own.draftSnapshot, turns: own.turns, pending: own.pending, failed: own.failed, status: own.status, model: this.online ? selection && routeID(selection.route) : own.model, confirmingClear: own.confirmingClear, editorKey: own.editorKey, title: own.title, hasEarlier: own.hasEarlier,
+  const session: ChatSession = own ? { draft: own.draftSnapshot.text, draftSnapshot: own.draftSnapshot, turns: own.turns, attachments: own.attachments.map(({ name, mediaType }) => ({ name, mediaType })), pending: own.pending, failed: own.failed, status: own.status, model: this.online ? selection && routeID(selection.route) : own.model, confirmingClear: own.confirmingClear, editorKey: own.editorKey, title: own.title, hasEarlier: own.hasEarlier,
    canReturnToCurrent: !!entry && own !== entry.base && this.canPark(entry) } : emptyChatState.session;
   const canOpenDraft = !!entry && !entry.current.pending && this.canPark(entry);
   const detachedDrafts = entry ? [...entry.cached].flatMap(([id, parked]) =>
    parked !== own && parked.detachedFrom && parked.draftSnapshot.text ? [{ id, label: parked.detachedFrom, enabled: canOpenDraft }] : []) : [];
-  const models = this.online ? this.options.map(option => ({ id: routeID(option.route), name: `${option.modelName} · ${option.connectionName}`, ready: option.ready, isDefault: option.isDefault })) : this.models;
+  const models = this.online ? this.options.map(option => ({ id: routeID(option.route), name: `${option.modelName} · ${option.connectionName}`, ready: option.ready, isDefault: option.isDefault, inputModalities: option.inputModalities, ...(option.taskTools && { taskRoute: { ...option.route }, ...(option.taskTools === 'unverified' && { taskToolsUnverified: true }) }) })) : this.models;
   this.state = { characters: this.characters, selectedId: this.selectedId, models, available: this.online ? !!(own && this.route(own)) : !!this.adapter && !!models.length,
    localAvailable: !!this.local, memoryAvailable: !!this.memory, online: !!this.online, persistentConversations: this.durable,
    canRetry: own ? this.retryable(own) : false, detachedDrafts, session };
@@ -227,6 +233,23 @@ export class ChatWorkspaceController {
   this.selectedId = id; this.publish();
  }
  edit(text: string) { if (this.selectedId) this.editDraft(this.selectedId, textDraft(text)); }
+ setAttachments(petID: string, attachments: ChatAttachment[], editorKey?: string): boolean {
+  const own = this.current();
+  if (!own || petID !== this.selectedId || own.pending || (editorKey !== undefined && editorKey !== own.editorKey)) return false;
+  if (attachments.length && !this.route(own)) return false;
+  const validated = validateChatAttachments(attachments, own.draftSnapshot.text);
+  if (!validated.ok) { own.status = '附件无效或超过大小、数量及文本限制。'; this.publish(); return false; }
+  own.attachments = validated.attachments.map(({ name, mediaType, data }) => ({ name, mediaType, data }));
+  own.status = '';
+  this.publish();
+  return true;
+ }
+ removeAttachment(petID: string, editorKey: string | undefined, name: string) {
+  const own = this.current();
+  if (!own || petID !== this.selectedId || editorKey !== own.editorKey || own.pending) return;
+  own.attachments = own.attachments.filter(file => file.name !== name);
+  own.status = ''; this.publish();
+ }
  editDraft(petID: string, draft: ChatDraft, editorKey?: string): boolean {
   const own = this.current();
   if (!own || petID !== this.selectedId || (editorKey !== undefined && own.editorKey !== editorKey) || !acceptedDraft(draft)) return false;
@@ -250,7 +273,7 @@ export class ChatWorkspaceController {
    if (id && !this.options.some(option => option.ready && routeID(option.route) === id)) return;
    own.model = id || undefined;
    if (own.chooseModel) { own.chooseModel = undefined; own.status = ''; }
-   if (own.status && own.attempt?.route && !this.retryable(own)) own.status = this.durable && own.conversation
+   if (own.status && own.attempt?.route && !own.attempt.attachmentsUsed && !this.retryable(own)) own.status = this.durable && own.conversation
     ? '重新发送原问题时，会先找回已保存的回复；没有已保存回复才使用新模型。'
     : '已更改发送模型。再次发送会新建一轮请求。';
   } else {
@@ -264,6 +287,7 @@ export class ChatWorkspaceController {
   if (!own || !id || own.pending) return false;
   const command = parseChatMemoryCommand(own.draftSnapshot.text);
   if (command) {
+   if (own.attachments.length) { own.status = '本机记忆操作不接收附件。'; this.publish(); return false; }
    if (typeof command === 'string' || !this.memory || !validatedMessage(own.draftSnapshot.text)) return false;
    const turn: ChatTurn = { id: crypto.randomUUID(), role: 'user', text: own.draftSnapshot.text.trim(), createdAt: Date.now(), localOnly: true };
    own.turns = trimTranscript([...own.turns, turn]);
@@ -274,25 +298,35 @@ export class ChatWorkspaceController {
   }
   const intent = parseLocalChatCommand(own.draftSnapshot.text);
   if (intent === 'invalid' || (intent && !this.local)) return false;
+  if (own.attachments.length && intent) { own.status = '本机查询不接收附件。'; this.publish(); return false; }
   const local = intent && { petID: id, ...intent };
   const route = local ? undefined : this.route(own);
   if (!local && (!route && (!this.adapter || !own.model))) return false;
+  const attachmentValidation = validateChatAttachments(own.attachments, own.draftSnapshot.text);
+  if (!attachmentValidation.ok) { own.status = '附件无效或超过大小、数量及文本限制。'; this.publish(); return false; }
+  const attachments = attachmentValidation.attachments.map(({ name, mediaType, data }) => ({ name, mediaType, data }));
+  if (attachments.length && (!route || attachments.some(file => {
+   const modality = attachmentModality(file);
+   return modality && !this.selectedOption(own)?.inputModalities?.includes(modality);
+  }))) {
+   own.status = '当前模型未配置所需的图片或 PDF 输入能力。'; this.publish(); return false;
+  }
   const text = validatedMessage(own.draftSnapshot.text);
   if (!text) { own.status = '单条消息最多1200字，请检查输入。'; this.publish(); return false; }
   if (route && !acceptedChatText(text)) { own.status = '消息超过在线字节限制或含不支持的字符。'; this.publish(); return false; }
-  if (own.failed && own.attempt?.userTurn.text === text) {
+  if (!attachments.length && own.failed && !own.attempt?.attachmentsUsed && own.attempt?.userTurn.text === text) {
    if (this.retryable(own)) return this.retry();
    if (route && this.durable && own.conversation && own.attempt.route) {
     // Explicit send can change the destination, but not the logical identity of the original question.
     const attempt = { ...own.attempt, route, draft: own.draftSnapshot, exchanges: undefined };
     own.draftSnapshot = textDraft('');
-    return this.perform(own, attempt, id);
+    return this.perform(own, attempt, id, attachments);
    }
   }
-  const attempt: Attempt = { draft: own.draftSnapshot, userTurn: { id: crypto.randomUUID(), role: 'user', text, createdAt: Date.now(), ...(local ? { localOnly: true } : {}) }, history: local || route ? [] : requestHistory(own.turns), local, model: own.model, route, exchanges: route && !this.durable ? onlineHistory(own.turns, route) : undefined };
+  const attempt: Attempt = { draft: own.draftSnapshot, userTurn: { id: crypto.randomUUID(), role: 'user', text, createdAt: Date.now(), ...(local ? { localOnly: true } : {}) }, history: local || route ? [] : requestHistory(own.turns), local, model: own.model, route, exchanges: route && !this.durable ? onlineHistory(own.turns, route) : undefined, ...(attachments.length ? { attachmentsUsed: true } : {}) };
   own.turns = trimTranscript([...own.turns, attempt.userTurn]);
   own.draftSnapshot = textDraft('');
-  return this.perform(own, attempt, id);
+  return this.perform(own, attempt, id, attachments);
  }
  private memoryAt(petID: string, messageID: string) {
   const own = this.selectedId === petID ? this.current() : undefined;
@@ -360,12 +394,13 @@ export class ChatWorkspaceController {
  }
  async retry(): Promise<boolean> {
   const own = this.current();
-  if (!own || own.pending || !own.failed || !own.attempt || !this.retryable(own)) return false;
+  if (!own || own.pending || own.attachments.length || !own.failed || !own.attempt || !this.retryable(own)) return false;
   if (own.draftSnapshot.text.trim() === own.attempt.userTurn.text) own.draftSnapshot = textDraft('');
   return this.perform(own, own.attempt, this.selectedId!);
  }
- private async perform(own: Session, attempt: Attempt, id: string): Promise<boolean> {
+ private async perform(own: Session, attempt: Attempt, id: string, attachments: ChatAttachment[] = []): Promise<boolean> {
   const active = { abort: new AbortController() };
+  if (attachments.length) own.attachments = [];
   own.active = active; own.attempt = attempt; own.pending = true; own.failed = false; own.status = ''; own.confirmingClear = false;
   this.publish();
   try {
@@ -379,7 +414,7 @@ export class ChatWorkspaceController {
     const requestID = turnID && !attempt.transmitted ? turnID : crypto.randomUUID();
     if (this.durable) own.conversation ??= { id: crypto.randomUUID(), mode: 'new' };
     const conversation = own.conversation;
-    const request = { requestID, petID: id, route: attempt.route, text: attempt.userTurn.text, history: [...(attempt.exchanges ?? [])], ...(conversation && { conversation, turnID }) };
+    const request = { requestID, petID: id, route: attempt.route, text: attempt.userTurn.text, history: [...(attempt.exchanges ?? [])], ...(conversation && { conversation, turnID }), ...(attachments.length ? { attachments } : {}) };
     const validRequest = () => validOnlineChatInput(request);
     while (request.history.length && !validRequest()) request.history.shift();
     if (!validOnlineChatInput(request)) throw new ChatFailure('invalid_request');
@@ -391,7 +426,7 @@ export class ChatWorkspaceController {
      const result = await this.online.send(request);
      if (!isChatSendResult(result, requestID)) throw new ChatFailure('invalid_response');
      if (!result.ok) throw new ChatFailure(result.error);
-     raw = result.text; replayable = result.replayable && !result.recovered;
+     raw = result.text; replayable = result.replayable && !result.recovered && !attachments.length;
      if (own.active === active && conversation && !result.historyStatus) {
       own.conversation = { id: conversation.id, mode: 'resume' };
       own.lastSavedRequestID = turnID ?? requestID;
@@ -416,6 +451,7 @@ export class ChatWorkspaceController {
    own.failed = true;
    if (!own.draftSnapshot.text) own.draftSnapshot = attempt.draft;
    own.status = attempt.local ? '暂时无法读取本机角色资料，可以重试。' : error instanceof ChatFailure ? chatFailureMessage[error.code] ?? '没有收到有效回复，可以重试。' : '没有收到有效回复，可以重试。';
+   if (attempt.attachmentsUsed) own.status += ' 附件已清除；如需重新发送，请重新选择文件。';
    if (error instanceof ChatFailure && error.code === 'route_changed') void this.refreshModels();
    return false;
   } finally {
@@ -423,7 +459,10 @@ export class ChatWorkspaceController {
   }
  }
  cancel() {
-  const own = this.current(); if (!own?.active) return;
+  const own = this.current(); if (!own) return;
+  const hadAttachments = !!own.attachments.length;
+  if (hadAttachments) own.attachments = [];
+  if (!own.active) { if (hadAttachments) this.publish(); return; }
   const active = own.active;
   own.active = undefined; own.pending = false; own.failed = true;
   if (!own.draftSnapshot.text && own.attempt) own.draftSnapshot = own.attempt.draft;

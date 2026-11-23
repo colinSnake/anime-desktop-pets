@@ -30,6 +30,12 @@ const bridge: DesktopBridge = Object.freeze({
     deleteGoal: input => ipcRenderer.invoke('pet:characters-deleteGoal', input),
     setGoalChatShare: input => ipcRenderer.invoke('pet:characters-setGoalChatShare', input),
   } satisfies NonNullable<DesktopBridge['characters']>) } : {}),
+  ...(process.platform === 'darwin' ? { agentTasks: Object.freeze({
+    create: input => ipcRenderer.invoke('pet:agent-tasks-create', input),
+    list: input => ipcRenderer.invoke('pet:agent-tasks-list', input),
+    read: input => ipcRenderer.invoke('pet:agent-tasks-read', input),
+    cancel: input => ipcRenderer.invoke('pet:agent-tasks-cancel', input),
+  } satisfies NonNullable<DesktopBridge['agentTasks']>) } : {}),
   ...(process.platform === 'darwin' ? { chatHistory: Object.freeze({
     list: input => ipcRenderer.invoke('pet:chat-history-list', input),
     detail: input => ipcRenderer.invoke('pet:chat-history-detail', input),

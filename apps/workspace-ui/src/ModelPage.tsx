@@ -53,7 +53,7 @@ function ConnectionRow({ connection, state, controller, blocked, onEdit, onDelet
 
 export function ModelPage({ controller, appearance }: { controller?: ModelWorkspaceController; appearance?: ReactNode }) {
   const state = useSyncExternalStore(controller?.subscribe ?? noop, controller?.getSnapshot ?? empty, controller?.getSnapshot ?? empty);
-  useEffect(() => { controller?.open(); return () => controller?.leave(); }, [controller]);
+  useEffect(() => { void controller?.open(); return () => controller?.leave(); }, [controller]);
   const [action, setAction] = useState<Action>();
   const busy = !!state.operation || state.connectionTest?.kind === 'pending';
   const blocked = busy || state.needsRefresh || state.requiresRestart;
@@ -83,12 +83,9 @@ export function ModelPage({ controller, appearance }: { controller?: ModelWorksp
   const addButton = <button type="button" className="button primary model-add-config" disabled={blocked || !config || config.connections.length >= 32}
     onClick={event => { event.currentTarget.focus(); add(); }}><PetNookIcon name="plus" />添加配置</button>;
   return <article className="model-page">
-    <header className="model-page-header"><div><p className="model-page-crumb" aria-hidden="true">工作区 › 设置</p><h1 tabIndex={-1}>模型管理</h1></div><div className="model-actions">
-      {appearance}{controller?.available && (rows.length > 0 || !config) && addButton}
-    </div></header>
+    <header className="model-page-header"><div><p className="model-page-crumb" aria-hidden="true">工作区 › 设置</p><h1 tabIndex={-1}>模型管理</h1></div><div className="model-actions">{appearance}</div></header>
     {!controller?.available ? <p className="model-empty">本机模型管理当前不可用。</p> : <section aria-label="已配置的服务商" className="model-models">
-      <div className="model-list-header"><h2>已配置的服务商</h2><button type="button" className="model-icon" aria-label="重新读取服务商列表" title="重新读取服务商列表"
-        disabled={busy} onClick={() => { void controller.load(); }}><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M20 11a8 8 0 0 0-14-5L3 9m0-5v5h5m-4 4a8 8 0 0 0 14 5l3-3m0 5v-5h-5" /></svg></button></div>
+      <div className="model-list-header"><h2>已配置的服务商</h2>{addButton}</div>
       {state.feedback && !action && <p className={state.feedback.error ? 'model-alert' : 'model-note'} role={state.feedback.error ? 'alert' : 'status'}>{state.feedback.text}</p>}
       {state.requiresRestart && <p className="model-alert" role="status">重启前只读。请重新读取，核对磁盘版本。</p>}
       {!config && !state.feedback && <p className="model-empty" role="status">正在读取服务商配置…</p>}
@@ -98,8 +95,7 @@ export function ModelPage({ controller, appearance }: { controller?: ModelWorksp
           <PetNookIcon name="spark" className="model-empty-spark model-empty-spark-upper" />
           <PetNookIcon name="spark" className="model-empty-spark model-empty-spark-lower" />
         </div>
-        <div><h3>尚未添加服务商配置</h3><p>选择第三方模型提供商或自定义模型 API，配置完成后即可在聊天中选用。</p></div>
-        {addButton}
+        <div><h3>尚未添加服务商配置</h3></div>
       </div> : <ul className="model-list" aria-label="服务商列表">{rows.map(connection =>
         <ConnectionRow key={connection.id} connection={connection} state={state} controller={controller} blocked={blocked}
           onEdit={() => { controller.edit(connection.id); setAction({ kind: 'edit', id: connection.id }); }}

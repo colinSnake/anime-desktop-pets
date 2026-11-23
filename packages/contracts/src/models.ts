@@ -1,4 +1,6 @@
 /** Local model management. Only save accepts a new Key; no reads return Key material or private references. */
+import type { InputModality, ReasoningEffort } from './model-capabilities.ts';
+export type { InputModality, ReasoningEffort } from './model-capabilities.ts';
 export const MODEL_PROTOCOLS = ['chat-completions', 'responses', 'anthropic', 'gemini'] as const;
 export type ModelProtocol = typeof MODEL_PROTOCOLS[number];
 export const isModelLoopback = (url: URL): boolean => ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname.toLowerCase());
@@ -17,7 +19,8 @@ export function normalizeModelBaseURL(value: unknown, protocol: ModelProtocol): 
 }
 export type Compatibility = { outputTokenField?: 'max_tokens' | 'max_completion_tokens' };
 export type ToolCapability = { status: 'unknown' | 'supported' | 'unsupported'; source: 'user' | 'preset' | 'discovery' };
-export type ModelEntry = { entryID: string; modelID: string; displayName: string; contextWindow?: number; maxOutputTokens?: number; capabilities: { tools: ToolCapability }; compatibility: Compatibility };
+export type ModelEntry = { entryID: string; modelID: string; displayName: string; contextWindow?: number; maxOutputTokens?: number; reasoningEffort?: ReasoningEffort; inputModalities?: InputModality[]; capabilities: { tools: ToolCapability }; compatibility: Compatibility };
+/** Schema v2 keeps authMode for compatibility: apiKey permits an optional Key; none is the legacy loopback value. */
 export type ModelDraft = { id: string; displayName: string; preset: 'openai' | 'deepseek' | 'anthropic' | 'google' | 'custom'; apiProtocol: ModelProtocol; baseURL: string; authMode: 'apiKey' | 'none'; models: ModelEntry[]; defaultModelEntryID: string; compatibility: Compatibility };
 export type SavedModelConnection = ModelDraft & { revision: number; credentialState: 'missing' | 'reference-present' | 'not-required' };
 export type SavedModelConfiguration = { revision: number; defaultConnectionID: string | null; connections: SavedModelConnection[] };

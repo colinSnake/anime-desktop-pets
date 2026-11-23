@@ -1,3 +1,4 @@
+import { AgentTaskStore } from './agent/task-store.ts';
 import { WorkspaceVideoClient } from './workspace-video-client.ts';
 import { CodexTaskFollowing } from './codex-task-following.ts';
 import { CodexTaskReaderProcess } from './codex-task-reader-process.ts';
@@ -168,6 +169,7 @@ function message(value: unknown) {
     service = createService({
       token,
       models,
+      agentTasks: models && workspace && typeof businessRoot === 'string' ? new AgentTaskStore(businessRoot) : undefined,
       chatHistory: typeof businessRoot === 'string' ? new ChatHistory(businessRoot) : undefined,
       // The normal desktop service always composes the SDK route. Missing
       // Node/worker/SDK fails before reading a model Key.

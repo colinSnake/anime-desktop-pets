@@ -5,6 +5,7 @@ import { resolveRoute } from '../src/models/config.ts';
 import { MODEL_PROTOCOLS, type ModelInput, type ModelProtocol } from '../src/models/types.ts';
 import { configuration } from './fixtures/models.ts';
 import { textReply, toolReply } from './fixtures/model-replies.ts';
+import { validateChatAttachments } from '../../../packages/contracts/src/chat-attachments.ts';
 const input:ModelInput={system:'已授权的合成上下文',messages:[{role:'user',text:'合成问题'}],tools:[{name:'weather',description:'仅合成工具声明，不执行',parameters:{type:'object',properties:{city:{type:'string'}},required:['city']}}]};
 const route=(p:ModelProtocol)=>{const x=configuration(p);x.connections[0]!.models[0]!.capabilities.tools.status='supported';return resolveRoute(x,undefined,'text-chat');};
 for(const protocol of MODEL_PROTOCOLS) {
@@ -39,6 +40,57 @@ for(const protocol of MODEL_PROTOCOLS) {
   for(const value of [null,{},[],{error:{message:'SECRET https://private.invalid'}}]) assert.throws(()=>adapters[protocol].decode(route(protocol),value),error=>error instanceof Error && error.message==='invalid_response');
  });
 }
+
+test('Responses sends an explicitly saved reviewed reasoning effort and omits the field for automatic routing', () => {
+  const value = configuration('responses');
+  value.connections[0]!.baseURL = 'https://api.openai.com/v1';
+  value.connections[0]!.models[0]!.modelID = 'gpt-6.2-astra';
+  const model = value.connections[0]!.models[0]!;
+  model.reasoningEffort = 'high';
+  const simple: ModelInput = { messages: [{ role: 'user', text: '合成问题' }] };
+  const explicit = adapters.responses.encode(resolveRoute(value, undefined, 'text-chat'), simple);
+  assert.deepEqual(explicit.body.reasoning, { effort: 'high' });
+
+  delete model.reasoningEffort;
+  const automatic = adapters.responses.encode(resolveRoute(value, undefined, 'text-chat'), simple);
+  assert.equal(automatic.body.reasoning, undefined);
+});
+
+test('Responses encodes only current-turn attachments whose modalities the saved route declares', () => {
+  const value = configuration('responses');
+  const model = value.connections[0]!.models[0]!;
+  model.inputModalities = ['image', 'pdf'];
+  const selected = resolveRoute(value, undefined, 'text-chat');
+  const validated = validateChatAttachments([
+    { name: 'diagram.png', mediaType: 'image/png', data: 'iVBORw0KGgoAAAAA' },
+    { name: 'guide.pdf', mediaType: 'application/pdf', data: 'JVBERi0xLjcK' },
+    { name: 'notes.txt', mediaType: 'text/plain', data: '5L2g5aW9' },
+  ], '请阅读');
+  assert.ok(validated.ok);
+  const input = { messages: [{ role: 'user' as const, text: '请阅读', attachments: validated.attachments }] };
+  const encoded = adapters.responses.encode(selected, input);
+  assert.deepEqual(encoded.body.input, [{ role: 'user', content: [
+    { type: 'input_text', text: '请阅读' },
+    { type: 'input_image', image_url: 'data:image/png;base64,iVBORw0KGgoAAAAA' },
+    { type: 'input_file', filename: 'guide.pdf', file_data: 'data:application/pdf;base64,JVBERi0xLjcK' },
+    { type: 'input_text', text: 'notes.txt\n你好' },
+  ] }]);
+  assert.deepEqual(input.messages[0]?.attachments, validated.attachments);
+
+  model.inputModalities = ['image'];
+  assert.throws(() => adapters.responses.encode(resolveRoute(value, undefined, 'text-chat'), input), /invalid_request/);
+  model.inputModalities = undefined;
+  assert.throws(() => adapters.responses.encode(resolveRoute(value, undefined, 'text-chat'), input), /invalid_request/);
+});
+
+test('non-Responses protocols reject image and PDF content before protocol encoding', () => {
+  const files = validateChatAttachments([{ name: 'diagram.png', mediaType: 'image/png', data: 'iVBORw0KGgoAAAAA' }], '请看');
+  assert.ok(files.ok);
+  const input: ModelInput = { messages: [{ role: 'user', text: '请看', attachments: files.attachments }] };
+  for (const protocol of ['chat-completions', 'anthropic', 'gemini'] as const) {
+    assert.throws(() => adapters[protocol].encode(route(protocol), input), /invalid_request/);
+  }
+});
 test('protocol-specific length and refusal normalize without silently treating pending states as complete',()=>{
  const values={
   'chat-completions':[{choices:[{finish_reason:'length',message:{role:'assistant',content:'部分'}}]},{choices:[{finish_reason:'content_filter',message:{role:'assistant',content:null}}]}],

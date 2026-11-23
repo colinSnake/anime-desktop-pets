@@ -1,3 +1,6 @@
+import { agentTaskChannel, agentTaskMethods } from '../../../packages/contracts/src/agent-tasks.ts';
+import { AgentTaskIPC } from './agent-task-ipc.ts';
+import { passwordPasteMenu } from './password-paste-menu.ts';
 import { dafeiyu, longmei } from '../../../packages/contracts/src/built-in-pets.ts';
 import { prepareWorkspaceVideo } from './workspace-video-player.ts';
 import { previewScheme } from './video-preview/media.ts';
@@ -96,6 +99,7 @@ let service: ServiceProcess | undefined;
 let covers: PetCoverProvider | undefined;
 let models: ModelIPC | undefined;
 let chat: ChatIPC | undefined;
+let taskIPC: AgentTaskIPC | undefined;
 let workspaceStatus: ReturnType<typeof installWorkspaceTray>;
 let startupLaunch: StartupLaunch | undefined;
 let exiting = false;
@@ -329,7 +333,10 @@ async function start() {
     ]));
     models = new ModelIPC(service);
     chat = new ChatIPC(service);
-    const cancelWorkspaceRequests = () => { models?.cancel(); chat?.cancel(); };
+    const tasks = taskIPC = new AgentTaskIPC(service.agentTask.bind(service));
+    const cancelWorkspaceRequests = () => { models?.cancel(); chat?.cancel(); tasks.invalidateCreate(); };
+    workspace.on('hide', () => tasks.invalidateCreate());
+    workspace.on('minimize', () => tasks.invalidateCreate());
     workspace.webContents.on('did-start-navigation', cancelWorkspaceRequests);
     workspace.webContents.on('render-process-gone', cancelWorkspaceRequests);
     workspace.on('closed', cancelWorkspaceRequests);
@@ -337,6 +344,17 @@ async function start() {
         senderId: event.sender.id, ownerId: workspace.webContents.id, senderFrame: event.senderFrame,
         mainFrame: workspace.webContents.mainFrame, url: event.senderFrame?.url ?? '', args,
       });
+    for (const method of agentTaskMethods) ipcMain.handle(agentTaskChannel(method), (event, ...args: unknown[]) =>
+      tasks.invoke(method, () => trustedModelFrame(event, args) && isWorkspaceVisible() && !workspace!.isMinimized(), args));
+    const owner = workspace;
+    owner.webContents.on('context-menu', (_event, params) => {
+      const eligible = owner === workspace && isWorkspaceVisible() && owner.isFocused() && trustedFrame({
+        ownerId: owner.webContents.id, senderId: owner.webContents.id, senderFrame: params.frame,
+        mainFrame: owner.webContents.mainFrame, url: params.frameURL, args: [],
+      });
+      const menu = passwordPasteMenu(eligible, params);
+      if (menu) Menu.buildFromTemplate(menu).popup({ window: owner, x: params.x, y: params.y });
+    });
     registerWorkspaceModelIPC((channel, listener) => ipcMain.handle(channel, listener), {
       chat, history: chat, models, trusted: trustedModelFrame, visible: isWorkspaceVisible,
     });
@@ -534,6 +552,7 @@ app.on("before-quit", (event) => {
   const launchCleanup = startupLaunch?.dispose();
   models?.cancel();
   chat?.cancel();
+  taskIPC?.invalidateCreate();
   void (async () => {
     try {
       // Keep the service's workspace ownership until window placement has settled.

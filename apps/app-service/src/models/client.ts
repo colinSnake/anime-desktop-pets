@@ -18,7 +18,7 @@ type Options = {
   /** Internal tests/hosts may shorten deadlines, never extend the purpose's bound. */
   timeoutMs?: number;
 };
-const RESPONSE_BYTES = 1_048_576, DISCOVERY_BYTES = 4 * RESPONSE_BYTES, REQUEST_BYTES = 131_072;
+const RESPONSE_BYTES = 1_048_576, DISCOVERY_BYTES = 4 * RESPONSE_BYTES, REQUEST_BYTES = 131_072, ATTACHMENT_REQUEST_BYTES = 24 * 1024 * 1024;
 const check = (signal: AbortSignal) => { if (signal.aborted) throw signal.reason instanceof ModelError ? signal.reason : new ModelError('cancelled'); };
 const cancelBody = (response: Response) => { void response.body?.cancel().catch(() => {}); };
 
@@ -111,24 +111,42 @@ export class ModelClient {
       return decoded;
     });
   }
-  async completeChat(selection: ChatRoute, prepare: FreshChatInput, signal: AbortSignal): Promise<ModelReply> {
+  completeChat(selection: ChatRoute, prepare: FreshChatInput, signal: AbortSignal): Promise<ModelReply> {
+    return this.completePinned(selection, prepare, signal);
+  }
+  completeTask(selection: ChatRoute, revision: number, prepare: FreshChatInput, signal: AbortSignal): Promise<ModelReply> {
+    return this.completePinned(selection, prepare, signal, revision);
+  }
+  private async completePinned(selection: ChatRoute, prepare: FreshChatInput, signal: AbortSignal, taskRevision?: number): Promise<ModelReply> {
     this.assertOpen();
-    const route = resolveChatRoute(this.configuration(), selection);
+    const resolve = () => {
+      const current = resolveChatRoute(this.configuration(), selection);
+      if (taskRevision === undefined) return current;
+      if (current.connectionRevision !== taskRevision) throw new ModelError('route_changed');
+      if (current.tools === 'unsupported') throw new ModelError('tools_unavailable');
+      return { ...current, purpose: 'agent-task' as const };
+    };
+    const route = resolve();
     return this.run(route, signal, async owned => {
       const auth = await this.auth(route, owned);
       const key = auth.authorization?.slice(7) ?? auth['x-api-key'] ?? auth['x-goog-api-key'];
       const sensitive = [key, route.credentialRef].filter((value): value is string => !!value);
       const containsSensitive = (text: string) => sensitive.some(value => text.includes(value));
       let pending: Promise<unknown> | undefined;
+      let toolNames: string[] = [];
       await prepare(input => {
         check(owned);
         if (pending) throw new ModelError('invalid_request');
-        const current = resolveChatRoute(this.configuration(), selection);
+        const current = resolve();
         const snapshot = snapshotInput(current, input);
+        if (taskRevision === undefined && snapshot.tools?.length) throw new ModelError('invalid_request');
+        toolNames = snapshot.tools?.map(tool => tool.name) ?? [];
         if (snapshot.messages.some(message => containsSensitive(message.text)) || snapshot.referenceData &&
             sensitive.some(value => JSON.stringify(snapshot.referenceData).includes(JSON.stringify(value).slice(1, -1)))) throw new ModelError('invalid_request');
         const encoded = adapters[route.apiProtocol].encode(current, snapshot), body = JSON.stringify(encoded.body);
-        if (Buffer.byteLength(body) > REQUEST_BYTES) throw new ModelError('invalid_request');
+        const maxRequestBytes = snapshot.messages.some(message => message.role === 'user' && message.attachments?.length)
+          ? ATTACHMENT_REQUEST_BYTES : REQUEST_BYTES;
+        if (Buffer.byteLength(body) > maxRequestBytes || sensitive.some(value => body.includes(JSON.stringify(value).slice(1, -1)))) throw new ModelError('invalid_request');
         // request() invokes the injected fetch synchronously before its first await.
         pending = this.request(current, encoded.path, { method: 'POST', headers: { ...encoded.headers, ...auth, 'content-type': 'application/json' }, body }, owned, { bytes: 0, max: RESPONSE_BYTES });
         void pending.catch(() => {});
@@ -136,9 +154,11 @@ export class ModelClient {
       if (!pending) throw new ModelError('invalid_request');
       const raw = await pending;
       check(owned);
-      resolveChatRoute(this.configuration(), selection);
+      resolve();
       const result = adapters[route.apiProtocol].decode(route, raw);
-      if (result.message.toolCalls?.length || containsSensitive(result.message.text)) throw new ModelError('invalid_response');
+      const names = new Set(toolNames);
+      if (result.message.toolCalls?.some(call => taskRevision === undefined || !names.has(call.name)) ||
+          containsSensitive(result.message.text) || sensitive.some(value => JSON.stringify(result.message).includes(JSON.stringify(value).slice(1, -1)))) throw new ModelError('invalid_response');
       return result;
     });
   }
@@ -260,10 +280,9 @@ export class ModelClient {
   }
   private async auth(route: ModelRoute, signal: AbortSignal): Promise<Record<string, string>> {
     check(signal);
-    if (route.authMode === 'none') return {};
-    if (!route.credentialRef) throw new ModelError('credentials_unavailable');
+    if (!route.credentialRef) return {}; // Optional authentication; the upstream decides whether to accept it.
     let key: string | undefined;
-    try { key = await this.options.readCredential(route.credentialRef!, signal, route.connectionID); }
+    try { key = await this.options.readCredential(route.credentialRef, signal, route.connectionID); }
     catch (error) { check(signal); throw new ModelError(error instanceof ModelError && error.code === 'busy' ? 'busy' : 'credentials_unavailable'); }
     check(signal);
     if (typeof key !== 'string' || !key.trim() || key.length > 8192 || /[^\x21-\x7e]/.test(key)) throw new ModelError('credentials_unavailable');

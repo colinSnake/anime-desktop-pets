@@ -165,13 +165,30 @@ test('only streaming Responses can wait up to 60s; the deadline cancels the prov
   }
 });
 
-test('missing key, unexpected fields and stale revision cannot access a credential or provider', local, async t => {
+test('unauthenticated IPC, unexpected fields and stale revision cannot access a credential or provider', local, async t => {
   const f = await fixture(t, async () => assert.fail('unexpected provider call'));
   await f.save('probe', 'chat-completions', 0, false);
   assert.equal((await f.post(input, { ...headers, authorization: '' })).statusCode, 401);
   for (const fields of [{ baseURL: 'https://other.invalid' }, { credentialRef: 'arbitrary' }, { text: 'not a probe' }, { headers: {} }]) assert.equal((await f.post({ ...input, ...fields })).statusCode, 400);
   assert.equal((await f.post({ ...input, expectedRevision: 1 })).json().error, 'configuration_conflict');
-  assert.equal((await f.post(input)).json().error, 'credentials_unavailable'); assert.equal(f.reads(), 0);
+  assert.equal(f.reads(), 0);
+});
+
+for (const status of [200, 401, 403]) test(`saved connection without a Key lets the provider decide (${status})`, local, async t => {
+  const calls: { url: string; headers: Headers }[] = [];
+  const f = await fixture(t, async (url, init) => {
+    calls.push({ url: String(url), headers: new Headers(init?.headers) });
+    return status === 200 ? Response.json(textReply('chat-completions')) : new Response('private provider details', { status });
+  });
+  const base = status === 200 ? 'http://127.0.0.1:12345/v1' : 'https://requires-auth.invalid/v1';
+  await f.save('probe', 'chat-completions', 0, false, base);
+  assert.equal(calls.length, 0); // An ordinary save never calls the provider.
+  const result = await f.post(input);
+  assert.deepEqual(result.json(), status === 200 ? { version: 1, ok: true, connectionID: 'probe', revision: 2, entryID: 'draft-entry' } :
+    { version: 1, ok: false, error: status === 401 ? 'authentication_failed' : 'provider_forbidden' });
+  assert.deepEqual(calls.map(call => call.url), [`${base}/chat/completions`]);
+  for (const header of ['authorization', 'x-api-key', 'x-goog-api-key']) assert.equal(calls[0]!.headers.has(header), false);
+  assert.equal(f.reads(), 0);
 });
 
 test('replacing the selected Key while its old version is pending cancels before dispatch', local, async t => {

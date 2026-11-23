@@ -1,3 +1,5 @@
+import { registerAgentTasks } from './agent/task-routes.ts';
+import type { AgentTaskStore } from './agent/task-store.ts';
 import Fastify from "fastify";
 import type { TextChatRuntime } from "./agent/text-chat-runtime.ts";
 import type { ChatHistory } from './chat-history.ts';
@@ -27,6 +29,7 @@ export function createService({
   characters,
   chatRuntime,
   chatHistory,
+  agentTasks,
 }: {
   token: string;
   runtime: RuntimeController;
@@ -36,6 +39,7 @@ export function createService({
   characters?: CharacterRepository;
   chatRuntime?: TextChatRuntime;
   chatHistory?: ChatHistory;
+  agentTasks?: AgentTaskStore;
 }) {
   if (!/^[a-f0-9]{64}$/.test(token))
     throw new Error("Invalid session credential");
@@ -106,10 +110,11 @@ export function createService({
   registerPetRoutes(app, workspace);
   registerModelManagement(app, models);
   const chat = registerOnlineChat(app, models, workspace, characters, chatRuntime, chatHistory);
+  const tasks = agentTasks && workspace && models ? registerAgentTasks(app, agentTasks, workspace, models) : undefined;
   registerSpeechRoutes(app, speech);
   registerCharacterRoutes(app, workspace, characters);
   app.addHook("preClose", async () => {
-    const chatCleanup = await Promise.allSettled([chat?.close()]);
+    const chatCleanup = await Promise.allSettled([chat?.close(), tasks?.close()]);
     // Schedule each closer independently: a synchronous throw or rejection must not
     // interrupt another owner draining writes / releasing its lease before process.exit.
     const results = await Promise.allSettled([

@@ -120,7 +120,7 @@ test('on-demand settings preserve editing and the page preserves safe deletion a
   assert.match(settings, /min="128"/); assert.match(settings, /max="384"/);
   assert.match(settings, /随应用启动/); assert.match(settings, /下次打开应用时自动启动/);
   assert.match(html, /只删除.*配置/); assert.match(html, /不.*删除.*素材/);
-  assert.match(html, /role="dialog"/); assert.match(html, /添加桌宠/);
+  assert.match(html, /<dialog class="confirmation"[^>]*aria-labelledby="delete-title"/); assert.match(html, /添加桌宠/);
   assert.doesNotMatch(html, /没有可添加的角色，请检查启动命令中的素材目录/);
   assert.match(html, /disabled=""[^>]*>启动/);
 });

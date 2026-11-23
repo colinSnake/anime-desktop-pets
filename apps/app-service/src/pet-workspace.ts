@@ -16,6 +16,7 @@ export class PetWorkspace {
   private store: WorkspaceStore;
   private queue: Promise<unknown> = Promise.resolve();
   private closing?: Promise<void>;
+  private readonly retirementListeners = new Set<(id: string) => void>();
   private catalog: CatalogEntry[];
   private phase: (id: string) => PetPhase;
   private readonly playerMode?: WorkspaceData['playerMode'];
@@ -93,6 +94,11 @@ export class PetWorkspace {
       }
       return { ok: true, workspace: this.view(state) };
     });
+  }
+  /** Internal observers may signal cancellation after a committed deletion; they must not throw or re-enter the queue. */
+  observeRetirement(listener: (id: string) => void): () => void {
+    this.retirementListeners.add(listener);
+    return () => { this.retirementListeners.delete(listener); };
   }
   /** Trusted service operations share ordering with instance creation and deletion. */
   withRegisteredInstance<T>(id: unknown, operation: (id: string) => Promise<T>): Promise<T> {
@@ -280,6 +286,7 @@ export class PetWorkspace {
       }
       state.revision++;
       await this.store.write(state);
+      if (action === 'delete') for (const listener of this.retirementListeners) listener((input as PetInputs['delete']).id);
       return { ok: true, workspace: this.view(state) };
     });
     return action === 'pause' ? operation.then(result => { if (!result.ok) this.pauseRequested = false; return result; }) : operation;

@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { DialogCloseButton, useDialogDismiss } from './DialogDismiss.tsx';
 import type { DesktopBridge, Snapshot } from '../../../packages/contracts/src/index.ts';
 import { ModelWorkspaceController } from './model-state.ts';
 import type { ChatWorkspaceController, ChatWorkspaceState } from './chat-session.ts';
@@ -27,10 +28,10 @@ const groups = [
 const rolePages = [{ id: 'identity', label: '身份' }, { id: 'memory', label: '记忆' }, { id: 'goals', label: '能力与目标' }] as const;
 type Page = typeof groups[number]['pages'][number]['id'] | typeof rolePages[number]['id'];
 const isModulePage = (page: Page) => page !== 'pets' && page !== 'chat' && page !== 'models';
-type ViewProps = DiagnosticProps & { petState?: PetWorkspaceState; petController?: PetWorkspaceController; initialPage?: Page; chatState?: ChatWorkspaceState; chatController?: ChatWorkspaceController; chatHistory?: DesktopBridge['chatHistory']; onChatOpen?: () => void; modelController?: ModelWorkspaceController; speech?: DesktopBridge['speech']; characters?: DesktopBridge['characters']; openWorkspaceData?: DesktopBridge['openWorkspaceData']; migrateWorkspaceData?: DesktopBridge['migrateWorkspaceData'] };
+type ViewProps = DiagnosticProps & { petState?: PetWorkspaceState; petController?: PetWorkspaceController; initialPage?: Page; chatState?: ChatWorkspaceState; chatController?: ChatWorkspaceController; chatHistory?: DesktopBridge['chatHistory']; agentTasks?: DesktopBridge['agentTasks']; onChatOpen?: () => void; modelController?: ModelWorkspaceController; speech?: DesktopBridge['speech']; characters?: DesktopBridge['characters']; openWorkspaceData?: DesktopBridge['openWorkspaceData']; migrateWorkspaceData?: DesktopBridge['migrateWorkspaceData'] };
 
 /** Kept exported for offline rendering; diagnostics are now explicitly under Advanced. */
-export function WorkspaceView({ petState = emptyPetState, petController, initialPage = 'pets', chatState = emptyChatState, chatController, chatHistory, onChatOpen, modelController, speech, characters, openWorkspaceData, migrateWorkspaceData, ...diagnostics }: ViewProps) {
+export function WorkspaceView({ petState = emptyPetState, petController, initialPage = 'pets', chatState = emptyChatState, chatController, chatHistory, agentTasks, onChatOpen, modelController, speech, characters, openWorkspaceData, migrateWorkspaceData, ...diagnostics }: ViewProps) {
   const [page, setPage] = useState<Page>(initialPage);
   const [visitedModules, setVisitedModules] = useState(() => isModulePage(initialPage));
   const headingRef = useRef<HTMLElement>(null);
@@ -97,7 +98,7 @@ export function WorkspaceView({ petState = emptyPetState, petController, initial
         </div>
         <div className={`feedback${error || busy ? ' visible' : ''}`} aria-live="polite" aria-atomic="true">{error ? <p role="alert" className="error">{error}</p> : petState.notice ? <p className="sr-only">{petState.notice}</p> : busy ? <p>{({ load: '正在读取配置', importPackages: '正在导入并校验素材', save: '正在保存配置', add: '正在登记配置', clone: '正在复制配置', delete: '正在删除配置', theme: '正在保存主题', start: '正在请求启动实例', stop: '正在请求停止实例', applyDisplay: '正在应用显示偏好', applyBehavior: '正在应用行为偏好', visibility: '正在调整窗口显隐', pause: '正在暂停自有播放器', resume: '正在解除暂停' } as const)[petState.operation!] ?? '正在处理'}…</p> : null}</div>
         <Suspense fallback={<PageLoadingSkeleton />}>
-          {page === 'pets' ? <PetPage appearance={theme} state={petState} controller={petController} /> : page === 'chat' ? <ChatPage state={chatState} controller={chatController} history={chatHistory} appearance={theme} onOpenPets={() => changePage('pets')}
+          {page === 'pets' ? <PetPage appearance={theme} state={petState} controller={petController} /> : page === 'chat' ? <ChatPage state={chatState} controller={chatController} history={chatHistory} agentTasks={agentTasks} appearance={theme} onOpenPets={() => changePage('pets')}
             onOpenPetAgent={chatInstance && !petState.deleteId ? opener => { setVisitedModules(true); setOpenAgent({ petID: chatInstance.id, opener }); } : undefined}
             reference={chatInstance?.package} /> : page === 'models' ? <ModelPage controller={modelController} appearance={theme} /> : null}
         </Suspense>
@@ -117,23 +118,27 @@ export function WorkspaceView({ petState = emptyPetState, petController, initial
   </div>;
 }
 function Confirmation({ title, children, busy, blocked, error, onCancel, onConfirm }: { title: string; children: ReactNode; busy: boolean; blocked: boolean; error: string; onCancel(): void; onConfirm(): void }) {
-  const ref = useRef<HTMLDivElement>(null);
+  const ref = useRef<HTMLDialogElement>(null);
   const cancel = useRef<HTMLButtonElement>(null);
+  const dismiss = useDialogDismiss(onCancel, busy);
   useEffect(() => {
     const previous = document.activeElement;
-    cancel.current?.focus();
-    return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus(); else document.getElementById('main')?.focus(); };
+    const dialog = ref.current!;
+    dialog.showModal();
+    cancel.current?.focus({ preventScroll: true });
+    return () => {
+      dialog.close();
+      if (previous instanceof HTMLElement && previous.isConnected && previous.getClientRects().length && !previous.matches(':disabled')) {
+        previous.focus({ preventScroll: true });
+      } else document.getElementById('main')?.focus({ preventScroll: true });
+    };
   }, []);
-  return <div className="modal-backdrop"><div className="confirmation" role="dialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-description" aria-busy={busy} ref={ref} onKeyDown={event => {
-    if (event.key === 'Escape') { event.preventDefault(); if (!busy) onCancel(); }
-    if (event.key === 'Tab') {
-      const elements = ref.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)');
-      const first = elements?.[0], last = elements?.[elements.length - 1];
-      if (!first) { event.preventDefault(); ref.current?.focus(); }
-      else if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
-    }
-  }} tabIndex={-1}><h2 id="delete-title">{title}</h2><div id="delete-description">{children}</div>{error && <p className="error" role="alert">{error}</p>}<div className="button-row"><button className="button secondary" ref={cancel} disabled={busy} onClick={onCancel}>保留配置</button><button className="button destructive" disabled={blocked} onClick={onConfirm}>{busy ? '删除中…' : '只删除实例配置'}</button></div></div></div>;
+  return <dialog className="confirmation" role="dialog" aria-labelledby="delete-title" aria-describedby="delete-description" aria-busy={busy} ref={ref} {...dismiss}>
+    <header className="dialog-title-row"><h2 id="delete-title">{title}</h2><DialogCloseButton disabled={busy} onClose={onCancel} /></header>
+    <div id="delete-description">{children}</div>
+    {error && <p className="error" role="alert">{error}</p>}
+    <div className="button-row"><button type="button" className="button secondary" ref={cancel} disabled={busy} onClick={onCancel}>保留配置</button><button type="button" className="button destructive" disabled={blocked} onClick={onConfirm}>{busy ? '删除中…' : '只删除实例配置'}</button></div>
+  </dialog>;
 }
 
 export function App() {
@@ -204,5 +209,5 @@ export function App() {
     void refresh('snapshot');
     return () => { mounted.current = false; sequence.current++; running.current = false; };
   }, [controller]);
-  return <WorkspaceView openWorkspaceData={window.petDesktop?.openWorkspaceData} migrateWorkspaceData={window.petDesktop?.migrateWorkspaceData} speech={window.petDesktop?.speech} characters={window.petDesktop?.characters} modelController={modelController} chatState={chatState} chatController={chatController} chatHistory={window.petDesktop?.chatHistory} onChatOpen={openChat} petState={petState} petController={controller} snapshot={snapshot} busy={busy} error={error} onRefresh={() => { void refresh('snapshot'); }} onProbe={() => { void refresh('probe'); }} />;
+  return <WorkspaceView openWorkspaceData={window.petDesktop?.openWorkspaceData} migrateWorkspaceData={window.petDesktop?.migrateWorkspaceData} speech={window.petDesktop?.speech} characters={window.petDesktop?.characters} modelController={modelController} chatState={chatState} chatController={chatController} chatHistory={window.petDesktop?.chatHistory} agentTasks={window.petDesktop?.agentTasks} onChatOpen={openChat} petState={petState} petController={controller} snapshot={snapshot} busy={busy} error={error} onRefresh={() => { void refresh('snapshot'); }} onProbe={() => { void refresh('probe'); }} />;
 }

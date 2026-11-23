@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import type { PackageReference } from '../../../../packages/contracts/src/pets.ts';
 import { PetCover, petArt } from '../PetCover.tsx';
+import { DialogCloseButton, useDialogDismiss } from '../DialogDismiss.tsx';
 import { PetNookIcon } from '../PetNookIcon.tsx';
 import type { GoalSession, MemoryMode, MemorySession } from './character-record-editors.ts';
 import type { IdentityEditor } from './identity-editor.ts';
@@ -44,16 +45,13 @@ export function PetAgentPanel({ identity, memory, goals, chat, ...dialog }: Dial
 
 // Native modal backdrops retarget pointer events to the dialog itself. Empty space
 // inside the panel can have that target too, so also check the panel boundary.
-const isBackdrop = (event: { target: EventTarget; currentTarget: HTMLDialogElement; clientX: number }) =>
-  event.target === event.currentTarget && event.clientX < event.currentTarget.getBoundingClientRect().left;
-
 function AgentDialog({ name, reference, opener, onClose, renderDetail, overview, connected }: DialogProps & {
   overview: ReturnType<typeof summarizePetAgent>; connected: boolean;
 }) {
   const [section, setSection] = useState<Section>();
   const [memoryMode, setMemoryMode] = useState<MemoryMode>('personal');
   const panel = useRef<HTMLDialogElement>(null), close = useRef<HTMLButtonElement>(null), back = useRef<HTMLButtonElement>(null);
-  const backdropPressed = useRef(false);
+  const dismiss = useDialogDismiss(onClose);
   const overviewScroll = useRef<HTMLDivElement>(null), overviewPosition = useRef(0), returnTo = useRef<HTMLElement | null>(null);
   useLayoutEffect(() => {
     const node = panel.current!;
@@ -87,19 +85,10 @@ function AgentDialog({ name, reference, opener, onClose, renderDetail, overview,
   const title = sections.find(entry => entry.id === section)?.title ?? '';
   const review = overview.pending;
   return <dialog className="pet-agent-panel workspace-drawer" data-pet-art={petArt(reference)} ref={panel} aria-labelledby="pet-agent-title"
-    onPointerDown={event => { backdropPressed.current = event.isPrimary && event.button === 0 && isBackdrop(event); }}
-    onPointerCancel={() => { backdropPressed.current = false; }}
-    onPointerUp={event => { backdropPressed.current &&= isBackdrop(event); }}
-    onClick={event => {
-      const pressed = backdropPressed.current;
-      backdropPressed.current = false;
-      if (pressed && event.detail > 0 && isBackdrop(event)) onClose();
-    }}
-    onCancel={event => { event.preventDefault(); onClose(); }}>
+    {...dismiss}>
     <header className="workspace-drawer-header"><h2 id="pet-agent-title">桌宠 Agent</h2>
-      <button type="button" ref={close} className="workspace-drawer-close" aria-label="关闭" title="关闭" onClick={onClose}>
-        <PetNookIcon name="close" />
-      </button></header>
+      <DialogCloseButton ref={close} label="关闭桌宠 Agent" onClose={onClose} />
+    </header>
     <div className="workspace-drawer-scroll" ref={overviewScroll} hidden={!!section}>
       <div className="pet-agent-role"><PetCover reference={reference} avatar />
         <div><strong>{name}</strong><span role="status">{overview.privacy}</span></div>

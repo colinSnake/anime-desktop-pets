@@ -1,5 +1,6 @@
 import { textDraft } from '../src/chat-draft.ts';
 import type { OnlineChatInput, ChatSendResult } from '../../../packages/contracts/src/online-chat.ts';
+import type { ChatAttachment } from '../../../packages/contracts/src/chat-attachments.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ChatWorkspaceController, characterCount, validatedMessage, trimTranscript, requestHistory, type ChatTurn, type ChatRequest } from '../src/chat-session.ts';
@@ -195,6 +196,22 @@ const onlineOptions = [
  { route: { connectionID: 'first', modelEntryID: 'one', fingerprint: 'a'.repeat(64) }, connectionName: '服务甲', modelName: '同名模型', ready: true, isDefault: true },
  { route: { connectionID: 'second', modelEntryID: 'one', fingerprint: 'b'.repeat(64) }, connectionName: '服务乙', modelName: '同名模型', ready: true, isDefault: false },
 ];
+test('when no global default exists, the first ready configured model becomes the default route', async () => {
+ const options = [
+  { route: { connectionID: 'first', modelEntryID: 'three', fingerprint: 'a'.repeat(64) }, connectionName: '服务甲', modelName: '模型三', ready: true, isDefault: false },
+  { route: { connectionID: 'second', modelEntryID: 'one', fingerprint: 'b'.repeat(64) }, connectionName: '服务乙', modelName: '模型一', ready: true, isDefault: false },
+ ];
+ const sent: OnlineChatInput[] = [];
+ const c = new ChatWorkspaceController(undefined, undefined, {
+  list: async () => ({ ok: true, models: options }), cancel: async () => {},
+  send: async input => { sent.push(input); return { ok: true, requestID: input.requestID, text: '默认回复', replayable: false }; },
+ });
+ c.syncCharacters(characters); await c.refreshModels();
+ assert.equal(c.getSnapshot().session.model, 'first/three/' + 'a'.repeat(64));
+ c.edit('使用第一个服务商的模型三'); assert.equal(await c.send(), true);
+ assert.deepEqual(sent[0]?.route, options[0]!.route);
+});
+
 test('saved default is pinned; context and other destinations never feed the next model history', async () => {
  const sent: OnlineChatInput[] = [];
  const c = new ChatWorkspaceController(undefined, undefined, {
@@ -209,6 +226,48 @@ test('saved default is pinned; context and other destinations never feed the nex
  c.selectModel(c.getSnapshot().models[1]!.id); c.edit('第四问'); assert.equal(await c.send(), true);
  assert.deepEqual(sent[3]?.route, onlineOptions[1]!.route); assert.deepEqual(sent[3]?.history, []);
  assert.equal(c.getSnapshot().session.turns.length, 8);
+});
+
+test('selected attachments are sent only with the current turn and clear after a verified reply', async () => {
+ const sent: OnlineChatInput[] = [];
+ const c = new ChatWorkspaceController(undefined, undefined, {
+  list: async () => ({ ok: true, models: onlineOptions }), cancel: async () => {},
+  send: async input => { sent.push(input); return { ok: true, requestID: input.requestID, text: '已读附件', replayable: false }; },
+ });
+ c.syncCharacters(characters); await c.refreshModels();
+ const files: ChatAttachment[] = [{ name: 'notes.txt', mediaType: 'text/plain', data: '5L2g5aW9' }];
+ assert.equal(c.setAttachments('pet-one', files), true);
+ c.edit('请整理附件');
+ assert.equal(await c.send(), true);
+ assert.deepEqual(sent[0]?.attachments, files);
+ assert.deepEqual(c.getSnapshot().session.attachments, []);
+ assert.equal(JSON.stringify(c.getSnapshot()).includes(files[0]!.data), false);
+});
+
+test('cancel and pet switch clear in-memory attachments and do not make them retryable', async () => {
+ const sent: OnlineChatInput[] = [];
+ const reply = deferred<ChatSendResult>();
+ const c = new ChatWorkspaceController(undefined, undefined, {
+  list: async () => ({ ok: true, models: onlineOptions }), cancel: async () => {},
+  send: input => { sent.push(input); return reply.promise; },
+ });
+ c.syncCharacters(characters); await c.refreshModels();
+ const files: ChatAttachment[] = [{ name: 'notes.txt', mediaType: 'text/plain', data: '5L2g5aW9' }];
+ assert.equal(c.setAttachments('pet-one', files), true);
+ c.edit('请整理附件');
+ const pending = c.send();
+ assert.deepEqual(sent[0]?.attachments, files);
+ c.cancel();
+ assert.deepEqual(c.getSnapshot().session.attachments, []);
+ assert.equal(await c.retry(), false);
+ reply.resolve({ ok: true, requestID: sent[0]!.requestID, text: '迟到回复', replayable: false });
+ assert.equal(await pending, false);
+ assert.equal(JSON.stringify(c.getSnapshot()).includes(files[0]!.data), false);
+
+ assert.equal(c.setAttachments('pet-one', files), true);
+ c.selectCharacter('pet-two');
+ c.selectCharacter('pet-one');
+ assert.deepEqual(c.getSnapshot().session.attachments, []);
 });
 
 test('online retry does not silently replace a stale route and cancellation reaches the bridge', async () => {

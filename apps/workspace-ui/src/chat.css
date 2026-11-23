@@ -95,7 +95,7 @@
 .chat-failure .pet-nook-icon { width: 14px; height: 14px; }
 .chat-failure button { padding: 3px; border: 0; background: var(--transparent); color: inherit; text-decoration: underline; text-underline-offset: 3px; }
 .chat-composer { padding: 12px 11px 9px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); box-shadow: 0 4px 15px var(--shadow-control-ink); }
-.chat-composer:focus-within { border-color: var(--focus); box-shadow: 0 0 0 2px color-mix(in srgb, var(--focus) 14%, var(--transparent)); }
+.chat-composer:focus-within { border-color: var(--focus); }
 .chat-draft-editor { display: block; width: 100%; min-height: 44px; max-height: min(154px, 30dvh); padding: 0 4px; margin: 0; border: 0; outline: none; overflow: auto; overflow-wrap: anywhere; white-space: pre-wrap; user-select: text; background: var(--transparent); color: var(--text); font: inherit; font-size: 14px; line-height: 22px; }
 .chat-draft-editor > p { margin: 0; }
 .chat-draft-editor[data-empty="true"]:not(:focus)::before { content: attr(data-placeholder); position: absolute; color: var(--nook-quiet); pointer-events: none; }
@@ -122,11 +122,13 @@
 .chat-model-toggle .pet-nook-icon:last-child { width: 11px; height: 11px; }
 .chat-model-toggle:disabled { opacity: .72; }
 .chat-model-list { position: absolute; z-index: 3; right: 0; bottom: calc(100% + 7px); width: min(260px, 68vw); padding: 8px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: 0 10px 25px var(--shadow-popover-ink); }
-.chat-model-list h2 { font-size: 12px; margin: 3px 5px 6px; }
+.chat-model-list .dialog-title-row { align-items: center; padding-inline-start: 5px; }
+.chat-model-list h2 { font-size: 12px; margin: 0; }
 .chat-model-list [role="group"] { max-height: min(220px, 38dvh); overflow: auto; }
-.chat-model-list button { width: 100%; display: flex; justify-content: space-between; gap: 8px; padding: 7px; border: 0; border-radius: 7px; background: var(--transparent); font-size: 12px; text-align: left; overflow-wrap: anywhere; }
-.chat-model-list button:hover:enabled, .chat-model-list button[aria-pressed="true"] { background: var(--accent-soft); }
+.chat-model-list [role="group"] > button { width: 100%; display: flex; justify-content: space-between; gap: 8px; padding: 7px; border: 0; border-radius: 7px; background: var(--transparent); font-size: 12px; text-align: left; overflow-wrap: anywhere; }
+.chat-model-list [role="group"] > button:hover:enabled, .chat-model-list [role="group"] > button[aria-pressed="true"] { background: var(--accent-soft); }
 .chat-clear { width: min(400px, 100% - 24px); padding: 21px; background: var(--surface); color: var(--text); border: 1px solid var(--line); border-radius: 19px; box-shadow: 0 18px 50px var(--shadow-dialog-ink); }
+.chat-clear .dialog-title-row { margin-bottom: 8px; }
 .chat-clear::backdrop { background: var(--backdrop-dialog); }
 .chat-clear h2 { margin: 0 0 7px; }
 .chat-clear p { margin: 0 0 18px; color: var(--muted); line-height: 1.65; }
@@ -193,3 +195,101 @@
 .chat-history-detail-pages { display: flex; flex: 0 0 100%; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
 .chat-history-detail-pages > p { flex: 0 1 auto; border-radius: 4px; }
 .chat-history-detail-pages .button-row { gap: 6px; margin-inline-start: auto; }
+
+.chat-attachments { display: grid; gap: 4px; margin: 6px 0; color: var(--nook-quiet); font-size: 11px; }
+.chat-attachments ul { display: flex; flex-wrap: wrap; gap: 5px; padding: 0; margin: 0; list-style: none; }
+.chat-attachments li { max-width: 100%; min-width: 0; display: flex; align-items: center; gap: 4px; padding: 0 4px 0 8px; border: 1px solid var(--line); border-radius: 8px; }
+.chat-attachments li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-attachments button { flex: none; padding: 2px 6px; border: 0; background: var(--transparent); color: inherit; }
+
+.agent-task-dialog { width: min(548px, calc(100% - 32px)); max-height: min(720px, calc(100% - 32px)); padding: 0; overflow: hidden; }
+.agent-task-dialog[open] { display: flex; flex-direction: column; }
+.agent-task-header { display: flex; justify-content: space-between; align-items: start; gap: 14px; padding: 20px 22px 16px; border-bottom: 1px solid var(--line); }
+.agent-task-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 9px; margin-bottom: 6px; }
+.agent-task-heading h2 { margin: 0; font-size: 19px; line-height: 1.35; overflow-wrap: anywhere; }
+.agent-task-heading > span { border-radius: 6px; padding: 2px 6px; background: var(--accent-soft); color: var(--accent-text); font-size: 11px; }
+.agent-task-icon { flex: none; display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 8px; background: var(--transparent); color: var(--muted); cursor: pointer; }
+.agent-task-icon:hover:not(:disabled) { background: var(--button-hover); color: var(--text); }
+.agent-task-icon .pet-nook-icon { width: 16px; height: 16px; }
+.agent-task-body { min-height: 0; overflow: auto; display: grid; gap: 15px; padding: 17px 22px 20px; }
+.agent-task-field, .agent-task-body label, .agent-task-materials { display: grid; gap: 6px; }
+.agent-task-body label, .agent-task-materials-title h3 { font-size: 13px; font-weight: 600; }
+.agent-task-materials-title { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.agent-task-materials-title h3 { margin: 0; }
+.agent-task-materials-title > span { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.agent-task-body textarea, .agent-task-body select { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; color: inherit; background: var(--surface); font: inherit; font-weight: 400; }
+.agent-task-body textarea { resize: vertical; min-height: 74px; }
+.agent-task-dialog p { margin: 0; overflow-wrap: anywhere; }
+.agent-task-header p, .agent-task-dialog .agent-task-hint { font-size: 12px; line-height: 1.5; }
+.agent-task-dropzone { width: 100%; min-height: 102px; padding: 13px 10px; display: grid; justify-items: center; align-content: center; gap: 4px; border: 1px dashed color-mix(in srgb, var(--muted) 60%, var(--line)); border-radius: 12px; background: var(--surface-soft); color: var(--text); text-align: center; cursor: pointer; }
+.agent-task-dropzone:enabled:hover, .agent-task-dropzone[data-dragging] { border-color: var(--accent-text); background: var(--accent-soft); }
+.agent-task-dropzone:disabled { color: var(--muted); cursor: default; }
+.agent-task-drop-icon { display: grid; place-items: center; width: 30px; height: 30px; margin-bottom: 2px; border-radius: 9px; color: var(--accent-text); background: var(--accent-soft); }
+.agent-task-drop-icon .pet-nook-icon { width: 17px; height: 17px; }
+.agent-task-dropzone strong { font-size: 13px; }
+.agent-task-dropzone strong span { color: var(--accent-text); }
+.agent-task-dropzone small { color: var(--muted); font-size: 11px; }
+.agent-task-file-list { display: grid; gap: 4px; margin: 2px 0 0; padding: 0; list-style: none; }
+.agent-task-file-list li { display: flex; align-items: center; gap: 7px; padding: 2px 4px 2px 9px; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; }
+.agent-task-file-list li > .pet-nook-icon { flex: none; width: 14px; height: 14px; color: var(--accent-text); }
+.agent-task-file-list li > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-task-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; padding: 12px 22px; border-top: 1px solid var(--line); }
+.agent-task-notice { color: var(--muted); font-size: 12px; }
+.agent-task-dialog .agent-task-file-notice { color: var(--danger); font-size: 12px; }
+.agent-task-notice:empty, .agent-task-file-notice:empty { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); overflow: hidden; }
+@media (max-width: 420px) { .agent-task-header, .agent-task-body, .agent-task-actions { padding-inline: 14px; } }
+.agent-task-rows { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.agent-task-rows li { display: grid; gap: 6px; min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 9px; }
+.agent-task-id { white-space: pre-wrap; }
+.agent-task-status { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 12px; }
+.agent-task-status progress { width: 72px; }
+.agent-task-rows pre { font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Ape Agent Harness-inspired composer surface: editor, status and controls remain one quiet card. */
+.chat-composer { position: relative; padding: 13px 12px 10px; border-radius: 16px; transition: border-color 120ms ease, background-color 120ms ease; }
+.chat-composer[data-dragging="true"] { border-style: dashed; border-color: var(--accent); background: var(--accent-soft); }
+.chat-composer-editor { min-height: 46px; padding: 1px 2px 4px; }
+.chat-draft-editor:focus-visible { outline: none; box-shadow: none; }
+.chat-drop-hint { display: flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; margin: 0 0 7px; border: 1px dashed var(--accent); border-radius: 10px; color: var(--accent-text); background: color-mix(in srgb, var(--accent-soft) 72%, var(--surface)); font-size: 12px; }
+.chat-drop-hint .pet-nook-icon { width: 15px; height: 15px; }
+.chat-composer-footer { min-height: 36px; padding-top: 5px; border-top: 1px solid color-mix(in srgb, var(--line) 70%, var(--transparent)); }
+
+.agent-task-composer { display: grid; gap: 8px; padding: 11px 12px 9px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: 0 4px 15px var(--shadow-control-ink); }
+.agent-task-composer:focus-within { border-color: var(--focus); }
+.agent-task-prompt { display: grid; gap: 6px; }
+.agent-task-prompt > span { font-size: 13px; font-weight: 600; }
+.agent-task-prompt textarea { min-height: 80px; padding: 4px 2px 3px; border: 0; border-radius: 0; background: var(--transparent); resize: vertical; }
+.agent-task-prompt textarea:focus, .agent-task-prompt textarea:focus-visible { outline: none; box-shadow: none; border-color: var(--transparent); }
+.agent-task-composer-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; padding-top: 7px; border-top: 1px solid color-mix(in srgb, var(--line) 72%, var(--transparent)); }
+.agent-task-composer-hint { color: var(--muted); font-size: 11px; }
+.agent-task-permission-picker { position: relative; flex: none; }
+.agent-task-permission-picker summary { list-style: none; }
+.agent-task-permission-picker summary::-webkit-details-marker { display: none; }
+.agent-task-permission-trigger { display: inline-flex; align-items: center; gap: 5px; min-height: 29px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); color: var(--muted); cursor: pointer; font-size: 12px; }
+.agent-task-permission-trigger:hover { color: var(--text); border-color: var(--accent); }
+.agent-task-permission-trigger .pet-nook-icon { width: 14px; height: 14px; }
+.agent-task-permission-trigger .pet-nook-icon:last-child { width: 11px; height: 11px; }
+.agent-task-permission-menu { position: absolute; z-index: 5; bottom: calc(100% + 8px); left: 0; width: min(300px, 76vw); display: grid; gap: 6px; padding: 9px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: 0 12px 28px var(--shadow-popover-ink); }
+.agent-task-permission-menu > strong { padding: 2px 5px; font-size: 11px; color: var(--muted); }
+.agent-task-permission-menu button { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; width: 100%; padding: 7px 8px; border: 0; border-radius: 8px; background: var(--transparent); color: var(--text); text-align: left; }
+.agent-task-permission-menu button:hover:enabled, .agent-task-permission-menu button[aria-checked="true"] { background: var(--accent-soft); }
+.agent-task-permission-menu button > span:first-child { display: grid; gap: 2px; min-width: 0; }
+.agent-task-permission-menu b { font-size: 12px; }
+.agent-task-permission-menu small, .agent-task-permission-menu p { color: var(--muted); font-size: 11px; line-height: 1.45; }
+.agent-task-permission-menu p { margin: 2px 5px 0; }
+.agent-task-body textarea:focus-visible { outline: none; box-shadow: none; border-color: var(--focus); }
+.agent-task-permission-dialog { width: min(420px, calc(100% - 28px)); padding: 0; border: 1px solid var(--line); border-radius: 16px; color: var(--text); background: var(--surface); box-shadow: 0 18px 50px var(--shadow-dialog-ink); }
+.agent-task-permission-dialog::backdrop { background: var(--backdrop-dialog); }
+.agent-task-permission-dialog header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 18px 20px 12px; border-bottom: 1px solid var(--line); }
+.agent-task-permission-dialog h2 { margin: 3px 0 0; font-size: 18px; line-height: 1.4; }
+.agent-task-permission-dialog > p { margin: 15px 20px 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.agent-task-permission-dialog .agent-task-permission-warning { margin-top: 8px; padding: 9px 10px; border-radius: 9px; color: var(--accent-text); background: var(--accent-soft); }
+.agent-task-permission-kicker { color: var(--accent-text); font-size: 11px; font-weight: 650; }
+.agent-task-permission-dialog footer { display: flex; justify-content: flex-end; gap: 8px; padding: 16px 20px 18px; }
+.agent-task-permission-dialog .button { font-size: 12px; }
+@media (max-width: 420px) { .agent-task-permission-menu { width: min(280px, calc(100vw - 40px)); } }
+.agent-task-model-control { display: flex; align-items: center; gap: 6px; min-width: 0; margin-left: auto; }
+.agent-task-model-control > span { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.agent-task-model-control select { min-width: min(190px, 34vw); padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); color: var(--text); font: inherit; font-size: 12px; }
+.agent-task-submit { flex: none; white-space: nowrap; }
+@media (max-width: 520px) { .agent-task-model-control { flex: 1 1 100%; margin-left: 0; } .agent-task-model-control select { flex: 1; min-width: 0; } }

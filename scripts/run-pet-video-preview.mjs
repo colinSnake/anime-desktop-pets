@@ -42,7 +42,7 @@ async function runPreview(args) {
   const launchCodex = args.includes('--launch-codex');
   const hmr = args.includes('--hmr');
   if (new Set(args).size !== args.length || args.some(arg => arg !== '--check' && !(workspace && (arg === '--launch-codex' || arg === '--hmr'))) ||
-      (hmr && (check || launchCodex)) ||
+      (hmr && launchCodex) ||
       (process.platform !== 'darwin' && (!workspace || check || launchCodex))) {
     throw new Error(`此参数仅支持 macOS：pnpm run ${command} [--check]`);
   }

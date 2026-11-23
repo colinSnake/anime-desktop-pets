@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { isModelLoopback, MODEL_API_KEY_MAX_LENGTH, normalizeModelBaseURL } from '../../../packages/contracts/src/models.ts';
-import { ModelConnectionFields, ModelConnectionOptions, ModelEntryOptions, ModelField, modelName } from './ModelConnectionEditor.tsx';
+import { MODEL_API_KEY_MAX_LENGTH, normalizeModelBaseURL } from '../../../packages/contracts/src/models.ts';
+import { ModelConnectionFields, ModelField, ModelReasoningField, modelName } from './ModelConnectionEditor.tsx';
 import { ModelDialog } from './ModelDialog.tsx';
 import { PetNookIcon } from './PetNookIcon.tsx';
 import { ModelParameters } from './ModelParameters.tsx';
@@ -42,19 +42,19 @@ export function ModelEditorDialog({ editor, state, controller, onMode, onClose, 
   const shown = connection?.models ?? [];
   const global = state.configuration?.defaultConnectionID === id;
   const defaultUnsaved = !!saved && connection?.defaultModelEntryID !== saved.defaultModelEntryID;
-  const offerTestAfterSave = controller.canTest && !!connection && (connection.authMode === 'none' || !draft?.detach);
+  const offerTestAfterSave = controller.canTest && !!connection;
   const normalizedBase = connection && normalizeModelBaseURL(connection.baseURL, connection.apiProtocol);
-  const canTestAfterSave = offerTestAfterSave && !!normalizedBase && (connection.authMode === 'apiKey' || isModelLoopback(new URL(normalizedBase)));
+  const canTestAfterSave = offerTestAfterSave && !!normalizedBase;
   const testAfterSave = canTestAfterSave && approved?.id === id && approved.draft === draft;
   const save = () => {
     const input = keyInput.current;
-    const apiKey = input?.value ?? '';
-    if (input) input.value = '';
-    void controller.save(id, apiKey, testAfterSave ? shown.map(entry => entry.entryID) : undefined).then(published => {
+    void controller.save(id, input?.value ?? '', testAfterSave ? shown.map(entry => entry.entryID) : undefined, () => {
+      if (input) input.value = '';
+    }).then(published => {
       if (published) onSaved();
       else {
-        if (shown.some(entry => !entry.modelID.trim() || !entry.displayName.trim()
-          || Number.isNaN(entry.contextWindow) || Number.isNaN(entry.maxOutputTokens))) setParametersOpen(true);
+        if (shown.some(entry => !entry.modelID.trim() || /\s/u.test(entry.modelID) || !entry.displayName.trim()
+          || Number.isNaN(entry.contextWindow))) setParametersOpen(true);
         setApproved(undefined); // A retry needs fresh consent to send a request.
       }
     });
@@ -97,17 +97,32 @@ export function ModelEditorDialog({ editor, state, controller, onMode, onClose, 
         {draft.proposedProtocol && <div className="model-inline"><p>切换至 {modelProtocols[draft.proposedProtocol]} 会清除不兼容的输出设置。</p>
           <div className="model-actions"><button type="button" className="button secondary" onClick={() => controller.cancelProtocol(id)}>保留原协议</button>
             <button type="button" className="button primary" onClick={() => controller.confirmProtocol(id)}>清除兼容项并切换</button></div></div>}
-        {connection.authMode === 'apiKey' && <label className="model-field model-key">
-          <span className="model-key-label"><PetNookIcon name="lock" />API Key
-            <span className="model-key-state" aria-hidden="true">{draft.detach ? '保存时解除' : saved?.credentialState === 'reference-present' ? '已绑定' : '缺少 Key'}</span>
+        <label className="model-field model-key">
+          <span className="model-key-label"><PetNookIcon name="lock" />API Key（选填）
+            {saved?.credentialState === 'reference-present' && <span className="model-key-state" aria-hidden="true">{draft.detach ? '保存时解除' : '已绑定'}</span>}
           </span>
           {!draft.detach && <input key={JSON.stringify([id, draft.expectedRevision, draft.provider, connection.baseURL, connection.apiProtocol])}
-            ref={keyInput} type="password" placeholder={decision ? '输入新的 API Key' : saved?.credentialState === 'reference-present' ? '留空保留原凭证' : '输入或粘贴 API Key'}
+            ref={keyInput} type="password" placeholder={decision ? '输入新的 API Key' : saved?.credentialState === 'reference-present' ? '留空保留原凭证' : '所用接口不需要 Key 时可留空'}
             maxLength={MODEL_API_KEY_MAX_LENGTH} autoComplete="new-password" autoCapitalize="none" spellCheck={false}
             disabled={!!draft.proposedProtocol} onChange={() => setApproved(undefined)} />}
-        </label>}
-        {decision && <p className="model-alert">地址、协议或鉴权已变更。请更换 Key，或明确解除旧绑定。</p>}
+        </label>
+        {decision && <p className="model-alert">地址或协议已变更。请输入新 Key，或解除旧绑定后无 Key 保存。</p>}
         {(decision || draft.detach) && detachKey}
+        {connection.models.length > 1 && <div className="model-connection-default"><ModelField label="连接默认模型"><select value={connection.defaultModelEntryID}
+          onChange={event => controller.patch(id, { defaultModelEntryID: event.currentTarget.value })}>
+          {connection.models.map(entry => <option key={entry.entryID} value={entry.entryID}>{modelName(entry)}</option>)}
+        </select></ModelField></div>}
+        {saved && <div className="model-default-options">
+          {confirmClear && global ? <div className="model-inline"><p>清空全局默认后不会自动换用其他模型。</p><div className="model-actions">
+            <button type="button" className="button secondary" onClick={() => setConfirmClear(false)}>取消清空</button>
+            <button type="button" className="button destructive" disabled={blocked || stale} onClick={() => {
+              if (controller.getSnapshot().configuration?.defaultConnectionID === id) void controller.setDefault(null);
+              setConfirmClear(false);
+            }}>确认清空</button></div></div> : <button type="button" className="model-text-button" disabled={blocked || stale || (!global && defaultUnsaved)}
+            onClick={() => { if (global) setConfirmClear(true); else void controller.setDefault(id); }}>{global ? '清空全局默认' : '将已保存的连接默认设为全局默认'}</button>}
+          {!global && defaultUnsaved && <p className="model-note">请先保存连接默认模型的变更。</p>}
+        </div>}
+        {!decision && !draft.detach && detachKey}
         <ModelParameters draftKey={`${id}:${draft.provider ?? ''}:${draft.expectedRevision}`} entries={shown} expanded={parametersOpen}
           onToggle={() => setParametersOpen(!parametersOpen)} onChange={(entryID, fields) => controller.patchEntry(id, entryID, fields)}
           canRemove={entryID => adding ? shown.length > 1 : entryID !== connection.defaultModelEntryID && !saved?.models.some(model => model.entryID === entryID)}
@@ -115,33 +130,8 @@ export function ModelEditorDialog({ editor, state, controller, onMode, onClose, 
             // A new connection has no published route; its remaining first draft entry becomes the draft default.
             const replacement = adding ? shown.find(entry => entry.entryID !== entryID)?.entryID : undefined;
             controller.removeEntry(id, entryID, replacement);
-          }} onAdd={addModel} atLimit={connection.models.length >= 33} focusModel={focusModel} />
-        <details className="model-custom"><summary>连接选项与高级设置</summary><div className="model-parameter-list">
-          <div className="model-parameter-group" role="group" aria-label="连接设置">
-            <div className="model-parameter-heading"><strong>连接设置</strong></div>
-            {!adding && shown.length > 1 && <p className="model-note">接口地址和凭证由此连接的 {shown.length} 个模型共用。</p>}
-            <ModelConnectionOptions draft={connection} onEdit={(...args) => controller.patch(...args)} />
-            {connection.models.length > 1 && <div className="model-connection-default"><ModelField label="连接默认模型"><select value={connection.defaultModelEntryID}
-              onChange={event => controller.patch(id, { defaultModelEntryID: event.currentTarget.value })}>
-              {connection.models.map(entry => <option key={entry.entryID} value={entry.entryID}>{modelName(entry)}</option>)}
-            </select></ModelField></div>}
-            {saved && <div className="model-default-options">
-              {confirmClear && global ? <div className="model-inline"><p>清空全局默认后不会自动换用其他模型。</p><div className="model-actions">
-                <button type="button" className="button secondary" onClick={() => setConfirmClear(false)}>取消清空</button>
-                <button type="button" className="button destructive" disabled={blocked || stale} onClick={() => {
-                  if (controller.getSnapshot().configuration?.defaultConnectionID === id) void controller.setDefault(null);
-                  setConfirmClear(false);
-                }}>确认清空</button></div></div> : <button type="button" className="model-text-button" disabled={blocked || stale || (!global && defaultUnsaved)}
-                onClick={() => { if (global) setConfirmClear(true); else void controller.setDefault(id); }}>{global ? '清空全局默认' : '将已保存的连接默认设为全局默认'}</button>}
-              {!global && defaultUnsaved && <p className="model-note">请先保存连接默认模型的变更。</p>}
-            </div>}
-            {!decision && !draft.detach && detachKey}
-          </div>
-          {shown.map((entry, index) => <div key={entry.entryID} className="model-parameter-group" role="group" aria-label={`模型 ${index + 1} 的设置`}>
-            <div className="model-parameter-heading"><strong>{shown.length > 1 ? modelName(entry) : '模型设置'}</strong></div>
-            <ModelEntryOptions connection={connection} entry={entry} controller={controller} />
-          </div>)}
-        </div></details>
+          }} onAdd={addModel} atLimit={connection.models.length >= 33} focusModel={focusModel}
+          renderOptions={entry => <ModelReasoningField connection={connection} entry={entry} controller={controller} />} />
       </fieldset>
       {!adding && saved && <details className="model-custom"><summary>已保存连接</summary><div className="model-parameter-list">
         <ModelDiscoveryAction id={id} discovery={state.discovery} controller={controller} confirmingDelete={false} />

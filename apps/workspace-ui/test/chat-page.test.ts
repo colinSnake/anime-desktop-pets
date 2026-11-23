@@ -44,7 +44,7 @@ test('waiting offers stop instead of send and keeps next-question editing availa
 test('clear confirmation preserves the conversation until confirmed and errors retain restore/retry actions',async()=>{
  const c=create(async()=>{throw Error('/private');});c.edit('问题');await c.send();
  assert.match(render(c),/重试/);assert.match(render(c),/恢复输入/);assert.doesNotMatch(render(c),/private/);
- c.requestClear();assert.match(render(c),/<dialog[^>]*role="alertdialog"/);assert.match(render(c),/已保存的历史、未发送的草稿和角色资料会保留/);
+ c.requestClear();assert.match(render(c),/<dialog[^>]*role="alertdialog"[\s\S]*?<button[^>]*class="dialog-close"[^>]*><svg/);assert.match(render(c),/已保存的历史、未发送的草稿和角色资料会保留/);
  assert.equal(c.getSnapshot().session.turns.length,1);c.cancelClear();assert.doesNotMatch(render(c),/role="alertdialog"/);
 });
 test('input counter exposes rather than silently truncates overlong drafts',()=>{
@@ -185,4 +185,18 @@ test('the chat options expose retained drafts by conversation label, without sho
  const html = render(c);
  assert.match(html, /<button[^>]*>恢复草稿 · 会话 14<\/button>/);
  assert.doesNotMatch(html, /未发送的合成正文/);
+});
+
+test('online composer exposes bounded file selection and removal only for the current message', async () => {
+ const c = new ChatWorkspaceController(undefined, undefined, {
+  list: async () => ({ ok: true, models: [{ route: { connectionID: 'a', modelEntryID: 'x', fingerprint: 'a'.repeat(64) }, connectionName: '服务', modelName: '模型', ready: true, isDefault: true }] }),
+  send: async () => ({ ok: false, error: 'unavailable' }), cancel: async () => {},
+ });
+ c.syncCharacters([{ id: 'pet-one', name: '龙妹' }]); await c.refreshModels();
+ assert.equal(c.setAttachments('pet-one', [{ name: 'notes.txt', mediaType: 'text/plain', data: '5L2g5aW9' }]), true);
+ const html = render(c);
+ assert.match(html, /type="file"[^>]*multiple=""/);
+ assert.match(html, /移除 notes\.txt/);
+ assert.match(html, /仅本轮/);
+ assert.doesNotMatch(html, /5L2g5aW9/);
 });

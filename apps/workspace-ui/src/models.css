@@ -52,16 +52,14 @@
 .model-status-button[data-testing] .model-status-dot { outline: 1px solid currentColor; outline-offset: 2px; }
 .model-row .button.model-delete { color: var(--danger); }
 .model-row .button { min-height: 29px; padding: 3px 9px; }
-.model-dialog { box-sizing: border-box; width: min(100% - 24px, 520px); max-height: min(540px, 100dvh - 24px); padding: 0; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); color: var(--text); box-shadow: 0 18px 70px var(--shadow-dialog-ink); overflow: hidden; }
+.model-dialog { box-sizing: border-box; width: min(480px, 100% - 24px); max-width: calc(100% - 24px); max-height: min(520px, 100dvh - 24px); padding: 0; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); color: var(--text); box-shadow: 0 18px 70px var(--shadow-dialog-ink); overflow: hidden; }
 .model-dialog-compact { width: min(100% - 24px, 410px); }
 .model-dialog::backdrop { background: var(--overlay-soft); }
-.model-dialog-layout { display: flex; flex-direction: column; max-height: min(538px, 100dvh - 26px); }
+.model-dialog-layout { display: flex; flex-direction: column; max-height: min(520px, 100dvh - 26px); }
 .model-dialog-header, .model-dialog-footer { flex: 0 0 auto; padding: 10px 15px; }
 .model-dialog-header { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 9px; border-bottom: 1px solid var(--line); }
 .model-dialog-header p { margin: 2px 0 0; color: var(--muted); font-size: 11px; }
 .model-dialog-header h2 { margin: 0; font-size: 16px; font-weight: 650; }
-.model-dialog-close:hover:not(:disabled), .model-dialog .model-dialog-header .model-dialog-close:focus-visible { background: color-mix(in srgb, var(--text) 12%, var(--surface)); color: var(--text); outline: none; }
-@media (forced-colors: active) { .model-dialog .model-dialog-header .model-dialog-close:focus-visible { outline: 2px solid var(--system-button-ink); outline-offset: -2px; } }
 .model-dialog-scroll { overflow: auto; overscroll-behavior: contain; min-height: 0; padding: 11px 15px 12px; display: grid; gap: 8px; }
 .model-dialog-scroll > p { margin: 0; line-height: 1.55; }
 .model-dialog-footer { border-top: 1px solid var(--line); background: var(--canvas); }
@@ -77,7 +75,7 @@
 .model-field:has(select) { position: relative; }
 .model-field select { appearance: none; padding-inline-end: 25px; text-overflow: ellipsis; }
 .model-field:has(select)::after { content: ''; position: absolute; inset-inline-end: 12px; inset-block-end: 14px; width: 6px; height: 6px; border: solid var(--muted); border-width: 0 1px 1px 0; transform: rotate(45deg); pointer-events: none; }
-.model-field :is(input, select):focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.model-field select:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 .model-field input[aria-invalid="true"] { background: var(--danger-soft); }
 .model-fieldset { display: grid; gap: 9px; border: 0; min-inline-size: 0; margin: 0; padding: 0; }
 .model-custom { padding: 6px 9px; border: 1px solid var(--line); border-radius: 8px; }
@@ -116,6 +114,8 @@
 .model-candidates { list-style: none; max-height: 150px; overflow: auto; margin: 0; padding: 3px; display: grid; gap: 6px; }
 .model-candidates .model-check { min-height: 26px; }
 @media (max-width: 530px) {
+  .model-grid { grid-template-columns: minmax(0, 1fr); }
+  .model-field-wide { grid-column: auto; }
   .model-row { padding-inline: 8px; }
   .model-row-actions, .model-identity { gap: 5px; }
   .model-tile { width: 28px; height: 28px; }

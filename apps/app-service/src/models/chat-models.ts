@@ -6,9 +6,12 @@ import type { ModelConfiguration } from './types.ts';
 export function chatOptions(state: ModelConfiguration): ChatOption[] {
   const { revision, connections, defaultConnectionID } = validateConfiguration(state);
   return connections.flatMap(connection => connection.models.map(model => {
-    const { connectionID, modelEntryID, fingerprint } = routeFor(revision, connection, model, 'text-chat');
+    const { connectionID, modelEntryID, fingerprint, tools, inputModalities } = routeFor(revision, connection, model, 'text-chat');
     return { route: { connectionID, modelEntryID, fingerprint }, connectionName: connection.displayName, modelName: model.displayName,
-      ready: connection.authMode === 'none' || !!connection.credentialRef, isDefault: connection.id === defaultConnectionID && model.entryID === connection.defaultModelEntryID };
+      // A saved route can be attempted; only the provider response verifies access.
+      ready: true, isDefault: connection.id === defaultConnectionID && model.entryID === connection.defaultModelEntryID,
+      ...(tools !== 'unsupported' && { taskTools: tools === 'supported' ? true as const : 'unverified' as const }),
+      ...(inputModalities && { inputModalities: [...inputModalities] }) };
   }));
 }
 

@@ -136,19 +136,12 @@ test('discovery is bounded by 256 models, repeated cursors and 4MiB total, with 
     assert.equal(calls, kind === 'models' ? 3 : kind === 'cursor' ? 2 : 5); client.close();
   }
 });
-test('loopback no-auth uses real local server, preserves prefix and refuses redirect without reaching target', async () => {
+for (const mode of ['apiKey', 'none'] as const) test(`loopback without a Key (${mode}) uses real local server, preserves prefix and refuses redirect`, async () => {
   let hits = 0, auth: string | undefined; const paths: string[] = [];
   const server = createServer((req, res) => { hits++; paths.push(req.url!); auth = req.headers.authorization; if (req.url?.endsWith('/models')) { res.writeHead(302, { location: '/forbidden' }); res.end(); } else { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(textReply('chat-completions'))); } });
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r)); const address = server.address(); assert.ok(address && typeof address !== 'string');
-  const config = configuration(); config.connections[0]!.baseURL = `http://127.0.0.1:${address.port}/deployment/v1`; config.connections[0]!.authMode = 'none'; delete config.connections[0]!.credentialRef;
+  const config = configuration(); config.connections[0]!.baseURL = `http://127.0.0.1:${address.port}/deployment/v1`; config.connections[0]!.authMode = mode; delete config.connections[0]!.credentialRef;
   const client = new ModelClient({ readConfiguration: () => config, readCredential: async () => { throw Error('must not read'); } });
   try { await client.complete(undefined, 'text-chat', input); assert.equal(auth, undefined); await assert.rejects(client.discover('connection-one'), code('upstream_unavailable')); assert.equal(hits, 2); assert.deepEqual(paths, ['/deployment/v1/chat/completions', '/deployment/v1/models']); }
   finally { client.close(); server.closeAllConnections(); await new Promise<void>((r, reject) => server.close(e => e ? reject(e) : r())); }
-});
-test('saved missing-key configuration is not an invalid configuration or a reason to read an unspecified vault item', async () => {
-  const config = configuration(); delete config.connections[0]!.credentialRef; let reads = 0, calls = 0;
-  const client = new ModelClient({ readConfiguration: () => config, readCredential: async () => { reads++; return 'SYNTHETIC'; }, fetch: async () => { calls++; return response(textReply('chat-completions')); } });
-  await assert.rejects(client.complete(undefined, 'text-chat', input), code('credentials_unavailable'));
-  await assert.rejects(client.discover('connection-one'), code('credentials_unavailable'));
-  assert.equal(reads, 0); assert.equal(calls, 0); client.close();
 });

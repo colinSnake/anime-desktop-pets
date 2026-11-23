@@ -87,15 +87,99 @@ test('fixed authenticated chat sends the visible destination and only authorized
   assert.deepEqual(JSON.parse(messages.at(-1).content), { question: '聊聊纸船', characterContext: { personalMemories: ['蓝色纸船'] } });
 });
 
-test('missing Key or a stale displayed default never reads another credential or sends', use, async t => {
-  const f = await fixture(t, async () => assert.fail('must not send'));
+test('image attachments require a saved Responses image-capable route before credentials or Provider calls', use, async t => {
+  let calls = 0;
+  const f = await fixture(t, async () => { calls++; return completion(); });
+  await f.write('images');
+  const [saved] = await f.routes();
+  const image = { name: 'diagram.png', mediaType: 'image/png', data: 'iVBORw0KGgoAAAAA' };
+  const rejected = await f.send(saved!.route, { attachments: [image] });
+  assert.equal(rejected.statusCode, 400);
+  assert.equal(rejected.json().error, 'invalid_request');
+  assert.equal(f.reads(), 0);
+  assert.equal(calls, 0);
+});
+
+test('Responses attachments are sent only in the active turn and never enter persisted chat text', use, async t => {
+  const outbound: string[] = [];
+  const f = await fixture(t, async (_url, init) => {
+    outbound.push(String(init?.body));
+    return Response.json({ status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '已读附件' }] }] });
+  }, undefined, syntheticRuntime, true);
+  const draft = writeDraft('responses');
+  draft.apiProtocol = 'responses'; draft.models[0]!.inputModalities = ['image', 'pdf'];
+  assert.equal((await f.models.run('save', { connection: draft, expectedRevision: 0, credential: { kind: 'replace', key: `${key}-responses` } })).ok, true);
+  await f.defaultTo('responses', 1);
+  const [saved] = await f.routes();
+  const image = { name: 'diagram.png', mediaType: 'image/png', data: 'iVBORw0KGgoAAAAA' };
+  const pdf = { name: 'guide.pdf', mediaType: 'application/pdf', data: 'JVBERi0xLjcK' };
+  const conversation = { id: randomUUID(), mode: 'new' as const };
+  const sent = await f.send(saved!.route, { conversation, attachments: [image, pdf] });
+  assert.equal(sent.statusCode, 200);
+  assert.equal(sent.json().replayable, false);
+  assert.equal(outbound.length, 1);
+  const body = JSON.parse(outbound[0]!);
+  assert.equal(body.store, false);
+  assert.deepEqual(body.input[0].content.slice(1), [
+    { type: 'input_image', image_url: `data:image/png;base64,${image.data}` },
+    { type: 'input_file', filename: 'guide.pdf', file_data: `data:application/pdf;base64,${pdf.data}` },
+  ]);
+  const history = await f.app.inject({ method: 'POST', url: chatHistoryPaths.detail, headers, payload: { petID: f.petID, id: conversation.id } });
+  assert.equal(history.statusCode, 200);
+  const savedDetail = history.json().detail;
+  assert.equal(savedDetail.turns.length, 1);
+  assert.equal(savedDetail.turns[0].user, '聊聊纸船');
+  assert.equal(savedDetail.turns[0].assistant, '已读附件');
+  assert.doesNotMatch(JSON.stringify(savedDetail), new RegExp(`${image.data}|${pdf.data}`));
+  assert.doesNotMatch(outbound[0]!, /SYNTHETIC-CHAT-KEY/);
+  const followup = await f.send(saved!.route, { conversation: { ...conversation, mode: 'resume' }, text: '新的问题' });
+  assert.equal(followup.statusCode, 200);
+  assert.deepEqual(JSON.parse(outbound[1]!).input, [{ role: 'user', content: [{ type: 'input_text', text: '新的问题' }] }]);
+});
+
+test('a new official Responses route accepts media picked by chat while an unknown compatible route stays text-only', use, async t => {
+  let calls = 0;
+  const f = await fixture(t, async (url, init) => {
+    calls++;
+    assert.equal(url, 'https://api.openai.com/v1/responses');
+    const body = JSON.parse(String(init?.body));
+    assert.deepEqual(body.input[0].content.map((item: { type: string }) => item.type), ['input_text', 'input_image', 'input_file']);
+    return Response.json({ status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '已读附件' }] }] });
+  });
+  for (const id of ['known-media', 'proxy-media']) {
+    const draft = writeDraft(id);
+    draft.apiProtocol = 'responses'; draft.models[0]!.modelID = 'gpt-4.1';
+    if (id === 'known-media') draft.baseURL = 'https://api.openai.com/v1';
+    assert.ok((await f.models.run('save', { connection: draft, expectedRevision: 0, credential: { kind: 'keep' } })).ok);
+  }
+  const options = (await f.list()).json().models;
+  const [known, proxy] = options;
+  assert.deepEqual(known.inputModalities, ['image', 'pdf']);
+  assert.equal(proxy.inputModalities, undefined);
+  const attachments = [{ name: 'diagram.png', mediaType: 'image/png', data: 'iVBORw0KGgoAAAAA' },
+    { name: 'guide.pdf', mediaType: 'application/pdf', data: 'JVBERi0xLjcK' }];
+  assert.equal((await f.send(proxy.route, { attachments })).json().error, 'invalid_request');
+  assert.equal(calls, 0);
+  assert.equal((await f.send(known.route, { attachments })).statusCode, 200);
+  assert.equal(calls, 1);
+  assert.equal(f.reads(), 0);
+});
+
+test('a model without a Key is selectable and sends anonymously; a stale default still never sends', use, async t => {
+  let calls = 0;
+  const f = await fixture(t, async (url, init) => {
+    calls++;
+    assert.equal(url, 'https://missing.invalid/v1/chat/completions');
+    assert.equal(new Headers(init?.headers).has('authorization'), false);
+    return completion();
+  });
   await f.write('first'); await f.write('missing', 0, false); await f.defaultTo('first', 2);
   const [first, missing] = await f.routes();
-  assert.equal(missing!.ready, false);
-  assert.equal((await f.send(missing!.route)).json().error, 'credentials_unavailable');
+  assert.equal(missing!.ready, true);
+  assert.equal((await f.send(missing!.route)).statusCode, 200);
   await f.defaultTo('missing', 3);
   assert.equal((await f.send({ ...first!.route, useDefault: true })).json().error, 'route_changed');
-  assert.equal(f.reads(), 0);
+  assert.equal(calls, 1); assert.equal(f.reads(), 0);
 });
 
 test('withdrawal during credential read is reflected before the request leaves', use, async t => {

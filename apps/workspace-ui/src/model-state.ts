@@ -1,5 +1,5 @@
 import { isProbeReply, probeError, validProbeInput, type ModelProbeInput, type ModelProbeOperation, type ModelProbeReply } from '../../../packages/contracts/src/model-probe.ts';
-import { validDiscoveryCandidate, validModelAPIKey, type ModelCandidate, type ModelDiscoveryError, type ModelDiscoveryReply, type ModelDefault, type ModelDraft, type ModelEntry, type ModelProtocol, type ModelsBridge, type ModelWorkspaceReply, type SavedModelConfiguration, type SavedModelConnection } from '../../../packages/contracts/src/models.ts';
+import { normalizeModelBaseURL, validDiscoveryCandidate, validModelAPIKey, type ModelCandidate, type ModelDiscoveryError, type ModelDiscoveryReply, type ModelDefault, type ModelDraft, type ModelEntry, type ModelProtocol, type ModelsBridge, type ModelWorkspaceReply, type SavedModelConfiguration, type SavedModelConnection } from '../../../packages/contracts/src/models.ts';
 
 export const modelProtocols: Record<ModelProtocol, string> = {
   'chat-completions': 'Chat Completions', responses: 'OpenAI Responses', anthropic: 'Anthropic Messages', gemini: 'Gemini 原生 API',
@@ -76,16 +76,17 @@ const messages: Record<Extract<ModelWorkspaceReply, { ok: false }>['error'], str
 export const emptyModelState: ModelWorkspaceState = { drafts: new Map(), expanded: new Set(), expandedModels: new Map(), needsRefresh: false, requiresRestart: false };
 const toDraft = ({ revision, credentialState: _status, ...edit }: SavedModelConnection): DraftState => ({ edit: structuredClone(edit), expectedRevision: revision, isNew: false, detach: false });
 const newEntry = (entryID: string): ModelEntry => ({ entryID, modelID: '', displayName: '', compatibility: {}, capabilities: { tools: { status: 'unknown', source: 'user' } } });
+const clearRouteMetadata = (model: ModelEntry): ModelEntry => ({ ...model, reasoningEffort: undefined, inputModalities: undefined,
+  capabilities: { tools: { status: 'unknown', source: 'user' } } });
 const flip = (list: ReadonlySet<string>, id: string) => { const next = new Set(list); if (next.has(id)) next.delete(id); else next.add(id); return next; };
 const apiRoot = (value: string) => { try { const url = new URL(value); return `${url.origin}${url.pathname.replace(/\/+$/, '')}`; } catch { return value; } };
 export function keyNeedsDecision(draft: DraftState, saved?: SavedModelConnection): boolean {
-  return saved?.credentialState === 'reference-present' && (draft.edit.authMode !== 'apiKey' || draft.edit.apiProtocol !== saved.apiProtocol || apiRoot(draft.edit.baseURL) !== apiRoot(saved.baseURL));
+  return saved?.credentialState === 'reference-present' && (draft.edit.apiProtocol !== saved.apiProtocol || apiRoot(draft.edit.baseURL) !== apiRoot(saved.baseURL));
 }
 
 export class ModelWorkspaceController {
   private state = emptyModelState;
   private readonly listeners = new Set<() => void>();
-  private requested = false;
   private visibilityGeneration = 0;
   constructor(private readonly bridge?: ModelsBridge, private readonly makeID: () => string = () => crypto.randomUUID()) {}
   get canTest(): boolean { return !!this.bridge?.testConnection && !!this.bridge.cancelConnectionTest; }
@@ -95,7 +96,7 @@ export class ModelWorkspaceController {
   private update(patch: Partial<ModelWorkspaceState>) { this.state = { ...this.state, ...patch }; for (const listener of this.listeners) listener(); }
   private saved(id: string) { return this.state.configuration?.connections.find(item => item.id === id); }
   private canWrite() { return !!this.bridge && !!this.state.configuration && !this.state.operation && !this.state.needsRefresh && !this.state.requiresRestart; }
-  open(): void { if (!this.requested) void this.load(); }
+  open(): Promise<void> { return this.load(); }
   leave(): void {
     this.visibilityGeneration++;
     this.cancelDiscovery();
@@ -103,7 +104,6 @@ export class ModelWorkspaceController {
   }
   async load(): Promise<void> {
     if (!this.bridge || this.state.operation) return;
-    this.requested = true;
     await this.perform({ kind: 'load' }, () => this.bridge!.list());
   }
   edit(id: string): void {
@@ -165,11 +165,19 @@ export class ModelWorkspaceController {
     const draft = this.state.drafts.get(id);
     if (draft && !this.state.operation && !this.stale(id)) this.storeDraft(id, modify(draft));
   }
-  patch(id: string, fields: Partial<Pick<ModelDraft, 'displayName' | 'preset' | 'baseURL' | 'authMode' | 'compatibility' | 'defaultModelEntryID'>>): void {
-    this.change(id, draft => ({ ...draft, edit: { ...draft.edit, ...fields } }));
+  patch(id: string, fields: Partial<Pick<ModelDraft, 'displayName' | 'preset' | 'baseURL' | 'compatibility' | 'defaultModelEntryID'>>): void {
+    this.change(id, draft => ({ ...draft, edit: { ...draft.edit, ...fields,
+      ...(fields.baseURL !== undefined && apiRoot(fields.baseURL) !== apiRoot(draft.edit.baseURL)
+        ? { models: draft.edit.models.map(clearRouteMetadata) }
+        : {}) } }));
   }
   patchEntry(id: string, entry: string, fields: Partial<Omit<ModelEntry, 'entryID'>>): void {
-    this.change(id, draft => ({ ...draft, edit: { ...draft.edit, models: draft.edit.models.map(model => model.entryID === entry ? { ...model, ...fields, entryID: model.entryID } : model) } }));
+    this.change(id, draft => ({ ...draft, edit: { ...draft.edit, models: draft.edit.models.map(model => {
+      if (model.entryID !== entry) return model;
+      const identityChanged = fields.modelID !== undefined && fields.modelID !== model.modelID;
+      const next = { ...model, ...fields, entryID: model.entryID };
+      return identityChanged ? clearRouteMetadata(next) : next;
+    }) } }));
   }
   addEntry(id: string): string | undefined {
     const draft = this.state.drafts.get(id);
@@ -189,38 +197,50 @@ export class ModelWorkspaceController {
     if (before !== this.state.drafts.get(id) && this.state.expandedModels.get(id)?.has(entry)) this.toggleModel(id, entry);
   }
   changeProtocol(id: string, protocol: ModelProtocol): void {
-    this.change(id, draft => protocol !== 'chat-completions' && (draft.edit.compatibility.outputTokenField || draft.edit.models.some(model => model.compatibility.outputTokenField))
-      ? { ...draft, proposedProtocol: protocol } : { ...draft, proposedProtocol: undefined, edit: { ...draft.edit, apiProtocol: protocol } });
+    this.change(id, draft => {
+      const needsCompatibilityConfirmation = protocol !== 'chat-completions' &&
+        !!(draft.edit.compatibility.outputTokenField || draft.edit.models.some(model => model.compatibility.outputTokenField));
+      if (needsCompatibilityConfirmation) return { ...draft, proposedProtocol: protocol };
+      return { ...draft, proposedProtocol: undefined, edit: { ...draft.edit, apiProtocol: protocol,
+        ...(protocol !== draft.edit.apiProtocol ? { models: draft.edit.models.map(clearRouteMetadata) } : {}) } };
+    });
   }
   confirmProtocol(id: string): void {
     this.change(id, draft => !draft.proposedProtocol ? draft : { ...draft, proposedProtocol: undefined, edit: {
-      ...draft.edit, apiProtocol: draft.proposedProtocol, compatibility: {}, models: draft.edit.models.map(model => ({ ...model, compatibility: {} })),
+      ...draft.edit, apiProtocol: draft.proposedProtocol, compatibility: {}, models: draft.edit.models.map(model => ({ ...clearRouteMetadata(model), compatibility: {} })),
     } });
   }
   cancelProtocol(id: string): void { this.change(id, draft => ({ ...draft, proposedProtocol: undefined })); }
   detachKey(id: string, detach: boolean): void { this.change(id, draft => ({ ...draft, detach })); }
-  async save(id: string, apiKey = '', testAfterSave?: readonly string[]): Promise<boolean> {
+  async save(id: string, apiKey = '', testAfterSave?: readonly string[], onSubmit?: () => void): Promise<boolean> {
     const draft = this.state.drafts.get(id);
     if (!draft || !this.canWrite() || this.stale(id) || draft.proposedProtocol) return false;
     const { edit, expectedRevision } = draft;
-    if (!edit.displayName.trim() || !edit.baseURL.trim() || edit.models.some(model => !model.displayName.trim() || !model.modelID.trim()
-      || [model.contextWindow, model.maxOutputTokens].some(value => value !== undefined && (!Number.isInteger(value) || value < 1 || value > 2147483647)))) {
-      this.update({ feedback: { id, error: true, text: '请检查连接名称、接入地址及各模型的名称、API ID 和 Token 容量。' } }); return false;
+    const fail = (text: string) => { this.update({ feedback: { id, error: true, text } }); return false; };
+    if (!edit.displayName.trim()) return fail('请填写服务商名称。');
+    if (!normalizeModelBaseURL(edit.baseURL, edit.apiProtocol)) return fail('请填写有效的接口地址（远程用 HTTPS，本机可用 HTTP 回环）。');
+    if (edit.models.some(model => !model.displayName.trim() || !model.modelID.trim() || /\s/u.test(model.modelID))) return fail('请填写模型名称和 API ID；API ID 不应包含空白。');
+    if (edit.models.some(model => model.contextWindow !== undefined && (!Number.isInteger(model.contextWindow) || model.contextWindow < 1 || model.contextWindow > 2147483647))) {
+      return fail('上下文窗口应为有效的正整数容量，或留空。');
     }
-    if (apiKey && (!validModelAPIKey(apiKey) || edit.authMode !== 'apiKey' || draft.detach)) {
+    if (apiKey && (!validModelAPIKey(apiKey) || draft.detach)) {
       this.update({ feedback: { id, error: true, text: '请输入有效的单行 API Key，不含空格。' } }); return false;
     }
     const saved = this.saved(id);
     if (!apiKey && keyNeedsDecision(draft, saved) && !draft.detach) {
-      this.update({ feedback: { id, error: true, text: '地址、协议或鉴权已变更。请明确解除旧凭证绑定，或用新 Key 保存。' } }); return false;
+      this.update({ feedback: { id, error: true, text: '地址或协议已变更。请输入新 Key，或解除旧绑定后无 Key 保存。' } }); return false;
     }
-    if (testAfterSave?.length && edit.authMode === 'apiKey' && !apiKey && (draft.detach || saved?.credentialState !== 'reference-present')) {
-      this.update({ feedback: { id, error: true, text: '测试连接前请填写 API Key，或取消勾选测试后仅保存配置。' } }); return false;
-    }
+    // Keep untouched legacy loopback bindings readable without invalidating their route identity.
+    // The schema-v2 apiKey value also represents connections with no credential reference.
+    const connection = edit.authMode === 'none' && (apiKey || apiRoot(edit.baseURL) !== apiRoot(saved?.baseURL ?? ''))
+      ? { ...edit, authMode: 'apiKey' as const } : edit;
     const generation = this.visibilityGeneration;
-    const published = await this.perform({ kind: 'save', id }, () => this.bridge!.save({ connection: edit, expectedRevision,
-      credential: apiKey ? { kind: 'replace', key: apiKey } : { kind: draft.detach ? 'remove' : 'keep' },
-    }));
+    const published = await this.perform({ kind: 'save', id }, () => {
+      onSubmit?.(); // Clear the uncontrolled input at dispatch, not on a local validation error.
+      return this.bridge!.save({ connection, expectedRevision,
+        credential: apiKey ? { kind: 'replace', key: apiKey } : { kind: draft.detach ? 'remove' : 'keep' },
+      });
+    });
     apiKey = ''; // Do not retain the submitted value while a post-save probe runs.
     if (published && testAfterSave?.length) {
       const revision = this.saved(id)?.revision;
@@ -274,8 +294,7 @@ export class ModelWorkspaceController {
     if (!saved) return '请先保存连接，再获取列表。';
     if (this.stale(id) || this.state.needsRefresh || this.state.requiresRestart) return '请先核对已保存的连接版本。';
     if (draft && (draft.detach || draft.proposedProtocol || draft.edit.baseURL !== saved.baseURL ||
-        draft.edit.apiProtocol !== saved.apiProtocol || draft.edit.authMode !== saved.authMode)) return '请先保存地址、协议和凭证变更，再获取列表。';
-    if (saved.credentialState === 'missing') return '此连接尚未保存 API Key。';
+        draft.edit.apiProtocol !== saved.apiProtocol)) return '请先保存地址、协议和凭证变更，再获取列表。';
     if (this.state.operation || this.state.discovery?.kind === 'pending' || this.state.connectionTest?.kind === 'pending') return '已有模型操作在处理。';
     return undefined;
   }
@@ -294,8 +313,7 @@ export class ModelWorkspaceController {
     if (!saved) return '请先保存连接，再测试。';
     if (this.stale(id) || this.state.needsRefresh || this.state.requiresRestart) return '请先核对已保存的连接版本。';
     if (draft && (draft.detach || draft.proposedProtocol || draft.edit.baseURL !== saved.baseURL ||
-        draft.edit.apiProtocol !== saved.apiProtocol || draft.edit.authMode !== saved.authMode)) return '请先保存地址、协议或凭证变更，再测试。';
-    if (saved.credentialState === 'missing') return '请先保存此连接的 API Key，再测试。';
+        draft.edit.apiProtocol !== saved.apiProtocol)) return '请先保存地址、协议或凭证变更，再测试。';
     if (!this.testInput(id, entryID)) return '请填写有效的模型 API ID 和输出设置。';
     if (this.state.operation || this.state.discovery?.kind === 'pending' || this.state.connectionTest?.kind === 'pending') return '已有模型操作在处理。';
   }

@@ -1,3 +1,6 @@
+import type { AgentTaskInputs, AgentTaskMethod, AgentTaskResults } from '../../../packages/contracts/src/agent-tasks.ts';
+import { requestAgentTask } from './agent-task-transport.ts';
+import { taskUnavailable } from './agent-task-ipc.ts';
 import type { ChatHistoryMethod } from '../../../packages/contracts/src/chat-history.ts';
 import type { LegacyHandoffReply } from '../../../packages/contracts/src/legacy-character-snapshot.ts';
 import type { WorkspaceVideoHost } from './workspace-video-host.ts';
@@ -207,6 +210,12 @@ export class ServiceProcess {
     if (this.closed || !port) return identityUnavailable;
     const result = await requestLocalChatContext({ port, token: this.token }, input);
     return this.closed || this.port !== port ? identityUnavailable : result;
+  }
+  async agentTask<M extends AgentTaskMethod>(method: M, input: AgentTaskInputs[M], signal?: AbortSignal): Promise<AgentTaskResults[M]> {
+    const port = this.port;
+    if (this.closed || !port || !this.options.businessRoot || !this.options.modelsRoot) return taskUnavailable;
+    const result = await requestAgentTask({ port, token: this.token }, method, input, signal);
+    return this.closed || this.port !== port ? taskUnavailable : result;
   }
   async chatHistory(method: ChatHistoryMethod, input: unknown) {
     const port = this.port;

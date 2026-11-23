@@ -49,7 +49,7 @@
 .module-step-actions { margin-top: 6px; font-size: 12px; }
 .module-step-actions label { display: inline-flex; align-items: center; gap: 6px; }
 .module-step-section > .button { margin-top: 8px; }
-.workspace-module :is(input, textarea, select, button, summary, [role="tabpanel"]):focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.workspace-module :is(select, button, summary, [role="tabpanel"], input[type="checkbox"], input[type="radio"], input[type="range"]):focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .workspace-module .diagnostics { min-width: 0; padding-top: 10px; }
 .workspace-module .diagnostics .page-heading { margin-bottom: 14px; }
 .workspace-module .diagnostics .page-heading h2 { margin: 0 0 4px; }

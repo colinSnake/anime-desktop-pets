@@ -1,3 +1,6 @@
+import type { AgentTaskBridge } from '../../../packages/contracts/src/agent-tasks.ts';
+import { DialogCloseButton, useDialogDismiss } from './DialogDismiss.tsx';
+import { AgentTaskPanel } from './AgentTaskPanel.tsx';
 import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { PackageReference } from '../../../packages/contracts/src/pets.ts';
 import type { ChatHistoryBridge, ChatHistoryDetail as SavedChatDetail } from '../../../packages/contracts/src/chat-history.ts';
@@ -22,19 +25,23 @@ type ChatPageProps = {
  state: ChatWorkspaceState;
  controller?: ChatWorkspaceController;
  history?: ChatHistoryBridge;
+ agentTasks?: AgentTaskBridge;
  reference?: PackageReference;
  appearance?: ReactNode;
  onOpenPets?: () => void;
  onOpenPetAgent?: (opener: HTMLElement) => void;
 };
 
-export function ChatPage({ state, controller, history, reference, appearance, onOpenPets, onOpenPetAgent }: ChatPageProps) {
+export function ChatPage({ state, controller, history, agentTasks, reference, appearance, onOpenPets, onOpenPetAgent }: ChatPageProps) {
  useEffect(() => { void controller?.refreshModels(); }, [controller]);
  const { session } = state;
  const character = state.characters.find(item => item.id === state.selectedId);
  const scrollport = useRef<HTMLDivElement>(null);
  const input = useRef<HTMLDivElement>(null);
  const options = useRef<HTMLDetailsElement>(null);
+ const [taskView, setTaskView] = useState<{ petID: string; opener?: HTMLElement }>();
+ const activeTaskView = agentTasks && taskView && taskView.petID === character?.id ? taskView : undefined;
+ useEffect(() => { if (taskView && !activeTaskView) setTaskView(undefined); }, [taskView, activeTaskView]);
  const [openHistory, setOpenHistory] = useState<{ petID: string; opener?: HTMLElement; entry?: SavedChatDetail; notice?: string }>();
  const historyView = history && openHistory?.petID === character?.id ? openHistory : undefined;
  const entry = historyView?.entry;
@@ -98,6 +105,10 @@ export function ChatPage({ state, controller, history, reference, appearance, on
       const opener = options.current?.querySelector('summary');
       if (opener) { opener.focus(); onOpenPetAgent(opener); }
      }}>桌宠 Agent</button>}
+     {agentTasks && <button type="button" aria-haspopup="dialog" onClick={() => {
+      if (options.current) options.current.open = false;
+      setTaskView({ petID: character.id, opener: options.current?.querySelector('summary') ?? undefined });
+     }}>Agent 任务</button>}
      {history && <button type="button" aria-haspopup="dialog" onClick={() => {
       if (options.current) options.current.open = false;
       setOpenHistory({ petID: character.id, opener: options.current?.querySelector('summary') ?? undefined });
@@ -169,6 +180,8 @@ export function ChatPage({ state, controller, history, reference, appearance, on
   </footer>}
   {!entry && session.confirmingClear && <ClearChat onCancel={() => controller?.cancelClear()} onConfirm={() => controller?.confirmClear()} />}
   </div>
+  {activeTaskView && character && agentTasks && <AgentTaskPanel key={character.id} petID={character.id} name={character.name}
+   bridge={agentTasks} models={state.models} opener={activeTaskView.opener} onClose={() => setTaskView(undefined)} />}
   {history && historyView && character && <ChatHistoryDialog key={character.id} petID={character.id} name={character.name}
     pending={session.pending} bridge={history} opener={historyView.opener} reading={!!entry}
     onCleared={() => { controller?.historyCleared(character.id); }}
@@ -179,6 +192,7 @@ export function ChatPage({ state, controller, history, reference, appearance, on
 function ClearChat({onCancel,onConfirm}:{onCancel():void;onConfirm():void}) {
  const cancel = useRef<HTMLButtonElement>(null);
  const panel = useRef<HTMLDialogElement>(null);
+ const dismiss = useDialogDismiss(onCancel);
  useEffect(() => {
   const previous = document.activeElement;
   const dialog = panel.current;
@@ -191,11 +205,13 @@ function ClearChat({onCancel,onConfirm}:{onCancel():void;onConfirm():void}) {
    else fallback?.focus();
   };
  }, []);
- return <dialog className="chat-clear" ref={panel} role="alertdialog" aria-labelledby="chat-clear-title" aria-describedby="chat-clear-copy" onKeyDown={event => {
+ return <dialog className="chat-clear" ref={panel} role="alertdialog" aria-labelledby="chat-clear-title" aria-describedby="chat-clear-copy" {...dismiss} onKeyDown={event => {
   if (event.key !== 'Tab') return;
   const buttons = panel.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)');
   const first = buttons?.[0], last = buttons?.[buttons.length - 1];
   if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
- }} onCancel={event => { event.preventDefault(); onCancel(); }}><h2 id="chat-clear-title">清空本轮聊天？</h2><p id="chat-clear-copy">重新开始聊天。已保存的历史、未发送的草稿和角色资料会保留。</p><div className="button-row"><button type="button" className="button secondary" ref={cancel} onClick={onCancel}>取消</button><button type="button" className="button destructive" onClick={onConfirm}>清空聊天</button></div></dialog>;
+ }}>
+  <header className="dialog-title-row"><h2 id="chat-clear-title">清空本轮聊天？</h2><DialogCloseButton onClose={onCancel} /></header>
+  <p id="chat-clear-copy">重新开始聊天。已保存的历史、未发送的草稿和角色资料会保留。</p><div className="button-row"><button type="button" className="button secondary" ref={cancel} onClick={onCancel}>取消</button><button type="button" className="button destructive" onClick={onConfirm}>清空聊天</button></div></dialog>;
 }

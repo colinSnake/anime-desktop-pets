@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { validateConfiguration, resolveRoute, validateBaseURL } from '../src/models/config.ts';
+import { chatOptions } from '../src/models/chat-models.ts';
 import { configuration } from './fixtures/models.ts';
 
 const invalid = (value: unknown) => assert.throws(() => validateConfiguration(value), /invalid_configuration/);
@@ -53,6 +54,56 @@ test('route confirmations survive renaming but not address, credential, protocol
   }
   x.connections=[];x.defaultConnectionID=null;assert.throws(()=>resolveRoute(x,selection,'text-chat'),/route_changed/);
 });
+
+test('schema v2 keeps legacy models readable and validates explicit reasoning and input modalities', () => {
+  const legacy = configuration();
+  assert.equal(validateConfiguration(legacy).connections[0]!.models[0]!.reasoningEffort, undefined);
+  assert.equal(validateConfiguration(legacy).connections[0]!.models[0]!.inputModalities, undefined);
+
+  const responses = configuration('responses');
+  responses.connections[0]!.baseURL = 'https://api.openai.com/v1';
+  responses.connections[0]!.models[0]!.modelID = 'gpt-6.2-astra';
+  const model = responses.connections[0]!.models[0]!;
+  model.reasoningEffort = 'high';
+  model.inputModalities = ['image', 'pdf'];
+  assert.deepEqual(validateConfiguration(responses).connections[0]!.models[0], model);
+
+  for (const invalidModel of [
+    { ...model, reasoningEffort: 'ultra' },
+    { ...model, inputModalities: ['image', 'image'] },
+    { ...model, inputModalities: ['pdf'] },
+  ]) {
+    const invalidValue = configuration('responses');
+    invalidValue.connections[0]!.baseURL = 'https://api.openai.com/v1';
+    invalidValue.connections[0]!.models[0]!.modelID = 'gpt-6.2-astra';
+    invalidValue.connections[0]!.models[0] = invalidModel as typeof model;
+    invalid(invalidValue);
+  }
+
+  const nonResponses = configuration('chat-completions');
+  nonResponses.connections[0]!.models[0]!.inputModalities = ['image'];
+  invalid(nonResponses);
+});
+
+test('model reasoning and modalities are part of the immutable route identity', () => {
+  const value = configuration('responses');
+  const connection = value.connections[0]!;
+  connection.baseURL = 'https://api.openai.com/v1';
+  connection.models[0]!.modelID = 'gpt-6.2-astra';
+  connection.models[0]!.reasoningEffort = 'low';
+  connection.models[0]!.inputModalities = ['image'];
+  const first = resolveRoute(value, undefined, 'text-chat');
+  assert.equal(first.reasoningEffort, 'low');
+  assert.deepEqual(first.inputModalities, ['image']);
+
+  const selection = { connectionID: first.connectionID, modelEntryID: first.modelEntryID, fingerprint: first.fingerprint };
+  connection.models[0]!.reasoningEffort = 'high';
+  assert.throws(() => resolveRoute(value, selection, 'text-chat'), /route_changed/);
+  const updated = resolveRoute(value, undefined, 'text-chat');
+  connection.models[0]!.reasoningEffort = 'high';
+  connection.models[0]!.inputModalities = ['image', 'pdf'];
+  assert.notEqual(resolveRoute(value, undefined, 'text-chat').fingerprint, updated.fingerprint);
+});
 test('purpose budgets are capped only by confirmed output capacity and returned snapshots are independent', () => {
   const x=configuration();assert.equal(resolveRoute(x,undefined,'text-chat').tokenBudget,2048);assert.equal(resolveRoute(x,undefined,'text-chat').timeoutMs,60_000);
   assert.equal(resolveRoute(x,undefined,'speech').tokenBudget,160);assert.equal(resolveRoute(x,undefined,'speech').timeoutMs,25_000);
@@ -72,4 +123,23 @@ test('API-key connections can be saved without a key but cannot share one creden
   assert.ok(validateConfiguration(missing)); assert.equal(resolveRoute(missing, undefined, 'text-chat').credentialRef, undefined);
   const shared = configuration(); shared.connections.push({ ...structuredClone(shared.connections[0]!), id: 'connection-two' }); invalid(shared);
   shared.connections[1]!.credentialRef = 'credential-version-two'; assert.ok(validateConfiguration(shared));
+});
+
+
+test('canonical Responses models get verified attachment defaults; lookalikes and other protocols do not', () => {
+  const config = configuration('responses');
+  const connection = config.connections[0]!, entry = connection.models[0]!;
+  entry.modelID = 'gpt-4.1'; connection.baseURL = 'https://api.openai.com/v1/';
+  assert.deepEqual(resolveRoute(config, undefined, 'text-chat').inputModalities, ['image', 'pdf']);
+  assert.deepEqual(chatOptions(config)[0]?.inputModalities, ['image', 'pdf']);
+  assert.equal(entry.inputModalities, undefined); // Effective metadata is never written back to storage.
+  entry.inputModalities = [];
+  assert.deepEqual(chatOptions(config)[0]?.inputModalities, []);
+  delete entry.inputModalities;
+  entry.modelID = 'gpt-4.1-lookalike';
+  assert.equal(chatOptions(config)[0]?.inputModalities, undefined);
+  entry.modelID = 'gpt-4.1'; connection.baseURL = 'http://127.0.0.1:9180/v1';
+  assert.equal(chatOptions(config)[0]?.inputModalities, undefined);
+  connection.baseURL = 'https://api.openai.com/v1'; connection.apiProtocol = 'chat-completions';
+  assert.equal(chatOptions(config)[0]?.inputModalities, undefined);
 });

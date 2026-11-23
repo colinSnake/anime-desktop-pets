@@ -1,13 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { isHistoryClearResult, isHistoryDetailResult, isHistoryListResult, type ChatHistoryBridge, type ChatHistoryDetail, type ChatHistoryPage, type ChatHistorySummary } from '../../../packages/contracts/src/chat-history.ts';
 import { ChatHistoryList } from './ChatHistoryList.tsx';
-import { PetNookIcon } from './PetNookIcon.tsx';
+import { DialogCloseButton, useDialogDismiss } from './DialogDismiss.tsx';
 
 const unread = '暂时无法读取历史。如果仍在使用旧工作区，请先到「高级」迁移本机数据。';
-
-// Native modal backdrops and the panel's own empty space both target the dialog.
-const isBackdrop = (event: { target: EventTarget; currentTarget: HTMLDialogElement; clientX: number }) =>
-  event.target === event.currentTarget && event.clientX < event.currentTarget.getBoundingClientRect().left;
 
 /** Read-only history UI; activating a session is an explicit action in the chat page. */
 export function ChatHistoryDialog({ petID, name, bridge, pending, opener, reading, onRead, onCleared, onClose }: {
@@ -17,7 +13,6 @@ export function ChatHistoryDialog({ petID, name, bridge, pending, opener, readin
   const dialog = useRef<HTMLDialogElement>(null);
   const close = useRef<HTMLButtonElement>(null);
   const scroll = useRef<HTMLDivElement>(null);
-  const backdropPressed = useRef(false);
   const resume = useRef<{ trigger: HTMLButtonElement; scrollTop: number }>(undefined);
   const [page, setPage] = useState<ChatHistoryPage>();
   const [cursors, setCursors] = useState<Array<string | undefined>>([undefined]);
@@ -25,6 +20,7 @@ export function ChatHistoryDialog({ petID, name, bridge, pending, opener, readin
   const [confirming, setConfirming] = useState(false);
   const [notice, setNotice] = useState('');
   const active = useRef<symbol | undefined>(undefined);
+  const clearing = useRef(false);
   useLayoutEffect(() => {
     if (reading) return;
     const panel = dialog.current!;
@@ -55,7 +51,7 @@ export function ChatHistoryDialog({ petID, name, bridge, pending, opener, readin
       if (isHistoryListResult(result) && result.ok) setPage(result.page);
       else setNotice(unread);
     }).catch(() => { if (current) setNotice(unread); }).finally(() => { if (current) setBusy(false); });
-    return () => { current = false; active.current = undefined; };
+    return () => { current = false; active.current = undefined; clearing.current = false; };
   }, [bridge, petID]);
   async function load(stack: Array<string | undefined>) {
     if (busy || active.current) return;
@@ -89,7 +85,7 @@ export function ChatHistoryDialog({ petID, name, bridge, pending, opener, readin
   }
   async function clear() {
     if (!confirming || busy || pending || active.current) return;
-    const operation = Symbol(); active.current = operation;
+    const operation = Symbol(); active.current = operation; clearing.current = true;
     setBusy(true); setNotice('');
     try {
       const result = await bridge.clear({ petID, confirmed: true });
@@ -98,27 +94,21 @@ export function ChatHistoryDialog({ petID, name, bridge, pending, opener, readin
         setNotice(isHistoryClearResult(result) && !result.ok && result.error === 'busy' ? '仍有聊天在处理，请稍后再试。' : '未能确认清空结果；请先刷新历史核对。');
       } else { onCleared(); setPage({ rows: [], nextBefore: null }); setCursors([undefined]); setNotice('已清空这个桌宠的本机聊天历史。'); }
     } catch { if (active.current === operation) setNotice('未能确认清空结果；请先刷新历史核对。'); }
-    finally { if (active.current === operation) { active.current = undefined; setBusy(false); setConfirming(false); } }
+    finally { if (active.current === operation) { active.current = undefined; clearing.current = false; setBusy(false); setConfirming(false); } }
   }
-  const dismiss = () => {
-    if (active.current) return;
-    if (confirming) setConfirming(false);
-    else onClose();
+  const closeHistory = () => {
+    if (clearing.current) return;
+    active.current = undefined; // Ignore a late page/detail read after dismissal.
+    onClose();
   };
-  return <dialog ref={dialog} className="workspace-drawer chat-history" aria-labelledby="chat-history-title" aria-describedby="chat-history-description"
-    onPointerDown={event => { backdropPressed.current = event.isPrimary && event.button === 0 && isBackdrop(event); }}
-    onPointerUp={event => { backdropPressed.current &&= isBackdrop(event); }}
-    onPointerCancel={() => { backdropPressed.current = false; }}
-    onClick={event => {
-      const pressed = backdropPressed.current;
-      backdropPressed.current = false;
-      if (pressed && event.detail > 0 && isBackdrop(event)) dismiss();
-    }}
-    onCancel={event => { event.preventDefault(); dismiss(); }}>
+  const dismiss = useDialogDismiss(closeHistory, clearing.current, () => {
+    if (confirming && !clearing.current) { setConfirming(false); close.current?.focus({ preventScroll: true }); }
+    else closeHistory();
+  });
+  return <dialog ref={dialog} className="workspace-drawer chat-history" aria-labelledby="chat-history-title" aria-describedby="chat-history-description" {...dismiss}>
     <header className="workspace-drawer-header chat-history-header">
       <div><h2 id="chat-history-title">聊天历史</h2><p id="chat-history-description">{name} · 查看已保存的会话，或接着聊。</p></div>
-      <button ref={close} className="workspace-drawer-close" type="button" aria-label="关闭聊天历史" title="关闭"
-        disabled={busy && !!active.current} onClick={() => { if (!active.current) onClose(); }}><PetNookIcon name="close" /></button>
+      <DialogCloseButton ref={close} label="关闭聊天历史" disabled={clearing.current} onClose={closeHistory} />
     </header>
     <div ref={scroll} className="workspace-drawer-scroll chat-history-scroll" role="region" aria-label="本机聊天历史" tabIndex={0}>
       {busy && !page ? <p role="status">正在读取历史…</p> : page?.rows.length ?

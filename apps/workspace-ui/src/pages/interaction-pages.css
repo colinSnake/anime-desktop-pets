@@ -7,7 +7,7 @@
 .interaction-page { font-size: 14px; line-height: 1.45; }
 .interaction-page :is(h1, h2, h3, p) { margin: 0; }
 .interaction-page p { line-height: inherit; }
-.interaction-page :focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.interaction-page :focus-visible:not(:where(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea, [contenteditable="true"])) { outline: 2px solid var(--focus); outline-offset: 3px; }
 .interaction-page .pet-nook-icon { width: 17px; height: 17px; flex: none; display: inline-block; vertical-align: middle; }
 .interaction-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 17px; }
 .interaction-heading h1 { font-size: 30px; line-height: 1.18; letter-spacing: -.045em; font-weight: 730; margin-bottom: 5px; }

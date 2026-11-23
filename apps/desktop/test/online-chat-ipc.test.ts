@@ -77,3 +77,23 @@ test('paged history detail is bound to the requested cursor as well as the conve
   result = { ok: true, detail: { ...detail, turns: [{ ...detail.turns[0], requestID: before }] } };
   assert.deepEqual(await bridge.invokeHistory('detail', () => true, [read]), { ok: false, error: 'unavailable' });
 });
+
+test('chat IPC accepts only current-turn attachment bytes, never paths or history attachment fields', async () => {
+  const sent: OnlineChatInput[] = [];
+  const bridge = new ChatIPC({ listChatModels: async () => ({ ok: true, models: [] }), sendOnlineChat: async (turn) => {
+    sent.push(turn);
+    return { ok: true, requestID: turn.requestID, text: '合成回复', replayable: false };
+  } });
+  const file = { name: 'notes.txt', mediaType: 'text/plain', data: '5L2g5aW9' } as const;
+  const attachments = [file];
+  const invalid = [
+    { ...input, petID: '../other', attachments },
+    { ...input, attachments: [{ ...file, path: '/private/example' }] },
+    { ...input, attachments: [{ ...file, data: 'A'.repeat(7_000_000) }] },
+    { ...input, history: [{ user: '历史问题', assistant: '历史回复', attachments }] },
+  ];
+  for (const payload of invalid) assert.deepEqual(await bridge.invoke('send', true, [payload]), { ok: false, error: 'invalid_request' });
+  assert.equal(sent.length, 0);
+  assert.ok((await bridge.invoke('send', true, [{ ...input, attachments }]))?.ok);
+  assert.deepEqual(sent[0]?.attachments, attachments);
+});

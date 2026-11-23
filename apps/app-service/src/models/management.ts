@@ -91,6 +91,12 @@ export class ModelManagement {
     const client = await this.onlineClient(repository);
     return client.completeChat(route, prepare, signal);
   }
+  async completeAgentTask(route: ChatRoute, revision: number, prepare: FreshChatInput, signal: AbortSignal) {
+    if (this.closed || this.writesBlocked || signal.aborted) throw new ModelError(signal.aborted ? 'cancelled' : 'closed');
+    const repository = await this.openRepository();
+    if (signal.aborted) throw new ModelError('cancelled');
+    return (await this.onlineClient(repository)).completeTask(route, revision, prepare, signal);
+  }
   async assertChatRoute(route: ChatRoute) {
     if (this.closed || this.writesBlocked) throw new ModelError('closed');
     // Validate a restarted profile before launching the SDK, without taking a
@@ -98,7 +104,7 @@ export class ModelManagement {
     // currently owned snapshot when one exists.
     const state = this.repository ? (await this.repository).snapshot() : await this.store.read();
     if (this.closed || this.writesBlocked) throw new ModelError('closed');
-    resolveChatRoute(state, route);
+    return resolveChatRoute(state, route);
   }
   async discover(input: unknown, signal?: AbortSignal): Promise<ModelDiscoveryReply> {
     if (!validDiscoveryInput(input)) return discoveryError('invalid_configuration');
@@ -118,7 +124,6 @@ export class ModelManagement {
       if (this.writing) return discoveryError('busy');
       const current = repository.snapshot().connections.find(c => c.id === connectionID);
       if (current?.revision !== expectedRevision) return discoveryError('configuration_conflict');
-      if (current.authMode === 'apiKey' && !current.credentialRef) return discoveryError('credentials_unavailable');
       const result = await client.discoverFirstPage(connectionID, controller.signal);
       if (controller.signal.aborted) return discoveryError('cancelled');
       return { version: 1, ok: true, connectionID, revision: expectedRevision, ...result };

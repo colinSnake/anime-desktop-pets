@@ -23,12 +23,12 @@ async function fixture(t: test.TestContext) {
   return { base, root, store, secure, vault, repository };
 }
 describe('POSIX model repository', { skip: process.platform === 'win32' }, () => {
-test('missing-key configuration is persisted without secure-store access and cannot issue an online request', async t => {
+test('a Key-optional configuration persists without vault access and dispatches without authentication', async t => {
   const { repository, secure, store } = await fixture(t); let calls = 0;
   await repository.saveConnection(draft(), 0); await repository.setDefault(1, 'a', 'entry-one');
   assert.equal(secure.items.size, 0); assert.equal((await store.read()).connections[0]!.credentialRef, undefined);
-  const client = await repository.createClient({ fetch: async () => { calls++; return reply(); } });
-  await assert.rejects(client.complete(undefined, 'text-chat', input), code('credentials_unavailable')); assert.equal(calls, 0);
+  const client = await repository.createClient({ fetch: async (_url, init) => { calls++; assert.equal(new Headers(init?.headers).has('authorization'), false); return reply(); } });
+  await client.complete(undefined, 'text-chat', input); assert.equal(calls, 1);
 });
 test('independent keys, two explicit default layers, stable model IDs and route fingerprints survive repository reopen', async t => {
   const { repository, secure, store, root } = await fixture(t);

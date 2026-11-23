@@ -1,5 +1,6 @@
 import { ModelError } from './errors.ts';
 import type { JsonObject, JsonValue, ModelInput, ModelMessage, ModelReply, ModelRoute, ToolCall } from './types.ts';
+import { validateChatAttachments, type ChatAttachment, type ValidatedChatAttachment } from '../../../../packages/contracts/src/chat-attachments.ts';
 
 export const invalidResponse = (): never => { throw new ModelError('invalid_response'); };
 export function object(value: unknown): Record<string, unknown> {
@@ -66,9 +67,11 @@ export function recalled(message: ModelMessage, route: ModelRoute): JsonValue | 
   const stored = native.get(message);
   return stored?.origin === origin(route) && stored.canonical === JSON.stringify(message) ? structuredClone(stored.value) : undefined;
 }
+const allowsTools = (route: ModelRoute) => route.tools === 'supported' || (route.purpose === 'agent-task' && route.tools === 'unknown');
+
 export function reply(route: ModelRoute, text: string, calls: ToolCall[], stop: ModelReply['stop'], counts: ModelReply['usage'], metadata?: JsonValue): ModelReply {
   if (calls.length > 16 || new Set(calls.map(c => c.id)).size !== calls.length || (!text.trim() && !calls.length && stop !== 'refused' && stop !== 'length')) return invalidResponse();
-  if (calls.length && route.tools !== 'supported') throw new ModelError('tools_unavailable');
+  if (calls.length && !allowsTools(route)) throw new ModelError('tools_unavailable');
   if ((stop === 'tools') !== (calls.length > 0) && stop !== 'length') return invalidResponse();
   const message: ModelReply['message'] = { role: 'assistant', text, ...(calls.length ? { toolCalls: calls } : {}) };
   if (metadata !== undefined) remember(message, route, metadata);
@@ -94,9 +97,9 @@ export function snapshotInput(route: ModelRoute, input: ModelInput): ModelInput 
     const names = new Set(tools.map(t => t.name)), pending = new Map<string, string>(), seen = new Set<string>();
     let chars = 0;
     const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
-    const cloned = messages.map(value => {
+    const cloned = messages.map((value, index) => {
       const m = object(value);
-      if (!['user', 'assistant', 'tool'].includes(String(m.role)) || Object.keys(m).some(k => !['role', 'text', ...(m.role === 'assistant' ? ['toolCalls'] : m.role === 'tool' ? ['toolCallID'] : [])].includes(k))) throw 0;
+      if (!['user', 'assistant', 'tool'].includes(String(m.role)) || Object.keys(m).some(k => !['role', 'text', ...(m.role === 'assistant' ? ['toolCalls'] : m.role === 'tool' ? ['toolCallID'] : m.role === 'user' ? ['attachments'] : [])].includes(k))) throw 0;
       const text = string(m.text, 65_536), count = [...segmenter.segment(text)].length;
       chars += count;
       if ((m.role === 'user' && count > 1200) || chars > 6000) throw 0;
@@ -114,13 +117,26 @@ export function snapshotInput(route: ModelRoute, input: ModelInput): ModelInput 
         }
       }
       if (!text.trim() && !(m.role === 'assistant' && Array.isArray(m.toolCalls) && m.toolCalls.length)) throw 0;
-      const copy = structuredClone(value) as ModelMessage;
+      let attachments: ValidatedChatAttachment[] = [];
+      if (m.attachments !== undefined) {
+        if (m.role !== 'user' || index !== messages.length - 1 || route.purpose !== 'text-chat' || !Array.isArray(m.attachments)) throw 0;
+        const dto = m.attachments.map(item => {
+          const file = object(item);
+          if (Object.keys(file).some(key => !['name', 'mediaType', 'data', 'bytes', 'text'].includes(key))) throw 0;
+          return { name: file.name, mediaType: file.mediaType, data: file.data } as ChatAttachment;
+        });
+        const validated = validateChatAttachments(dto, text);
+        if (!validated.ok || validated.attachments.some(file => file.mediaType !== 'text/plain' &&
+            (route.apiProtocol !== 'responses' || !route.inputModalities?.includes(file.mediaType === 'application/pdf' ? 'pdf' : 'image')))) throw 0;
+        attachments = validated.attachments;
+      }
+      const copy = structuredClone({ ...m, ...(m.attachments === undefined ? {} : { attachments }) }) as ModelMessage;
       const data = recalled(value as ModelMessage, route);
       if (data !== undefined) remember(copy, route, data);
       return copy;
     });
     if (pending.size) throw 0;
-    if ((tools.length || cloned.some(m => m.role === 'assistant' && m.toolCalls?.length)) && route.tools !== 'supported') throw new ModelError('tools_unavailable');
+    if ((tools.length || cloned.some(m => m.role === 'assistant' && m.toolCalls?.length)) && !allowsTools(route)) throw new ModelError('tools_unavailable');
     return { messages: cloned, ...(input.system === undefined ? {} : { system: input.system }), ...(tools.length ? { tools } : {}), ...(referenceData ? { referenceData } : {}) };
   } catch (error) {
     if (error instanceof ModelError && error.code === 'tools_unavailable') throw error;
@@ -128,9 +144,11 @@ export function snapshotInput(route: ModelRoute, input: ModelInput): ModelInput 
   }
 }
 /** Keep untrusted reference data at user priority in all protocol adapters. */
-export function modelUserText(input: ModelInput, message: ModelMessage): string {
-  return input.referenceData && input.messages.at(-1) === message
+export function modelUserText(input: ModelInput, message: ModelMessage, includeTextAttachments = true): string {
+  const question = input.referenceData && input.messages.at(-1) === message
     ? JSON.stringify({ question: message.text, characterContext: input.referenceData }) : message.text;
+  if (!includeTextAttachments || message.role !== 'user' || !message.attachments?.length) return question;
+  return [question, ...message.attachments.filter(file => file.mediaType === 'text/plain').map(file => `${file.name}\n${file.text ?? ''}`)].join('\n\n');
 }
 export function discoveryPath(base: string, cursor: string | undefined, key: string, first: string): string {
   const params = new URLSearchParams(first);

@@ -33,6 +33,7 @@ export interface DesktopBridge {
   characters?: import("./characters.ts").CharactersBridge;
   speech?: import("./speech.ts").SpeechBridge;
   chatHistory?: import("./chat-history.ts").ChatHistoryBridge;
+  agentTasks?: import("./agent-tasks.ts").AgentTaskBridge;
   onlineChat?: import("./online-chat.ts").OnlineChatBridge;
   models?: import("./models.ts").ModelsBridge;
   pets?: import("./pets.ts").PetsBridge;
