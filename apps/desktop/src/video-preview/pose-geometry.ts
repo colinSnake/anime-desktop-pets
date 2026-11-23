@@ -17,7 +17,7 @@ export function nominalSize(padded: number): number {
 /** Authored bottom anchor and pinned left-flight source-time ramp from dragon_playback.py. */
 export function poseRect(clip: Clip, size: number, mediaMs: number, mirrored: boolean): PoseRect {
   const { file } = clipSource(clip);
-  const { scale, offset } = catalog[file];
+  const { scale, offset } = catalog[file as keyof typeof catalog];
   const clamp = (n: number) => Math.min(1, Math.max(0, n));
   const weight = file === 'move03left' ? Math.min(clamp((mediaMs - 2500) / 625), clamp((6700 - mediaMs) / 1000)) : 0;
   const width = size * (scale + (1.30 - scale) * weight * weight * (3 - 2 * weight));

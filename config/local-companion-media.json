@@ -2,5 +2,18 @@
   "revision": "fb38ce620576f5ed3735a99536d2b1a4a9eb313f",
   "source": "dsh-pet/assets/webm/待机呼吸休闲.webm",
   "sha256": "deb965d05a85dacf5ff4a20faa757846f0d11679598c3ec578a5571487660395",
-  "bytes": 441437
+  "bytes": 441437,
+  "actions": {
+    "companion-wave": { "label": "元气挥手", "group": "互动", "source": "dsh-pet/assets/webm/点击回应-元气挥手.webm", "bytes": 421669, "sha256": "48cd729ccdcf746369942ea954d242e9afdd5643e1dac3827fa5e67450eb8776" },
+    "companion-jump": { "label": "开心跃动", "group": "互动", "source": "dsh-pet/assets/webm/点击回应-开心跃动.webm", "bytes": 538110, "sha256": "86dcb0c3dd7b651de9c107e927d57a5c4224599101706dbdcc782fa48bcd0ad7" },
+    "companion-shy": { "label": "害羞惊讶", "group": "互动", "source": "dsh-pet/assets/webm/点击回应-害羞惊讶.webm", "bytes": 538281, "sha256": "a04968bbc46d1ebea07f81e5dabd93b0b67a9d07f1371e9887b33075134ad00d" },
+    "companion-laugh": { "label": "挠痒咯咯笑", "group": "互动", "source": "dsh-pet/assets/webm/点击回应-挠痒咯咯笑.webm", "bytes": 425393, "sha256": "f228279219f4084323ca1bfef1604f7c77bb3f505d45a8d1747b5ac3f9f2393b" },
+    "companion-stretch": { "label": "伸懒腰", "group": "日常", "source": "dsh-pet/assets/webm/超大伸懒腰.webm", "bytes": 396987, "sha256": "0ac66d918cc5efd49be1273c3830de73eae5f9bdcd5fcb968d1b2f9b487705ad" },
+    "companion-nap": { "label": "小憩", "group": "日常", "source": "dsh-pet/assets/webm/原地小憩沉眠.webm", "bytes": 433769, "sha256": "31d4a6b36a29b2a4fe097384173d3bbeb3fa2f40f526b13191791456bf7507a1" },
+    "companion-snack": { "label": "吃零食", "group": "日常", "source": "dsh-pet/assets/webm/大口吃零食.webm", "bytes": 806998, "sha256": "fdacb534a828b0c669f22a54e8da9bb9b5d731e0132dd5ea946f7badc9229a39" },
+    "companion-juggle": { "label": "三球抛接", "group": "玩耍", "source": "dsh-pet/assets/webm/三球抛接.webm", "bytes": 549316, "sha256": "a64c08a4b7e5c3549616faf9dcd418e17f156b4b72d906646e4d57067df70d23" },
+    "companion-cube": { "label": "玩魔方", "group": "玩耍", "source": "dsh-pet/assets/webm/原地专心玩魔方.webm", "bytes": 442948, "sha256": "ad54da175ba86b19a84b73b3169fb418b2df016560bb274283f200aca351e712" },
+    "companion-dance": { "label": "可爱宅舞", "group": "玩耍", "source": "dsh-pet/assets/webm/可爱宅舞.webm", "bytes": 576307, "sha256": "4f737e44ea67c20368bdce474b951902c87c37991fb0750da8ed7794df6ec55c" },
+    "companion-hover": { "label": "拖拽悬空", "group": "拖拽反馈", "source": "dsh-pet/assets/webm/被鼠标拖拽悬空反馈.webm", "bytes": 464764, "sha256": "31373a86026636eecc890db763760309360310eb095cf5575b13c9ca2a6cc80e" }
+  }
 }

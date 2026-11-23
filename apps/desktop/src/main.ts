@@ -242,7 +242,7 @@ async function start() {
         packageToolPath: join(__dirname, 'runtime', 'pet_sources.py'),
         catalog: process.platform === 'darwin'
           ? [{ ...longmei, name: "龙妹", launchable: video?.longmeiReady === true },
-            { ...dafeiyu, name: "大肥鱼", launchable: video?.companionReady === true }] : [],
+            { ...dafeiyu, name: "鲸鱼妹", launchable: video?.companionReady === true }] : [],
       },
       workerPath: join(__dirname, "runtime", "worker.py"),
       guardianPath: join(__dirname, "runtime", "guardian.py"),

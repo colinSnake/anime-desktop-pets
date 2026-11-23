@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import companionMedia from '../config/local-companion-media.json' with { type: 'json' };
 import { stageVideoUI } from './stage-video-ui.mjs';
 import { stageLocalCompanion } from './prepare-local-companion.mjs';
 
@@ -20,6 +21,17 @@ export async function buildPreview(out) {
   ]);
   const error = results.find(result => result.status === 'rejected');
   if (error) throw error.reason;
+}
+
+export function companionCheckMessages(result) {
+  if (!result.ready) return ['鲸鱼妹：待机 WebM 或封面缺失、权限不符合要求或校验失败；动作状态未检查。'];
+  const total = Object.keys(companionMedia.actions).length;
+  const messages = [`鲸鱼妹：固定待机 WebM 与封面已通过校验；动作 ${result.availableActions.length}/${total} 段可用。`];
+  if (result.missingActions.length) {
+    const labels = result.missingActions.map(id => companionMedia.actions[id]?.label ?? id);
+    messages.push(`鲸鱼妹缺少或校验失败的可选动作：${labels.join('、')}`);
+  }
+  return messages;
 }
 
 async function runPreview(args) {
@@ -61,13 +73,17 @@ async function runPreview(args) {
   try {
     let mediaReady = false;
     let companionReady = false;
+    let companionStage = { ready: false, availableActions: [], missingActions: [] };
     if (process.platform === 'darwin') {
       folder = await mkdtemp(join(tmpdir(), workspace ? 'pet-workspace-video-' : 'pet-video-preview-'));
       if (!workspace) await mkdir(join(folder, 'profile'));
       try {
         mediaReady = await runOwned('python3', ['-I', '-B', join(root, 'scripts/prepare-pet-video-preview.py'), folder], 20_000) === 0;
       } catch { /* Missing Python or local assets only blocks the video backend. */ }
-      if (!stopped && workspace) companionReady = await stageLocalCompanion(folder);
+      if (!stopped && workspace) {
+        companionStage = await stageLocalCompanion(folder);
+        companionReady = companionStage.ready;
+      }
       if (stopped) return;
       if (!mediaReady && (!workspace || check)) throw new Error('未启动视频桌宠：准备本机素材失败。');
       if (!mediaReady) console.error('龙妹本机视频素材不可用；继续启动工作区。');
@@ -84,7 +100,7 @@ async function runPreview(args) {
       const files = (await readdir(folder)).filter(file => file.endsWith('.webm'));
       const sizes = await Promise.all(files.map(async file => (await stat(join(folder, file))).size));
       if (!stopped) console.log(`离线准备完成：${sizes.length} 段原始 WebM，合计 ${sizes.reduce((a, b) => a + b)} 字节；未打开 Electron。`);
-      if (!stopped && companionReady) console.log('大肥鱼：固定待机 WebM 与封面已通过本机离线准备。');
+      if (!stopped && workspace) for (const message of companionCheckMessages(companionStage)) console.log(message);
       return;
     }
     if (hmr) {

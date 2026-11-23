@@ -349,6 +349,7 @@ test('companion registration never starts a player and keeps unsupported behavio
   const added = await workspace.mutate('add', { expectedRevision: launched.workspace.revision, package: dafeiyu });
   assert.ok(added.ok);
   const whale = added.workspace.instances[0]!;
+  assert.equal(whale.displayName, '鲸鱼妹');
   assert.equal(whale.phase, 'stopped');
   assert.equal(whale.autoStartOnLaunch, false);
   assert.equal(whale.preferences.scheduledActivity, false);
@@ -356,5 +357,9 @@ test('companion registration never starts a player and keeps unsupported behavio
   const reopened = await workspace.startOnLaunch(longmei);
   assert.ok(reopened.ok);
   assert.equal(reopened.workspace.instances[0]?.phase, 'stopped');
+  const saved = await workspace.mutate('save', { id: whale.id, expectedRevision: reopened.workspace.revision,
+    displayName: '小蓝', enabled: whale.enabled, autoStartOnLaunch: whale.autoStartOnLaunch, preferences: whale.preferences });
+  assert.ok(saved.ok);
+  assert.equal(saved.workspace.instances[0]?.displayName, '小蓝');
   assert.equal(windows.length, 0);
 });

@@ -12,6 +12,7 @@ import { CaptionSchedule, IdleGreetings, interactionClips, workCaptions, type Vi
 import { WorkPoseSchedule } from './task-schedule';
 import type { TaskAnimation } from '../../../app-service/src/task-animation.ts';
 import { type Clip, isClip, isMediaTime, loops, videoIPC } from './playback';
+import type { CompanionClip } from './playback';
 import { createPreviewQuota, createPreviewQuotaSource, type PreviewQuotaSource } from './quota';
 import { overscan, paddedSize } from './pose-geometry';
 
@@ -22,6 +23,7 @@ export function createVideoWindow(options: {
   observeFullscreen?: (listener: (active: boolean) => void) => () => void;
   lines?: VideoLines;
   idleOnly?: boolean;
+  companionClips?: readonly CompanionClip[];
   onCue?: (text: string | undefined, token: number) => void;
   onMenu?: (intent: VideoMenuIntent) => void;
   onDrop?: (position: { x: number; y: number }) => void;
@@ -80,6 +82,7 @@ export function createVideoWindow(options: {
   let clip: Clip = 'idle';
   let generation = 0;
   let endedWhilePressed = 0;
+  const availableCompanionClips = new Set(options.companionClips ?? []);
   let ignored = false;
   let loaded = false;
   let menuOpen = false;
@@ -111,7 +114,10 @@ export function createVideoWindow(options: {
   function userActivity(now: number) { activity.userActivity(now); greetings.userActivity(now); }
   let workFinished = false;
   function action(next: Clip, owner: typeof poseOwner = 'base') {
-    if (!loaded || win.isDestroyed() || idleOnly && (next !== 'idle' || generation > 0)) return;
+    if (!loaded || win.isDestroyed()) return;
+    const companionAllowed = availableCompanionClips.has(next as CompanionClip) ||
+      (next === 'companion-rebound' && availableCompanionClips.has('companion-jump'));
+    if (idleOnly && next !== 'idle' && !companionAllowed) return;
     automatic = undefined;
     cueForFrame = undefined;
     if (captions.kind === 'task') captions.clear();
@@ -125,14 +131,15 @@ export function createVideoWindow(options: {
     position, size: () => size, workArea, move,
     show: action,
     face(facing) { if (facing && !win.isDestroyed()) contents.send(videoIPC.face, generation, facing); },
-    reducedMotion: () => idleOnly || reduced,
+    reducedMotion: () => reduced,
     onDrop: options.onDrop,
-  });
+  }, { releaseMode: idleOnly ? 'companion' : 'animation', companionHover: availableCompanionClips.has('companion-hover'),
+    companionRebound: availableCompanionClips.has('companion-jump') });
   if (preferences) schedule.setMovement(behavior.movement);
   function finishDrag(release: boolean) {
     if (!schedule.pressed) return;
     const now = performance.now();
-    const result = schedule.finish(now, release);
+    const result = schedule.finish(now, release, release ? screen.getCursorScreenPoint() : undefined);
     userActivity(now);
     if (result === 'click' && options.lines && win.isVisible()) queueSingleClick();
     if (endedWhilePressed === generation && !schedule.protectsPlay) action('idle');
@@ -149,7 +156,13 @@ export function createVideoWindow(options: {
     // Only genuine pointer moves add samples. The timer can change a held
     // pose or advance a spring, but cannot manufacture release velocity.
     if (since !== undefined && now - since > 20_000) finishDrag(false);
-    else schedule.tick(now);
+    else {
+      schedule.tick(now);
+      if (endedWhilePressed === generation && !schedule.protectsPlay) {
+        endedWhilePressed = 0;
+        action('idle');
+      }
+    }
   }
   const ipcCleanup: (() => void)[] = [];
   win.once('closed', () => { for (const cleanup of ipcCleanup.splice(0)) cleanup(); });
@@ -349,7 +362,7 @@ export function createVideoWindow(options: {
     try {
       const menu = previewMenu ?? Menu.buildFromTemplate(workspacePetMenu({
         size: size.width, hideInFullscreen, ...behavior, reduced, task: task.active(now),
-        protectedPose: schedule.protectsPlay, quota: quotaEnabled, idleOnly,
+        protectedPose: schedule.protectsPlay, quota: quotaEnabled, idleOnly, companionClips: [...availableCompanionClips],
       }, {
         intent: intent => afterMenu(() => {
           if (intent.kind !== 'size' || !schedule.protectsPlay) options.onMenu?.(intent);
@@ -394,7 +407,8 @@ export function createVideoWindow(options: {
   });
   listen(videoIPC.frame, (...args) => {
     const [event, shown, request] = args;
-    if (args.length !== 3 || generation === 0 || !isClip(shown) || shown !== clip || request !== generation) return;
+    if (args.length !== 3 || (event !== 'shown' && event !== 'ended' && event !== 'failed') ||
+        generation === 0 || !isClip(shown) || shown !== clip || request !== generation) return;
     if (event === 'shown') {
       presentedGeneration = generation;
       const pending = cueForFrame;
@@ -429,9 +443,12 @@ export function createVideoWindow(options: {
       if (event === 'ended') { activity.defer(performance.now()); action('idle'); }
       else stopActivity(performance.now());
     } else if (event === 'ended' && !loops(shown)) {
-      if (schedule.pressed) endedWhilePressed = generation;
+      if (schedule.pressed || schedule.isAirborne) endedWhilePressed = generation;
       else if (!schedule.protectsPlay) action('idle');
-    } else if (event === 'failed' && shown !== 'idle') action('idle');
+    } else if (event === 'failed' && shown !== 'idle') {
+      if (schedule.protectsPlay) endedWhilePressed = generation;
+      else action('idle');
+    }
     else if (event === 'failed' && preferences) failWindow();
   });
   const recoverDisplay = () => {

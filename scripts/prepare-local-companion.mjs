@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, mkdir, mkdtemp, open, rename, rm, writeFile } from 'node:fs/promises';
+import { link, lstat, mkdir, mkdtemp, open, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -14,7 +14,8 @@ const coverHeader = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
 const coverWidth = 222, coverHeight = 278;
 const validCover = (bytes, scale = 1) => bytes.length >= 33 && bytes.subarray(0, 16).equals(coverHeader) &&
   bytes.readUInt32BE(16) === coverWidth * scale && bytes.readUInt32BE(20) === coverHeight * scale && bytes[24] === 8 && bytes[25] === 6;
-const approved = bytes => bytes.length === media.bytes && createHash('sha256').update(bytes).digest('hex') === media.sha256;
+const approved = (bytes, pin) => bytes.length === pin.bytes && createHash('sha256').update(bytes).digest('hex') === pin.sha256;
+const actions = Object.entries(media.actions);
 
 async function privateDirectory(path) {
   const info = await lstat(path);
@@ -37,29 +38,49 @@ async function regularFile(path, limit, privateFile = false) {
 export async function stageLocalCompanion(launchDirectory, assetDirectory = assets) {
   try {
     const videos = join(assetDirectory, 'videos');
-    if (!await privateDirectory(assetDirectory) || !await privateDirectory(videos)) return false;
+    if (!await privateDirectory(assetDirectory) || !await privateDirectory(videos)) {
+      return { ready: false, availableActions: [], missingActions: [] };
+    }
     const idle = await regularFile(join(videos, 'idle.webm'), media.bytes, true);
-    if (!approved(idle)) return false;
+    if (!approved(idle, media)) return { ready: false, availableActions: [], missingActions: [] };
     const cover = await regularFile(join(assetDirectory, 'cover.png'), 1024 * 1024, true);
-    if (!validCover(cover) && !validCover(cover, 2)) return false;
+    if (!validCover(cover) && !validCover(cover, 2)) return { ready: false, availableActions: [], missingActions: [] };
     // Each launch owns its bounded copies. The renderer never reads the source checkout or asset library.
     const destination = join(launchDirectory, 'companion');
     await mkdir(destination, { mode: 0o700 });
+    const availableActions = [];
+    const missingActions = [];
     try {
       await writeFile(join(destination, 'idle.webm'), idle, { flag: 'wx', mode: 0o600 });
       await writeFile(join(destination, 'cover.png'), cover, { flag: 'wx', mode: 0o600 });
+      for (const [id, pin] of actions) {
+        const name = `${id}.webm`;
+        const bytes = await regularFile(join(videos, name), pin.bytes, true).catch(() => undefined);
+        if (!bytes || !approved(bytes, pin)) {
+          missingActions.push(id);
+          continue;
+        }
+        await writeFile(join(destination, name), bytes, { flag: 'wx', mode: 0o600 });
+        availableActions.push(id);
+      }
     } catch (error) {
       await rm(destination, { recursive: true, force: true });
       throw error;
     }
-    return true;
-  } catch { return false; }
+    return { ready: true, availableActions, missingActions };
+  } catch { return { ready: false, availableActions: [], missingActions: [] }; }
 }
 
-async function prepareCompanion(source) {
+export async function prepareCompanion(source) {
   // This does not execute anything from the source checkout or accept arbitrary media.
-  const idle = await regularFile(join(resolve(source), media.source), media.bytes);
-  if (!approved(idle)) throw new Error(`片段与固定版本 ${media.revision} 的 SHA-256 不符。`);
+  const readPinned = async pin => {
+    const bytes = await regularFile(join(resolve(source), pin.source), pin.bytes);
+    if (!approved(bytes, pin)) throw new Error(`${pin.source} 与固定版本 ${media.revision} 的 SHA-256 不符。`);
+    return bytes;
+  };
+  const idle = await readPinned(media);
+  const clips = new Map();
+  for (const [id, pin] of actions) clips.set(`${id}.webm`, await readPinned(pin));
   for (const path of [dirname(dirname(assets)), dirname(assets)]) {
     await mkdir(path, { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
     const info = await lstat(path);
@@ -67,6 +88,26 @@ async function prepareCompanion(source) {
   }
   const temporary = await mkdtemp(join(dirname(assets), '.dafeiyu-'));
   try {
+    const existing = await lstat(assets).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    if (existing) {
+      const videos = join(assets, 'videos');
+      if (!await privateDirectory(assets) || !await privateDirectory(videos)) throw new Error('本机素材目录不可用。');
+      const cover = await regularFile(join(assets, 'cover.png'), 1024 * 1024, true);
+      if (!validCover(cover) && !validCover(cover, 2)) throw new Error('现有封面不符合本机素材要求。');
+      if (!(await regularFile(join(videos, 'idle.webm'), media.bytes, true)).equals(idle)) throw new Error('现有待机原片不匹配，未覆盖。');
+      const missing = [];
+      for (const [name, bytes] of clips) {
+        const saved = await regularFile(join(videos, name), bytes.length, true).catch(error => { if (error.code !== 'ENOENT') throw error; });
+        if (!saved) missing.push(name);
+        else if (!saved.equals(bytes)) throw new Error(`现有 ${name} 不匹配，未覆盖。`);
+      }
+      for (const name of missing) {
+        const prepared = join(temporary, name);
+        await writeFile(prepared, clips.get(name), { flag: 'wx', mode: 0o600 });
+        await link(prepared, join(videos, name)); // Publish a complete file without ever replacing an existing one.
+      }
+      return;
+    }
     await mkdir(join(temporary, 'videos'), { mode: 0o700 });
     const path = join(temporary, 'videos', 'idle.webm');
     await writeFile(path, idle, { flag: 'wx', mode: 0o600 });
@@ -75,6 +116,7 @@ async function prepareCompanion(source) {
     { encoding: 'buffer', timeout: 15_000, maxBuffer: 1024 * 1024 });
     if (!validCover(cover)) throw new Error('未能从本机素材生成透明封面。');
     await writeFile(join(temporary, 'cover.png'), cover, { flag: 'wx', mode: 0o600 });
+    for (const [name, bytes] of clips) await writeFile(join(temporary, 'videos', name), bytes, { flag: 'wx', mode: 0o600 });
     await rename(temporary, assets);
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }
@@ -84,9 +126,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   try {
     if (process.platform !== 'darwin' || !source || extra.length) throw new Error('用法（macOS）：node scripts/prepare-local-companion.mjs <dsh-pet checkout>');
     await prepareCompanion(source);
-    console.log('大肥鱼本机素材已就绪：.local/pets/dafeiyu 下的 cover.png 与 videos/idle.webm。未登记实例、未启动桌宠。');
+    console.log('鲸鱼妹本机素材已就绪：.local/pets/dafeiyu 下的封面、待机和动作原片。未登记实例、未启动桌宠。');
   } catch (error) {
-    console.error('准备大肥鱼失败：' + (error.code === 'ENOTEMPTY' || error.code === 'EEXIST' ? '本机素材已存在，未覆盖。' : error.message));
+    console.error('准备鲸鱼妹失败：' + (error.code === 'ENOTEMPTY' || error.code === 'EEXIST' ? '本机素材已存在，未覆盖。' : error.message));
     process.exitCode = 1;
   }
 }

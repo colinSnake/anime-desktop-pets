@@ -14,12 +14,12 @@ const status = document.querySelector('output')!;
 const nameBubble = document.querySelector<HTMLElement>('#pet-name')!;
 const companion = location.hostname === companionHost;
 if (companion) {
-  nameBubble.textContent = '大肥鱼';
-  document.querySelector('main')!.setAttribute('aria-label', '大肥鱼 · 视频桌宠');
+  nameBubble.textContent = '鲸鱼妹';
+  document.querySelector('main')!.setAttribute('aria-label', '鲸鱼妹 · 视频桌宠');
 }
 let visible: HTMLVideoElement | undefined;
 let shown: { clip: Clip; generation: number } | undefined;
-let requested: { clip: Clip; generation: number; facing?: Facing; blend: number } | undefined;
+let requested: { clip: Clip; generation: number; facing?: Facing } | undefined;
 let stopSegment: (() => void) | undefined;
 let mirrored = false;
 const mediaTimes = new WeakMap<HTMLVideoElement, number>();
@@ -122,48 +122,79 @@ function updateFace() {
 }
 
 const player = createClipSwitcher({
-  prepare(slot, clip, signal) {
+  canReuse(slot) {
+    const layer = layers[slot]!;
+    // A terminal DOM state can be observable before the corresponding event fires.
+    return !layer.ended && !layer.error;
+  },
+  retarget(slot, from, to) {
+    if (!to.startsWith('release-')) return false;
+    const { file, range } = clipSource(to);
     const target = layers[slot]!;
-    return prepareFirstFrame(target, clip, signal, mediaMs => mediaTimes.set(target, mediaMs));
+    if (!range || file !== clipSource(from).file || target !== visible ||
+        target.paused || target.seeking || target.readyState < 2) return false;
+    const mediaMs = mediaTimes.get(target) ?? -1;
+    const playheadMs = target.currentTime * 1000;
+    // Leave room for the next decoded frame before the release loop's end.
+    if (mediaMs + .5 < range[0] || mediaMs >= range[1] ||
+        playheadMs < range[0] || playheadMs + 1000 / 24 >= range[1] || !transition.freeze(paintPose)) return false;
+    target.pause();
+    stopSegment?.();
+    stopSegment = undefined;
+    return true;
+  },
+  prepare(slot, clip, signal, retarget) {
+    const target = layers[slot]!;
+    return prepareFirstFrame(target, clip, signal, mediaMs => mediaTimes.set(target, mediaMs), retarget);
   },
   reveal(slot, clip, generation) {
+    const target = layers[slot]!;
+    if (visible === target && shown?.clip === clip) {
+      // A new request for the running clip changes ownership, not its playback clock.
+      shown.generation = generation;
+      updateFace();
+      status.hidden = true;
+      bridge.frame('shown', clip, generation);
+      sampleHover();
+      return;
+    }
+    // The outgoing clip keeps playing during decode. Snapshot it only at the handoff,
+    // before switching layers, so the incoming video can move throughout the blend.
+    const blend = shown ? dragBlendMs(shown.clip, clip, reduce.matches) : 0;
+    const frozen = blend > 0 && transition.freeze(paintPose);
+    if (!frozen) transition.clear();
     stopSegment?.();
-    visible = layers[slot]!;
-    shown = { clip, generation };
+    stopSegment = undefined;
+    visible = target;
+    const presentation = shown = { clip, generation };
     updateFace();
     for (const [index, layer] of layers.entries()) {
       layer.classList.toggle('visible', index === slot);
       if (index !== slot) layer.pause();
     }
-    const target = visible;
-    const failed = () => bridge.frame('failed', clip, generation);
-    const resume = () => { if (target.paused) void target.play().catch(failed); sampleHover(); };
+    const failed = () => failVisible(slot, presentation);
+    const resume = () => { if (target.paused) void target.play().catch(failed); };
     const source = clipSource(clip);
     const followGeometry = source.file === 'move03left';
     const followTravel = isFullMovement(clip);
-    const play = () => {
-      if (source.range || followGeometry || followTravel) stopSegment = keepSegment(target, clip, failed, {
-        frame(mediaMs) {
-          mediaTimes.set(target, mediaMs);
-          if (followGeometry) placePose();
-          if (followTravel && requested?.generation === generation) bridge.travelFrame(generation, mediaMs);
-        },
-        seamStart(legalTail) {
-          if (legalTail) transition.freeze(paintPose);
-        },
-        seamEnd() {
-          if (overlay.hidden || reduce.matches) { transition.clear(); sampleHover(); return; }
-          target.pause();
-          transition.blend(loopBlendMs, paintPose, resume);
-        },
-      });
-      resume();
-    };
-    const blend = requested?.blend ?? 0;
-    if (!overlay.hidden) {
-      target.pause();
-      transition.blend(reduce.matches ? 0 : blend, paintPose, play);
-    } else play();
+    if (source.range || followGeometry || followTravel) stopSegment = keepSegment(target, clip, failed, {
+      frame(mediaMs) {
+        mediaTimes.set(target, mediaMs);
+        if (followGeometry) placePose();
+        if (followTravel && requested?.generation === presentation.generation) bridge.travelFrame(presentation.generation, mediaMs);
+      },
+      seamStart(legalTail) {
+        if (legalTail) transition.freeze(paintPose);
+      },
+      seamEnd() {
+        if (overlay.hidden || reduce.matches) { transition.clear(); sampleHover(); return; }
+        target.pause();
+        transition.blend(loopBlendMs, paintPose, () => { resume(); sampleHover(); });
+      },
+      ended() { endVisible(slot); },
+    });
+    resume();
+    if (frozen) transition.blend(blend, paintPose, sampleHover);
     status.hidden = true;
     bridge.frame('shown', clip, generation);
     sampleHover();
@@ -174,29 +205,29 @@ const player = createClipSwitcher({
     bridge.frame('failed', clip, generation);
   },
 });
+function endVisible(slot: number) {
+  const result = player.onEnded(slot);
+  if (result) bridge.frame('ended', result.clip, result.generation);
+}
+function failVisible(slot: number, presentation: NonNullable<typeof shown>) {
+  if (shown !== presentation) return;
+  stopSegment?.();
+  stopSegment = undefined;
+  const result = player.onFailed(slot, presentation.generation);
+  if (result) bridge.frame('failed', result.clip, result.generation);
+}
 for (const [slot, layer] of layers.entries()) {
   layer.addEventListener('ended', () => {
     if (!layer.ended || layer !== visible) return;
-    const result = player.onEnded(slot);
-    if (result) bridge.frame('ended', result.clip, result.generation);
+    endVisible(slot);
   });
   layer.addEventListener('error', () => {
-    if (layer === visible && shown) bridge.frame('failed', shown.clip, shown.generation);
+    if (layer === visible && layer.error && shown) failVisible(slot, shown);
   });
 }
 bridge.onAction((clip, generation) => {
   if (requested && generation <= requested.generation) return;
-  let blend = 0;
-  if (visible && shown && shown.clip !== clip) {
-    const duration = dragBlendMs(shown.clip, clip, reduce.matches);
-    if ((duration || !overlay.hidden) && transition.freeze(paintPose)) {
-      visible.pause();
-      stopSegment?.();
-      stopSegment = undefined;
-      blend = duration;
-    }
-  }
-  requested = { clip, generation, facing: clipSource(clip).facing, blend };
+  requested = { clip, generation, facing: clipSource(clip).facing };
   void player.show(clip, generation);
 });
 bridge.onFace((generation, facing) => {

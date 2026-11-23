@@ -1,8 +1,8 @@
 import { clampPosition, type Point, type Sample, type Size } from './motion';
 import { moveFacing, movements, releases, type Facing, type Movement, type ReleasePose } from './locomotion';
-import { estimateReleaseVelocity, ReleaseSpring, type Edges } from './release-physics';
+import { estimateTerminalReleaseVelocity, freshReleaseSample, ReleaseSpring, type Edges } from './release-physics';
 
-export type DragPose = 'idle' | Movement | ReleasePose;
+export type DragPose = 'idle' | Movement | ReleasePose | 'companion-hover' | 'companion-rebound';
 export type DragEnd = 'click' | 'drop' | 'flick' | 'cancel';
 interface DragPort {
   position(): Point;
@@ -15,8 +15,9 @@ interface DragPort {
   reducedMotion(): boolean;
   random?(): number;
 }
+export interface DragScheduleOptions { releaseMode?: 'animation' | 'idle-bounce' | 'companion'; companionHover?: boolean; companionRebound?: boolean }
 
-type Press = { cursor: Point; origin: Point; lastCursor: Point; active: boolean; trail: Sample[]; maxDistance: number;
+type Press = { cursor: Point; origin: Point; lastCursor: Point; active: boolean; velocityTrail: Sample[]; maxDistance: number;
   pose?: DragPose; profileAt: number; started: number };
 
 function heldVelocity(now: number, trail: readonly Sample[]): Point {
@@ -47,8 +48,17 @@ export class DragSchedule {
   private facing: Facing = 'right';
   private movement = true;
   private taskActive = false;
+  private readonly animated: boolean;
+  private readonly companion: boolean;
+  private readonly companionHover: boolean;
+  private readonly companionRebound: boolean;
 
-  constructor(private readonly port: DragPort) {}
+  constructor(private readonly port: DragPort, options: DragScheduleOptions = {}) {
+    this.companion = options.releaseMode === 'companion';
+    this.animated = options.releaseMode !== 'idle-bounce' && !this.companion;
+    this.companionHover = options.companionHover === true;
+    this.companionRebound = options.companionRebound === true;
+  }
   get pressed() { return !!this.press; }
   get isAirborne() { return !!this.flight; }
   get protectsPlay() { return !!(this.press || this.flight); }
@@ -67,8 +77,10 @@ export class DragSchedule {
     if (!this.flight && this.holdUntil === undefined) return;
     this.flight = undefined;
     this.holdUntil = undefined;
-    this.port.face(undefined);
-    this.port.show('idle');
+    if (this.animated || this.companion) {
+      this.port.face(undefined);
+      this.port.show('idle');
+    }
   }
   // For an explicit external action, after checking protectsPlay, so a held (settled) pose can yield.
   yieldSettledPose() {
@@ -84,29 +96,37 @@ export class DragSchedule {
     if (this.press) return;
     this.clearFlight();
     const origin = this.port.position();
-    this.press = { cursor, lastCursor: cursor, origin, active: false, trail: [{ ...origin, time: now }],
+    this.press = { cursor, lastCursor: cursor, origin, active: false, velocityTrail: [{ ...origin, time: now }],
       maxDistance: 0, started: now, profileAt: -Infinity };
   }
 
   move(cursor: Point, now: number) {
     const press = this.press;
-    if (!press || (cursor.x === press.lastCursor.x && cursor.y === press.lastCursor.y)) return;
+    if (!press || !this.sample(press, cursor, now)) return;
+    if (this.companion) {
+      this.updateCompanionDrag(press);
+    } else if (this.animated) this.updateDrag(press, now);
+  }
+
+  private sample(press: Press, cursor: Point, now: number): boolean {
+    if (cursor.x === press.lastCursor.x && cursor.y === press.lastCursor.y) return false;
     press.lastCursor = cursor;
     const dx = cursor.x - press.cursor.x, dy = cursor.y - press.cursor.y;
-    if (!press.active && Math.abs(dx) + Math.abs(dy) <= 8) return;
+    if (!press.active && Math.abs(dx) + Math.abs(dy) <= 8) return false;
     press.active = true;
-    const position = clampPosition({ x: press.origin.x + dx, y: press.origin.y + dy }, this.port.size(), this.port.workArea(cursor));
+    const pointerPosition = { x: press.origin.x + dx, y: press.origin.y + dy };
+    const position = clampPosition(pointerPosition, this.port.size(), this.port.workArea(cursor));
     this.port.move(position);
-    press.trail.push({ ...position, time: now });
-    if (press.trail.length > 64) press.trail.shift();
+    press.velocityTrail.push({ ...pointerPosition, time: now });
+    if (press.velocityTrail.length > 64) press.velocityTrail.shift();
     press.maxDistance = Math.max(press.maxDistance, Math.hypot(position.x - press.origin.x, position.y - press.origin.y));
-    this.updateDrag(press, now);
+    return true;
   }
 
   private updateDrag(press: Press, now: number) {
     if (!press.active || now - press.profileAt < 50) return;
     press.profileAt = now;
-    const { x, y } = heldVelocity(now, press.trail);
+    const { x, y } = heldVelocity(now, press.velocityTrail);
     const speed = Math.hypot(x, y);
     const previous = press.pose ?? 'idle';
     let pose: 'idle' | Movement = 'idle';
@@ -120,36 +140,53 @@ export class DragSchedule {
     if (press.pose !== pose) { press.pose = pose; this.port.show(pose); }
   }
 
+  private updateCompanionDrag(press: Press) {
+    if (!press.active) return;
+    const pose = !this.port.reducedMotion() && this.companionHover ? 'companion-hover' : 'idle';
+    if (press.pose !== pose) { press.pose = pose; this.port.show(pose); }
+  }
+
   private edges(point: Point): Edges {
     const area = this.port.workArea(point), size = this.port.size();
     return { left: area.x, top: area.y, right: Math.max(area.x, area.x + area.width - size.width),
       bottom: Math.max(area.y, area.y + area.height - size.height) };
   }
 
-  finish(now: number, released: boolean): DragEnd | undefined {
+  finish(now: number, released: boolean, cursor?: Point): DragEnd | undefined {
     const press = this.press;
     if (!press) return;
     this.press = undefined;
+    // A real pointer-up can arrive before the last move reaches the host. Place the pet
+    // at that endpoint without selecting a transient drag pose or refreshing stale momentum.
+    const recent = freshReleaseSample(now, press.velocityTrail.at(-1)!.time);
+    if (released && cursor) this.sample(press, cursor, now);
     if (!press.active) return released ? 'click' : 'cancel';
     const origin = this.port.position();
-    const velocity = released && this.movement && !this.port.reducedMotion() && press.maxDistance >= 24
-      ? estimateReleaseVelocity(press.trail, now) : undefined;
+    const velocity = released && recent && (this.movement || !this.animated) &&
+      !this.port.reducedMotion() && press.maxDistance >= 24
+      ? estimateTerminalReleaseVelocity(press.velocityTrail, now) : undefined;
     if (velocity) {
-      const facing = Math.abs(velocity.x) < 35 ? this.facing : velocity.x < 0 ? 'left' : 'right';
-      const choices = releases.filter(move => moveFacing(move) === facing);
-      const choice = choices[Math.floor((this.port.random?.() ?? Math.random()) * choices.length)] ?? choices[0]!;
       const size = this.port.size();
       const displayPoint = { x: origin.x + size.width / 2, y: origin.y + size.height / 2 };
+      const facing = Math.abs(velocity.x) < 35 ? this.facing : velocity.x < 0 ? 'left' : 'right';
       this.flight = { spring: new ReleaseSpring(origin, velocity, this.edges(displayPoint)), last: now, displayPoint, facing };
-      this.port.show(`release-${choice}`);
-      this.port.face(facing);
-    } else this.port.show('idle');
+      if (this.animated) {
+        const choices = releases.filter(move => moveFacing(move) === facing);
+        const choice = choices[Math.floor((this.port.random?.() ?? Math.random()) * choices.length)] ?? choices[0]!;
+        this.port.show(`release-${choice}`);
+        this.port.face(facing);
+      } else if (this.companion) this.port.show(this.companionRebound ? 'companion-rebound' : 'idle');
+    } else if (this.animated || this.companion) this.port.show('idle');
     if (released) this.port.onDrop?.(origin);
     return released ? velocity ? 'flick' : 'drop' : 'cancel';
   }
 
   tick(now: number) {
-    if (this.press) { this.updateDrag(this.press, now); return; }
+    if (this.press) {
+      if (this.companion) this.updateCompanionDrag(this.press);
+      else if (this.animated) this.updateDrag(this.press, now);
+      return;
+    }
     if (this.port.reducedMotion()) { this.clearFlight(); return; }
     const flight = this.flight;
     if (flight) {
@@ -159,11 +196,14 @@ export class DragSchedule {
       spring.setBounds(this.edges(flight.displayPoint));
       spring.advance(elapsed);
       this.port.move(spring.position());
-      if (Math.abs(spring.vx) >= 60) {
+      if (this.animated && Math.abs(spring.vx) >= 60) {
         const facing = spring.vx > 0 ? 'right' : 'left';
         if (facing !== flight.facing) { flight.facing = facing; this.port.face(facing); }
       }
-      if (spring.settled) { this.flight = undefined; this.holdUntil = now + 2000; }
+      if (spring.settled) {
+        this.flight = undefined;
+        if (this.animated) this.holdUntil = now + 2000;
+      }
     } else if (this.holdUntil !== undefined && now >= this.holdUntil) this.clearFlight();
   }
 

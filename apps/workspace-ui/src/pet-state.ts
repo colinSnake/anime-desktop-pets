@@ -1,5 +1,6 @@
 import type { PackageReference, PetDefinition, PetError, PetInputs, PetResult, PetsBridge, Theme, WorkspaceData } from '../../../packages/contracts/src/pets.ts';
 import { isPetInput } from '../../../packages/contracts/src/pets.ts';
+import { isDafeiyu } from '../../../packages/contracts/src/built-in-pets.ts';
 import { importPetPackages, requestPets } from './pet-client.ts';
 
 export type PetDraft = Pick<PetDefinition, 'displayName' | 'enabled' | 'autoStartOnLaunch' | 'preferences'> & { displayName: string };
@@ -16,7 +17,12 @@ export type PetWorkspaceState = {
 };
 export const emptyPetState: PetWorkspaceState = { drafts: Object.create(null) as Record<string, PetDraft>, notice: '', needsRefresh: false };
 export function petDisplayName(pet: PetDefinition, workspace?: WorkspaceData) {
-  return pet.displayName ?? workspace?.catalog.find(entry => entry.id === pet.package.id && entry.version === pet.package.version)?.name ?? '未命名桌宠';
+  const saved = pet.displayName;
+  if (isDafeiyu(pet.package)) {
+    if (saved === undefined) return '鲸鱼妹';
+    if (/^大肥鱼(?:·分身)*$/.test(saved)) return saved.replace(/^大肥鱼/, '鲸鱼妹');
+  }
+  return saved ?? workspace?.catalog.find(entry => entry.id === pet.package.id && entry.version === pet.package.version)?.name ?? '未命名桌宠';
 }
 function draftOf(pet: PetDefinition, workspace: WorkspaceData): PetDraft {
   return { displayName: petDisplayName(pet, workspace), enabled: pet.enabled, autoStartOnLaunch: pet.autoStartOnLaunch, preferences: { ...pet.preferences } };

@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { WorkspaceView } from '../src/App.tsx';
 import { PetCover } from '../src/PetCover.tsx';
 import { dafeiyu } from '../../../packages/contracts/src/built-in-pets.ts';
+import { petDisplayName } from '../src/pet-state.ts';
 import { PetWorkspaceController, type PetWorkspaceState } from '../src/pet-state.ts';
 import type { PetsBridge, PetPhase, WorkspaceData } from '../../../packages/contracts/src/pets.ts';
 const diagnostics = {busy:false,error:'',onRefresh(){},onProbe(){},onStartPlayer(){},onStopPlayer(){}};
@@ -143,7 +144,25 @@ test('the nook presents the staged companion separately from owned instances', (
  const html = page(s);
  assert.match(html, /桌边小窝/);
  assert.match(html, /今天也一起待在桌边。/);
- assert.match(html, /class="pet-member"[^>]*data-pet-art="dafeiyu"[\s\S]*?大肥鱼[\s\S]*?可添加/);
+ assert.match(html, /class="pet-member"[^>]*data-pet-art="dafeiyu"[\s\S]*?鲸鱼妹[\s\S]*?可添加/);
  assert.match(html, /pet-app:\/\/workspace\/covers\/local.community.dafeiyu\/0.0.0-dev\.png/);
  assert.equal(s.workspace!.instances.length, 1);
+
+ const previewState = state();
+ previewState.workspace!.instances = [];
+ previewState.workspace!.catalog = [{ id: 'local.community.dafeiyu', version: '0.0.0-dev', name: '大肥鱼', launchable: true }];
+ const preview = page(previewState);
+ assert.match(preview, /<h2[^>]*>鲸鱼妹<\/h2>/);
+ assert.match(preview, /添加鲸鱼妹/);
+});
+
+test('the legacy default name is displayed as an alias without replacing custom instance names', () => {
+ const common = { id: 'pet-fish', package: dafeiyu, enabled: true, autoStartOnLaunch: false, preferences: {} as never };
+ assert.equal(petDisplayName({ ...common, displayName: '大肥鱼' }), '鲸鱼妹');
+ assert.equal(petDisplayName({ ...common, displayName: '鲸鲸' }), '鲸鲸');
+ assert.equal(petDisplayName({ ...common, displayName: '大肥鱼·分身' }), '鲸鱼妹·分身');
+ const legacyWorkspace = state().workspace!;
+ legacyWorkspace.catalog = [{ ...dafeiyu, name: '大肥鱼', launchable: true }];
+ assert.equal(petDisplayName({ ...common, displayName: '鲸鲸' }, legacyWorkspace), '鲸鲸');
+ assert.equal(petDisplayName({ ...common, displayName: '大肥鱼·分身一号' }, legacyWorkspace), '大肥鱼·分身一号');
 });

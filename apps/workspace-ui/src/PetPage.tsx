@@ -19,7 +19,7 @@ function PetPhaseLabel({ phase }: { phase: PetPhase }) {
 
 const unavailableMessage = (reference: PackageReference) => samePetPackage(reference, longmei)
   ? '龙妹视频素材暂不可用。请运行 pnpm run dev:desktop --check 检查。'
-  : isDafeiyu(reference) ? '大肥鱼本机素材未就绪。请准备素材后重开工作区。' : '素材已导入，播放器暂不支持启动。';
+  : isDafeiyu(reference) ? '鲸鱼妹本机素材未就绪。请准备素材后重开工作区。' : '素材已导入，播放器暂不支持启动。';
 
 function PetFeedback({ pet, state }: { pet: Pet; state: PetWorkspaceState }) {
   const unavailable = state.workspace?.catalog.some(entry => entry.id === pet.package.id && entry.version === pet.package.version && entry.launchable === false);
@@ -56,7 +56,8 @@ export function PetPage({ state, controller, appearance }: { state: PetWorkspace
   const busy = !!state.operation;
   const blocked = busy || state.needsRefresh || !controller;
   const atLimit = entries.length >= 32;
-  const name = selectedCompanion?.name ?? (selected ? petDisplayName(selected, workspace) : '');
+  const displayCatalogName = (entry: WorkspaceData['catalog'][number]) => isDafeiyu(entry) ? '鲸鱼妹' : entry.name;
+  const name = selectedCompanion ? displayCatalogName(selectedCompanion) : selected ? petDisplayName(selected, workspace) : '';
   const line = selectedCompanion ? '准备好啦，添加后就能在桌边见面。' : art === 'dafeiyu' ? '今天也在桌边慢慢游。'
     : selected && entries.find(pet => samePetPackage(pet.package, selected.package)) !== selected ? '独立的桌宠实例，与原角色共用形象。'
     : art === 'longmei' ? '今天也一起待在桌边。' : '让喜欢的角色，陪在桌边。';
@@ -84,8 +85,8 @@ export function PetPage({ state, controller, appearance }: { state: PetWorkspace
       <div className="catalog-heading"><h2>选择桌宠</h2><button className="button secondary compact" disabled={blocked || catalog.length >= 32} onClick={() => { void controller?.importPackages(); }}>{state.operation === 'importPackages' ? '正在校验…' : '导入素材'}</button></div>
       {state.notice && <p className="catalog-feedback" role="status" aria-live="polite">{state.notice}</p>}
       {catalog.length ? <ul>{catalog.map(entry => <li key={`${entry.id}@${entry.version}`}>
-        <div><strong>{entry.name}</strong>{entry.launchable === false && <small>{unavailableMessage(entry)}</small>}</div>
-        <button className="button secondary compact" disabled={blocked || atLimit || (isDafeiyu(entry) && entry.launchable !== true)} onClick={() => { void controller?.add({ id: entry.id, version: entry.version }).then(success => { if (success) { setShowCatalog(false); setShowCompanion(false); } }); }}>添加「{entry.name}」</button>
+        <div><strong>{displayCatalogName(entry)}</strong>{entry.launchable === false && <small>{unavailableMessage(entry)}</small>}</div>
+        <button className="button secondary compact" disabled={blocked || atLimit || (isDafeiyu(entry) && entry.launchable !== true)} onClick={() => { void controller?.add({ id: entry.id, version: entry.version }).then(success => { if (success) { setShowCatalog(false); setShowCompanion(false); } }); }}>添加「{displayCatalogName(entry)}」</button>
       </li>)}</ul> : <p>还没有可添加的桌宠素材。</p>}
     </section>}
     {reference ? <section className="pet-stage" data-pet-art={art} aria-labelledby={stageTitle}>
@@ -95,7 +96,7 @@ export function PetPage({ state, controller, appearance }: { state: PetWorkspace
         <div className="pet-stage-status">{selected ? <PetPhaseLabel phase={selected.phase} /> : <span className="pet-phase"><span className="status-dot" aria-hidden="true" />可添加</span>}</div>
         <p className="pet-stage-line">{line}</p>
         <div className="pet-stage-actions">
-          {selectedCompanion && <button className="button primary compact" disabled={blocked || atLimit} onClick={() => { void controller?.add(selectedCompanion).then(success => { if (success) setShowCompanion(false); }); }}>添加大肥鱼</button>}
+          {selectedCompanion && <button className="button primary compact" disabled={blocked || atLimit} onClick={() => { void controller?.add(selectedCompanion).then(success => { if (success) setShowCompanion(false); }); }}>添加鲸鱼妹</button>}
           {selected && <>
             <button className="button primary compact" disabled={blocked || selected.phase === 'stopping' || (stopped && !canStart)} onClick={() => target(owner => { void owner.control(stopped ? 'start' : 'stop'); })}>{actionLabel}</button>
             <button className="button secondary compact" id={`pet-settings-${selected.id}`} aria-label={`设置${name}`} aria-haspopup="dialog" disabled={busy || !controller} onClick={() => target(() => setShowSettings(true))}>设置</button>
@@ -132,7 +133,7 @@ export function PetPage({ state, controller, appearance }: { state: PetWorkspace
       })}{availableCompanion && <li key={availableCompanion.id}>
         <button className="pet-member" type="button" data-pet-art="dafeiyu" aria-pressed={!!selectedCompanion} disabled={busy || !controller} onClick={() => setShowCompanion(true)}>
           <PetCover reference={availableCompanion} avatar />
-          <span className="pet-member-name">{availableCompanion.name}</span><span className="pet-phase"><span className="status-dot" aria-hidden="true" />可添加</span>
+          <span className="pet-member-name">鲸鱼妹</span><span className="pet-phase"><span className="status-dot" aria-hidden="true" />可添加</span>
           <PetNookIcon name="chevron" className="pet-member-chevron" />
         </button>
       </li>}</ul>

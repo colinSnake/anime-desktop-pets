@@ -29,7 +29,7 @@ export function PetSettings({ state, controller, onClose }: {state: PetWorkspace
       <div className="settings-body">
         {!pet && <p className="error" role="alert">这个实例已不在最新清单中。草稿仍保留，请刷新配置。</p>}
         {state.error && <p className="error" role="alert">{petErrorMessages[state.error]}</p>}
-        {usesVideo && <p className="muted">{idleOnly ? '大肥鱼支持待机动画和手动拖拽，暂不支持自主活动。' : '可应用显示和行为偏好。'}手动显示仍遵守全屏隐藏策略。</p>}
+        {usesVideo && <p className="muted">{idleOnly ? '鲸鱼妹支持动作预览和拖拽反馈，暂不支持自主活动。' : '可应用显示和行为偏好。'}手动显示仍遵守全屏隐藏策略。</p>}
         {draft && <>
           <section className="preference-group" aria-labelledby={`${prefix}-basic`}>
             <h3 id={`${prefix}-basic`}>基本</h3>

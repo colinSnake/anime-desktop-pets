@@ -9,7 +9,7 @@ import { defaultPreferences } from './pet-registry.ts';
 import { WorkspaceError, WorkspaceStore, type WorkspaceState } from './workspace-store.ts';
 const samePackage = (a: PackageReference, b: PackageReference) => a.id === b.id && a.version === b.version;
 const newPet = (entry: CatalogEntry, autoStartOnLaunch = false): PetDefinition => ({
-  id: `pet-${randomBytes(10).toString('hex')}`, package: { id: entry.id, version: entry.version }, displayName: entry.name,
+  id: `pet-${randomBytes(10).toString('hex')}`, package: { id: entry.id, version: entry.version }, displayName: isDafeiyu(entry) ? '鲸鱼妹' : entry.name,
   enabled: true, autoStartOnLaunch, preferences: { ...defaultPreferences(), ...(isDafeiyu(entry) && { scheduledActivity: false, movement: false }) },
 });
 export class PetWorkspace {

@@ -2,7 +2,7 @@ import { clipSource, loops, type Clip } from './playback';
 
 /** Keep the last good layer while the bounded replacement gears up at its media offset. */
 export function prepareFirstFrame(video: HTMLVideoElement, clip: Clip, signal: AbortSignal,
-  ready: (mediaMs: number) => void = () => {}): Promise<void> {
+  ready: (mediaMs: number) => void = () => {}, continueSource = false): Promise<void> {
   const source = clipSource(clip);
   return new Promise<void>((resolve, reject) => {
     let frame: number | undefined;
@@ -27,6 +27,7 @@ export function prepareFirstFrame(video: HTMLVideoElement, clip: Clip, signal: A
     const timeout = setTimeout(failed, 5000);
     const watch = () => {
       frame = video.requestVideoFrameCallback((_now, metadata) => {
+        if (settled) return;
         // Seeking may also report the nearest earlier frame. Never present
         // the standstill introduction or the original file's tired tail.
         if (source.range && (video.seeking || metadata.mediaTime * 1000 + .5 < source.range[0])) {
@@ -52,9 +53,10 @@ export function prepareFirstFrame(video: HTMLVideoElement, clip: Clip, signal: A
     if (signal.aborted) { failed(); return; }
     signal.addEventListener('abort', failed, { once: true });
     video.addEventListener('error', failed, { once: true });
-    if (source.range) video.addEventListener('loadedmetadata', seek, { once: true });
     video.muted = true;
     video.loop = loops(clip) && !source.range;
+    if (continueSource) { watch(); void video.play().catch(failed); return; }
+    if (source.range) video.addEventListener('loadedmetadata', seek, { once: true });
     video.src = `./${source.file}.webm`;
     video.load();
     if (!source.range) { watch(); void video.play().catch(failed); }
@@ -65,6 +67,7 @@ type Frames = {
   frame(mediaMs: number): void;
   seamStart(validTail: boolean): void;
   seamEnd(): void;
+  ended?(): void;
 };
 
 /** Observe media time (not wall time); never treat a seek callback as a decoded head. */
@@ -96,6 +99,12 @@ export function keepSegment(video: HTMLVideoElement, clip: Clip, fail: () => voi
           if (legal) events?.frame(ms);
           // Request the cut from the last legal frame rather than presenting the authored tail.
           if (ms + .5 >= end - frameMs) {
+            if (!loops(clip)) {
+              video.pause();
+              events?.ended?.();
+              stop();
+              return;
+            }
             try {
               events?.seamStart(legal);
               seam = setTimeout(failed, 5000);

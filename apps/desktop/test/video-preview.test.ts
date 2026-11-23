@@ -16,7 +16,7 @@ test('old clip remains visible until latest first frame; outdated readiness and 
   const pending: { clip: Clip; slot: number; signal: AbortSignal; resolve: () => void; reject: () => void }[] = [];
   const swaps: string[] = [];
   const errors: Clip[] = [];
-  const player = createClipSwitcher({ prepare(slot, clip, signal) {
+  const player = createClipSwitcher({ canReuse: () => true, prepare(slot, clip, signal) {
     return new Promise<void>((resolve, reject) => pending.push({ clip, slot, signal, resolve, reject: () => reject(new Error()) }));
   }, reveal: (slot, clip) => { swaps.push(`${slot}:${clip}`); }, fail: clip => { errors.push(clip); } });
   const idle = player.show('idle', 1);
@@ -70,12 +70,77 @@ test('only fixed same-origin resources are served and WebM single ranges are bou
 
 test('a naturally ended work clip is replayable without exposing a blank frame or accepting duplicate ends', async () => {
   const swaps: number[] = [];
-  const player = createClipSwitcher({ prepare: async () => {}, reveal: slot => { swaps.push(slot); }, fail: () => assert.fail() });
+  const player = createClipSwitcher({ canReuse: () => true, prepare: async () => {}, reveal: slot => { swaps.push(slot); }, fail: () => assert.fail() });
   await player.show('work', 1);
   assert.deepEqual(player.onEnded(0), { clip: 'work', generation: 1 });
   assert.equal(player.onEnded(0), undefined);
   await player.show('work', 2);
   assert.deepEqual(swaps, [0, 1]);
+});
+
+test('a release clip can reuse the active decoder slot and retire the old clip', async () => {
+  const events: string[] = [];
+  let resolveRelease!: () => void;
+  const player = createClipSwitcher({ canReuse: () => true,
+    retarget: (_slot, from, to) => from === 'move02' && to === 'release-move02',
+    prepare(slot, clip) {
+      events.push(`prepare:${slot}:${clip}`);
+      return clip === 'release-move02' ? new Promise<void>(resolve => { resolveRelease = resolve; }) : Promise.resolve();
+    }, reveal: (slot, clip) => { events.push(`shown:${slot}:${clip}`); }, fail: () => assert.fail() });
+  await player.show('move02', 1);
+  const release = player.show('release-move02', 2);
+  assert.deepEqual(events, ['prepare:0:move02', 'shown:0:move02', 'prepare:0:release-move02']);
+  assert.equal(player.onEnded(0), undefined, 'a retargeting slot cannot emit the outgoing clip end');
+  resolveRelease();
+  await release;
+  assert.equal(events.at(-1), 'shown:0:release-move02');
+});
+
+test('a clip ending during its replacement must prepare a fresh frame before it can be shown again', async () => {
+  const events: string[] = [];
+  let finishReplay!: () => void;
+  const player = createClipSwitcher({ canReuse: () => true, prepare(slot, clip, signal) {
+    events.push(`prepare:${slot}:${clip}`);
+    if (clip === 'move02') return new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+    if (slot === 1) return new Promise(resolve => { finishReplay = resolve; });
+    return Promise.resolve();
+  }, reveal: (slot, clip, generation) => { events.push(`shown:${slot}:${clip}:${generation}`); }, fail: () => assert.fail() });
+  await player.show('once-idle', 1);
+  const replacement = player.show('move02', 2);
+  assert.equal(player.onEnded(0), undefined, 'retire the old clip without reporting a stale end');
+  const replay = player.show('once-idle', 3);
+  await replacement;
+  assert.deepEqual(events, ['prepare:0:once-idle', 'shown:0:once-idle:1', 'prepare:1:move02', 'prepare:1:once-idle']);
+  finishReplay();
+  await replay;
+  assert.equal(events.at(-1), 'shown:1:once-idle:3');
+});
+
+test('an already terminal media element cannot be reused before its DOM event dispatches', async () => {
+  const swaps: number[] = [];
+  let usable = true;
+  const player = createClipSwitcher({ canReuse: () => usable, prepare: async () => {},
+    reveal: slot => { swaps.push(slot); }, fail: () => assert.fail() });
+  await player.show('idle', 1);
+  await player.show('idle', 2);
+  usable = false;
+  await player.show('idle', 3);
+  assert.deepEqual(swaps, [0, 0, 1]);
+});
+
+test('runtime failure retires only the current owner and is acknowledged just once', async () => {
+  const swaps: number[] = [];
+  const player = createClipSwitcher({ canReuse: () => true, prepare: async () => {},
+    reveal: slot => { swaps.push(slot); }, fail: () => assert.fail() });
+  await player.show('release-move02', 1);
+  await player.show('release-move02', 2);
+  assert.equal(player.onFailed(0, 1), undefined);
+  await player.show('release-move02', 3);
+  assert.deepEqual(player.onFailed(0, 3), { clip: 'release-move02', generation: 3 });
+  assert.equal(player.onFailed(0, 3), undefined);
+  await player.show('release-move02', 4);
+  assert.deepEqual(swaps, [0, 0, 0, 1]);
+  assert.equal(player.onFailed(0, 4), undefined);
 });
 
 test('locomotion and release use fixed in-clip ranges without new public files', async () => {
@@ -97,7 +162,7 @@ test('locomotion and release use fixed in-clip ranges without new public files',
 test('display acknowledgements carry the latest request even when a canceled clip is requested again', async () => {
   const pending: (() => void)[] = [];
   const frames: unknown[] = [];
-  const player = createClipSwitcher({ prepare: () => new Promise<void>(resolve => pending.push(resolve)),
+  const player = createClipSwitcher({ canReuse: () => true, prepare: () => new Promise<void>(resolve => pending.push(resolve)),
     reveal: (...args) => frames.push(args), fail: () => assert.fail() });
   const first = player.show('work', 1);
   const second = player.show('idle', 2);
@@ -113,12 +178,14 @@ class VideoFixture extends EventTarget {
   src = '';
   currentTime = 0;
   duration = 11;
+  readyState = 0;
   seeking = false;
   muted = false;
   loop = false;
   playing = false;
+  loads = 0;
   private callback?: (now: number, meta: { mediaTime: number }) => void;
-  load() {}
+  load() { this.loads++; }
   pause() { this.playing = false; }
   play() { this.playing = true; return Promise.resolve(); }
   removeAttribute() { this.src = ''; }
@@ -161,6 +228,42 @@ test('a segment seeks before play, rejects intro frames and loops through the sa
   assert.equal(video.currentTime, 7.5);
 });
 
+test('the companion rebound plays only its pinned jump range once and reports its generation end', async () => {
+  const { prepareFirstFrame, keepSegment } = await import('../src/video-preview/video-segment.ts');
+  const video = new VideoFixture();
+  let ended = false;
+  const ready = prepareFirstFrame(video.port, 'companion-rebound', new AbortController().signal);
+  video.dispatchEvent(new Event('loadedmetadata'));
+  assert.equal(video.currentTime, 3.75);
+  video.frame(3.75);
+  await ready;
+  const stop = keepSegment(video.port, 'companion-rebound', () => assert.fail('range decode failed'), {
+    frame() {}, seamStart() {}, seamEnd() {}, ended() { ended = true; },
+  });
+  video.frame(5.26);
+  assert.equal(ended, true);
+  assert.equal(video.playing, false);
+  stop();
+});
+
+test('a prepared release can continue on the active decoder without seeking or reloading the WebM', async () => {
+  const { prepareFirstFrame } = await import('../src/video-preview/video-segment.ts');
+  const video = new VideoFixture();
+  const initial = prepareFirstFrame(video.port, 'move02', new AbortController().signal);
+  video.readyState = 1;
+  video.dispatchEvent(new Event('loadedmetadata'));
+  video.readyState = 2;
+  video.frame(4.75);
+  await initial;
+  video.currentTime = 5.75;
+  const loads = video.loads;
+  const release = prepareFirstFrame(video.port, 'release-move02', new AbortController().signal, undefined, true);
+  assert.equal(video.loads, loads);
+  assert.equal(video.currentTime, 5.75, 'already decoded frames in the release interval need no seek');
+  video.frame(5.79);
+  await release;
+});
+
 test('aborted segment preparation cannot react to late metadata or leave a decoder playing', async () => {
   const { prepareFirstFrame } = await import('../src/video-preview/video-segment.ts');
   const video = new VideoFixture();
@@ -192,6 +295,10 @@ test('the original clip catalog is complete; playback and internal movement-loop
   assert.deepEqual(clipSource('full-move03left'), { file: 'move03left', facing: 'left' });
   assert.equal(loops('full-move03left'), false);
   assert.equal(loops('move03left'), true);
+  assert.equal(loops('companion-hover'), true);
+  assert.equal(loops('companion-wave'), false);
+  assert.equal(loops('companion-rebound'), false);
+  assert.deepEqual(clipSource('companion-rebound'), { file: 'companion-jump', range: [3750, 5300] });
 });
 
 test('pose rectangle matches the pinned Qt bottom anchor, overscan and absolute-source flight correction', async () => {
@@ -264,13 +371,15 @@ test('the fixed caption font route refuses missing, loose or unapproved bytes', 
 test('the companion origin serves only its idle, fixed UI and prevalidated local font', async t => {
   const folder = await mkdtemp(join(tmpdir(), 'pet-companion-route-'));
   t.after(() => rm(folder, { force: true, recursive: true }));
-  for (const [name, contents] of [['index.html', 'page'], ['idle.webm', 'idle'], ['work.webm', 'not a companion clip']]) {
+  for (const [name, contents] of [['index.html', 'page'], ['idle.webm', 'idle'], ['companion-hover.webm', 'hover'], ['work.webm', 'not a companion clip']]) {
     await writeFile(join(folder, name!), contents!);
   }
   await writeFile(join(folder, 'caption-font.ttf'), 'unvalidated disk file');
   const get = (path: string, host = 'companion', font?: ArrayBuffer, method = 'GET') =>
     previewResponse(folder, new Request(`pet-video://${host}/${path}`, { method }), folder, font, 'companion');
   assert.equal(await (await get('idle.webm')).text(), 'idle');
+  assert.equal(await (await get('companion-hover.webm')).text(), 'hover');
+  assert.equal((await previewResponse(folder, new Request('pet-video://preview/companion-hover.webm'))).status, 404);
   assert.equal(await (await get('index.html')).text(), 'page');
   const validatedFont = new TextEncoder().encode('validated bytes fixture').buffer;
   assert.equal((await get('caption-font.ttf')).status, 404); // Never read arbitrary bytes from disk.
@@ -283,7 +392,7 @@ test('the companion origin serves only its idle, fixed UI and prevalidated local
   assert.equal(head.status, 200);
   assert.equal(head.headers.get('content-length'), String(validatedFont.byteLength));
   assert.equal(await head.text(), '');
-  for (const path of ['work.webm', 'cover.png', 'idle.webm?source=other', 'captions.json', 'caption-font.ttf?source=other']) {
+  for (const path of ['work.webm', 'companion-jump.webm', 'cover.png', 'idle.webm?source=other', 'captions.json', 'caption-font.ttf?source=other']) {
     assert.equal((await get(path, 'companion', validatedFont)).status, 404);
   }
   assert.equal((await get('idle.webm', 'preview')).status, 404);

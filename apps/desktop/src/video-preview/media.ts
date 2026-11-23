@@ -3,7 +3,7 @@ import { constants, createReadStream } from 'node:fs';
 import { lstat, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { mediaFiles } from './playback';
+import { companionClips, mediaFiles } from './playback';
 
 import { companionHost, previewScheme } from './video-role';
 export { previewURL, previewScheme } from './video-role';
@@ -30,7 +30,9 @@ export async function readCaptionFont(privateMediaDirectory: string): Promise<Ar
 
 const routes = new Map<string, string>([
   ['index.html', 'text/html; charset=utf-8'], ['renderer.js', 'text/javascript; charset=utf-8'],
-  ['style.css', 'text/css; charset=utf-8'], [captionFont, 'font/ttf'], ...mediaFiles.map(clip => [`${clip}.webm`, 'video/webm'] as const),
+  ['style.css', 'text/css; charset=utf-8'], [captionFont, 'font/ttf'],
+  ...mediaFiles.map(clip => [`${clip}.webm`, 'video/webm'] as const),
+  ...companionClips.map(clip => [`${clip}.webm`, 'video/webm'] as const),
 ]);
 export const maxMediaBytes = 32 * 1024 * 1024;
 const policy = "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; media-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
@@ -49,7 +51,8 @@ export async function previewResponse(folder: string, request: Request, mediaFol
   const name = url.pathname.slice(1);
   const type = routes.get(name);
   if (url.protocol !== `${previewScheme}:` || url.host !== host || url.username || url.password || url.search || url.hash || !type ||
-      (host === companionHost && type === 'video/webm' && name !== 'idle.webm')) {
+      (host === companionHost && type === 'video/webm' && name !== 'idle.webm' && !companionClips.some(clip => name === `${clip}.webm`)) ||
+      (host !== companionHost && type === 'video/webm' && companionClips.some(clip => name === `${clip}.webm`))) {
     return new Response(null, { status: 404 });
   }
   if (request.method !== 'GET' && request.method !== 'HEAD') return new Response(null, { status: 405 });

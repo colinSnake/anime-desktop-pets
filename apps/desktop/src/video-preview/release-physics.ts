@@ -29,21 +29,31 @@ SOFTWARE.
 import type { Point, Sample } from './motion';
 
 const maximumSpeed = 3600;
+const minimumSampleSpan = 20 - 1e-6;
+const terminalWindow = 60;
 const step = 1 / 240;
 const friction = 2.5;
 export type Edges = { left: number; top: number; right: number; bottom: number };
 
-export function estimateReleaseVelocity(trail: readonly Sample[], now: number): Point | undefined {
-  const samples = trail.filter(p => [p.time, p.x, p.y].every(Number.isFinite) && now - p.time >= 0 && now - p.time <= 150);
-  const first = samples[0], last = samples.at(-1);
-  if (!first || !last || now - last.time >= 80 - 1e-6 || last.time - first.time < 20 - 1e-6) return;
+export function freshReleaseSample(now: number, time: number): boolean {
+  const age = now - time;
+  return age >= 0 && age < 80 - 1e-6;
+}
+
+const releaseSamples = (trail: readonly Sample[], now: number) => trail.filter(p =>
+  Number.isFinite(p.time) && Number.isFinite(p.x) && Number.isFinite(p.y) && now - p.time >= 0 && now - p.time <= 150);
+
+function fittedReleaseVelocity(samples: readonly Sample[], now: number, start: number): Point | undefined {
+  const first = samples[start], last = samples.at(-1);
+  if (!first || !last || !freshReleaseSample(now, last.time) || last.time - first.time < minimumSampleSpan) return;
   const seconds = (last.time - first.time) / 1000;
   const vx = (last.x - first.x) / seconds, vy = (last.y - first.y) / seconds;
   const base = Math.hypot(vx, vy);
   if (base < 280) return;
   let previous = first;
   const segments: { speed: number; time: number }[] = [];
-  for (const sample of samples.slice(1)) {
+  for (let i = start + 1; i < samples.length; i++) {
+    const sample = samples[i]!;
     const dt = (sample.time - previous.time) / 1000;
     if (dt < .008 - 1e-9) continue;
     segments.push({ speed: Math.hypot(sample.x - previous.x, sample.y - previous.y) / dt, time: sample.time });
@@ -55,6 +65,24 @@ export function estimateReleaseVelocity(trail: readonly Sample[], now: number): 
   const raw = .5 * (base + peak) * (1 + Math.min(Math.max(accel, 0) / 8000, 1) * .6);
   const speed = -maximumSpeed * Math.expm1(-raw / maximumSpeed);
   if (speed >= 280) return { x: vx / base * speed, y: vy / base * speed };
+}
+
+export function estimateReleaseVelocity(trail: readonly Sample[], now: number): Point | undefined {
+  return fittedReleaseVelocity(releaseSamples(trail, now), now, 0);
+}
+
+/** Prefer the last segment with enough elapsed time; sparse input uses the reference window. */
+export function estimateTerminalReleaseVelocity(trail: readonly Sample[], now: number): Point | undefined {
+  const samples = releaseSamples(trail, now);
+  const last = samples.at(-1);
+  if (!last) return;
+  for (let i = samples.length - 2; i >= 0; i--) {
+    const span = last.time - samples[i]!.time;
+    if (span < minimumSampleSpan) continue;
+    if (span <= terminalWindow) return fittedReleaseVelocity(samples, now, i);
+    break;
+  }
+  return fittedReleaseVelocity(samples, now, 0);
 }
 
 const clamp = (n: number, min: number, max: number) => Math.min(Math.max(n, min), max);

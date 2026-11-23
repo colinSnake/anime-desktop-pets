@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
-import { DragSchedule, type DragPose } from '../src/video-preview/drag-schedule.ts';
-import { estimateReleaseVelocity, ReleaseSpring } from '../src/video-preview/release-physics.ts';
+import { DragSchedule, type DragPose, type DragScheduleOptions } from '../src/video-preview/drag-schedule.ts';
+import { estimateReleaseVelocity, estimateTerminalReleaseVelocity, ReleaseSpring } from '../src/video-preview/release-physics.ts';
 
 const bounds = { left: -800, top: 0, right: 500, bottom: 500 };
 const area = { x: -800, y: 0, width: 1500, height: 700 };
@@ -41,7 +41,7 @@ print(json.dumps([vel,rows]))`;
   assert.equal(spring.position().y, 460);
 });
 
-function session() {
+function session(options?: DragScheduleOptions) {
   let position = origin;
   let reduced = false;
   const poses: DragPose[] = [];
@@ -49,9 +49,107 @@ function session() {
   const faces: string[] = [];
   const drag = new DragSchedule({ position: () => position, size: () => ({ width: 200, height: 200 }), workArea: () => area,
     move: point => { position = point; }, show: pose => { poses.push(pose); }, face: face => { if (face) faces.push(face); },
-    onDrop: point => { drops.push(point); }, reducedMotion: () => reduced, random: () => 0 });
+    onDrop: point => { drops.push(point); }, reducedMotion: () => reduced, random: () => 0 }, options);
   return { drag, poses, drops, faces, position: () => position, reduced: () => { reduced = true; } };
 }
+
+test('release classification follows the final valid movement segment, not earlier speed', () => {
+  const slowThenFlick = [
+    { time: 0, x: 100, y: 100 }, { time: 30, x: 109, y: 100 }, { time: 65, x: 110, y: 100 },
+    { time: 100, x: 111, y: 100 }, { time: 140, x: 136, y: 100 },
+  ];
+  const fastThenBrake = [
+    { time: 0, x: 100, y: 100 }, { time: 30, x: 128, y: 100 }, { time: 60, x: 155, y: 100 },
+    { time: 90, x: 158, y: 100 }, { time: 120, x: 160, y: 100 },
+  ];
+  assert.ok((estimateTerminalReleaseVelocity(slowThenFlick, 145)?.x ?? 0) >= 280);
+  assert.equal(estimateTerminalReleaseVelocity(fastThenBrake, 125), undefined);
+  assert.equal(estimateTerminalReleaseVelocity(slowThenFlick, 221), undefined, 'stale releases remain inert');
+});
+
+test('idle-bounce release keeps the idle clip while applying the same spring physics', () => {
+  const { drag, poses, faces, drops, position, reduced } = session({ releaseMode: 'idle-bounce' });
+  drag.setMovement(false); // The companion does not expose an autonomous movement preference.
+  const moveAndRelease = (start: number, first: number, second: number) => {
+    drag.begin({ x: 100, y: 160 }, start);
+    drag.move({ x: 100 + first, y: 160 }, start + 30);
+    drag.move({ x: 100 + second, y: 160 }, start + 60);
+    return drag.finish(start + 65, true);
+  };
+  assert.equal(moveAndRelease(0, 10, 24), 'flick');
+  const start = position();
+  assert.deepEqual(drops, [start]);
+  drag.tick(81);
+  assert.notDeepEqual(position(), start);
+  for (let at = 97; at < 10_000 && drag.isAirborne; at += 16) drag.tick(at);
+  assert.equal(drag.needsTick, false, 'an idle-only bounce does not need a settled pose timer');
+  assert.equal(moveAndRelease(11_000, 14, 25), 'flick');
+  assert.equal(moveAndRelease(12_000, 40, 42), 'drop', 'braking before release does not bounce');
+  reduced();
+  assert.equal(moveAndRelease(13_000, 30, 60), 'drop');
+  assert.deepEqual(poses, [], 'never change the idle animation');
+  assert.deepEqual(faces, [], 'idle has no directional rendering');
+});
+
+test('companion flick uses only its available rebound and exits the hover loop when rebound media is missing', () => {
+  const run = (companionRebound: boolean) => {
+    const state = session({ releaseMode: 'companion', companionHover: true, companionRebound });
+    state.drag.begin({ x: 100, y: 160 }, 0);
+    state.drag.move({ x: 120, y: 160 }, 30);
+    state.drag.move({ x: 145, y: 160 }, 60);
+    assert.deepEqual(state.poses, ['companion-hover']);
+    assert.equal(state.drag.finish(65, true), 'flick');
+    return state;
+  };
+
+  const withRebound = run(true);
+  assert.deepEqual(withRebound.poses, ['companion-hover', 'companion-rebound']);
+
+  const withoutRebound = run(false);
+  assert.deepEqual(withoutRebound.poses, ['companion-hover', 'idle']);
+  assert.ok(withoutRebound.drag.isAirborne, 'spring physics remains independent of optional animation media');
+  withoutRebound.drag.tick(81);
+  assert.equal(withoutRebound.poses.at(-1), 'idle', 'the missing clip cannot leave hover looping while the spring moves');
+});
+
+test('flick velocity follows the pointer after the pet reaches a screen edge', () => {
+  for (const releaseMode of ['companion', 'animation'] as const) {
+    let position = { x: 270, y: 110 };
+    const poses: DragPose[] = [];
+    const drops: { x: number; y: number }[] = [];
+    const drag = new DragSchedule({
+      position: () => position,
+      size: () => ({ width: 200, height: 200 }),
+      workArea: () => ({ x: 0, y: 0, width: 500, height: 500 }),
+      move: point => { position = point; },
+      show: pose => { poses.push(pose); },
+      face: () => {},
+      onDrop: point => drops.push(point),
+      reducedMotion: () => false,
+      random: () => 0,
+    }, { releaseMode, companionHover: true, companionRebound: true });
+
+    drag.begin({ x: 200, y: 160 }, 0);
+    drag.move({ x: 230, y: 160 }, 30);
+    drag.move({ x: 260, y: 160 }, 60);
+    drag.move({ x: 290, y: 160 }, 90);
+    assert.deepEqual(position, { x: 300, y: 110 }, 'the pet stays clamped to the work-area edge');
+    assert.equal(drag.finish(100, true, { x: 320, y: 160 }), 'flick');
+    assert.deepEqual(drops, [{ x: 300, y: 110 }], 'persist only the clamped release point');
+    assert.equal(poses.at(-1), releaseMode === 'companion' ? 'companion-rebound' : 'release-move02');
+  }
+});
+
+test('companion keeps its current pose on a stationary press or below-threshold pointer movement', () => {
+  const { drag, poses, drops } = session({ releaseMode: 'companion', companionHover: true });
+  drag.begin({ x: 100, y: 160 }, 0);
+  drag.tick(16);
+  drag.move({ x: 104, y: 164 }, 25);
+  drag.tick(32);
+  assert.equal(drag.finish(40, true), 'click');
+  assert.deepEqual(poses, []);
+  assert.deepEqual(drops, []);
+});
 
 test('press threshold, slow drag, and held-fast drag never turn into release animation', () => {
   const { drag, drops, poses, position } = session();
@@ -69,6 +167,43 @@ test('press threshold, slow drag, and held-fast drag never turn into release ani
   assert.deepEqual(drops, [{ x: 150, y: 110 }]);
   assert.deepEqual(position(), drops[0]);
   assert.ok(!poses.some(p => p.startsWith('release-')));
+});
+
+test('real release records its changed endpoint before computing velocity without requesting a held pose', () => {
+  const { drag, poses, drops, position } = session();
+  drag.begin({ x: 100, y: 160 }, 0);
+  drag.move({ x: 112, y: 160 }, 36);
+  const before = poses.length;
+  assert.equal(drag.finish(58, true, { x: 159, y: 140 }), 'flick');
+  assert.equal(poses.length, before + 1);
+  assert.ok(poses.at(-1)?.startsWith('release-'));
+  assert.deepEqual(position(), { x: 129, y: 90 });
+  assert.deepEqual(drops, [position()]);
+  assert.equal(drag.finish(60, true, { x: 165, y: 135 }), undefined);
+  assert.equal(drops.length, 1);
+});
+
+test('a stale trajectory saves the true endpoint but cannot make a fling, and cancel ignores the endpoint', () => {
+  const { drag, drops, position } = session();
+  drag.begin({ x: 100, y: 160 }, 0);
+  drag.move({ x: 112, y: 160 }, 36);
+  assert.equal(drag.finish(116, true, { x: 185, y: 160 }), 'drop');
+  assert.deepEqual(drops, [{ x: 155, y: 110 }]);
+  assert.equal(drag.isAirborne, false);
+  drag.begin({ x: 185, y: 160 }, 200);
+  assert.equal(drag.finish(240, false, { x: 250, y: 160 }), 'cancel');
+  assert.deepEqual(position(), drops[0]);
+  assert.equal(drops.length, 1);
+});
+
+test('release-only displacement uses the same drag and speed gates and small movement stays a click', () => {
+  const { drag, drops } = session();
+  drag.begin({ x: 100, y: 160 }, 0);
+  assert.equal(drag.finish(40, true, { x: 104, y: 163 }), 'click');
+  assert.deepEqual(drops, []);
+  drag.begin({ x: 100, y: 160 }, 100);
+  assert.equal(drag.finish(145, true, { x: 118, y: 160 }), 'drop');
+  assert.deepEqual(drops, [{ x: 88, y: 110 }]);
 });
 
 test('movement classification retains throttle, direction, and reduced-motion neutral pose', () => {
