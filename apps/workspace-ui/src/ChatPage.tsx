@@ -1,14 +1,16 @@
-import { Fragment, useEffect, useRef, type ReactNode } from 'react';
+import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { PackageReference } from '../../../packages/contracts/src/pets.ts';
+import type { ChatHistoryBridge, ChatHistoryDetail as SavedChatDetail } from '../../../packages/contracts/src/chat-history.ts';
+import { ChatHistoryDialog } from './ChatHistoryDialog.tsx';
+import { ChatHistoryDetail } from './ChatHistoryDetail.tsx';
+import { ChatAvatar, ChatMessage } from './ChatMessage.tsx';
 import { ChatMemoryCard } from './ChatMemoryCard.tsx';
 import { ChatComposer } from './ChatComposer.tsx';
 import { PetCover, petArt } from './PetCover.tsx';
 import { PetNookIcon } from './PetNookIcon.tsx';
-import type { ChatWorkspaceState, ChatWorkspaceController, ChatTurn, LocalChatShortcut } from './chat-session.ts';
+import type { ChatWorkspaceState, ChatWorkspaceController, LocalChatShortcut } from './chat-session.ts';
 
-const formatter = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
 const dateLabel = new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric' });
-export const replyTimestamp = (time: number, format = formatter): string => format.format(new Date(time));
 const shortcuts = [
  { text: '你是谁', label: '你是谁？', icon: 'identity' },
  { text: '查看目标进度', label: '查看目标进度', icon: 'goals' },
@@ -19,23 +21,38 @@ const shortcuts = [
 type ChatPageProps = {
  state: ChatWorkspaceState;
  controller?: ChatWorkspaceController;
+ history?: ChatHistoryBridge;
  reference?: PackageReference;
  appearance?: ReactNode;
  onOpenPets?: () => void;
  onOpenPetAgent?: (opener: HTMLElement) => void;
 };
 
-export function ChatPage({ state, controller, reference, appearance, onOpenPets, onOpenPetAgent }: ChatPageProps) {
+export function ChatPage({ state, controller, history, reference, appearance, onOpenPets, onOpenPetAgent }: ChatPageProps) {
  useEffect(() => { void controller?.refreshModels(); }, [controller]);
  const { session } = state;
  const character = state.characters.find(item => item.id === state.selectedId);
  const scrollport = useRef<HTMLDivElement>(null);
  const input = useRef<HTMLDivElement>(null);
  const options = useRef<HTMLDetailsElement>(null);
+ const [openHistory, setOpenHistory] = useState<{ petID: string; opener?: HTMLElement; entry?: SavedChatDetail; notice?: string }>();
+ const historyView = history && openHistory?.petID === character?.id ? openHistory : undefined;
+ const entry = historyView?.entry;
+ const backToHistory = () => setOpenHistory(current => current && { ...current, entry: undefined, notice: undefined });
+ const continueChat = () => {
+  if (!character || !entry || !controller) return;
+  if (!controller.continueConversation(character.id, entry)) {
+   setOpenHistory(current => current && { ...current, notice: '暂时无法切换会话。如有未发送的草稿，请先发送或清空草稿。' });
+   return;
+  }
+  setOpenHistory(undefined);
+  requestAnimationFrame(() => input.current?.focus({ preventScroll: true }));
+ };
+ useEffect(() => { setOpenHistory(undefined); }, [character?.id]);
  const lastId = session.turns.at(-1)?.id;
  useEffect(() => {
   const view = scrollport.current; if (view) view.scrollTop = view.scrollHeight;
- }, [lastId, session.pending, state.selectedId]);
+ }, [lastId, session.pending, state.selectedId, session.editorKey]);
  useEffect(() => {
   const dismiss = (event: PointerEvent) => {
    if (options.current?.open && event.target instanceof Node && !options.current.contains(event.target)) options.current.open = false;
@@ -49,9 +66,15 @@ export function ChatPage({ state, controller, reference, appearance, onOpenPets,
  };
  const hasTurns = !!session.turns.length || session.pending;
  const today = new Date().toDateString();
- return <section className="chat-page" aria-label="聊天" data-pet-art={petArt(reference)}>
+ return <section className="chat-page" aria-label="聊天" data-pet-art={petArt(reference)} onKeyDown={event => {
+  if (entry && event.key === 'Escape' && !event.defaultPrevented) { event.preventDefault(); backToHistory(); }
+ }}>
+  {entry && character && history && <ChatHistoryDetail key={`${character.id}/${entry.session.id}`} entry={entry} name={character.name} reference={reference}
+   readPage={before => history.detail({ petID: character.id, id: entry.session.id, before })}
+   onBack={backToHistory} pending={session.pending} notice={historyView?.notice} onContinue={controller && continueChat} />}
+  <div className="chat-live" hidden={!!entry}>
   <header className="chat-toolbar">
-   <div><h1>聊天</h1><p>和桌边的伙伴说说话。</p></div>
+   <div><h1>{session.title ?? '聊天'}</h1><p>{session.title ? '继续与桌边的伙伴聊天。' : '和桌边的伙伴说说话。'}</p></div>
    <div className="chat-toolbar-actions">
     {character && <div className="chat-role chat-control">
      <ChatAvatar reference={reference} />
@@ -75,6 +98,20 @@ export function ChatPage({ state, controller, reference, appearance, onOpenPets,
       const opener = options.current?.querySelector('summary');
       if (opener) { opener.focus(); onOpenPetAgent(opener); }
      }}>桌宠 Agent</button>}
+     {history && <button type="button" aria-haspopup="dialog" onClick={() => {
+      if (options.current) options.current.open = false;
+      setOpenHistory({ petID: character.id, opener: options.current?.querySelector('summary') ?? undefined });
+     }}>聊天历史</button>}
+     {session.canReturnToCurrent && <button type="button" disabled={session.pending} onClick={() => {
+      if (options.current) options.current.open = false;
+      if (controller?.returnToCurrentChat()) requestAnimationFrame(() => input.current?.focus({ preventScroll: true }));
+     }}>返回当前聊天</button>}
+     {state.detachedDrafts.map(draft => <button key={draft.id} type="button" disabled={!controller || !draft.enabled} onClick={() => {
+      if (controller?.openDetachedDraft(draft.id)) {
+       if (options.current) options.current.open = false;
+       requestAnimationFrame(() => input.current?.focus({ preventScroll: true }));
+      }
+     }}>恢复草稿 · {draft.label}</button>)}
      <button className="chat-clear-link" type="button" disabled={!controller || session.pending || !session.turns.length} onClick={() => {
       if (options.current) options.current.open = false;
       options.current?.querySelector('summary')?.focus();
@@ -92,6 +129,7 @@ export function ChatPage({ state, controller, reference, appearance, onOpenPets,
     <h2>还没有可以聊天的桌宠</h2><p>在「桌宠」添加一只伙伴，再回来聊聊。</p>
     {onOpenPets && <button type="button" className="chat-control" onClick={onOpenPets}><PetNookIcon name="pets" />前往桌宠</button>}
    </div> : hasTurns ? <div className="chat-messages chat-rail">
+    {session.hasEarlier && <p className="chat-day">此处仅显示近期消息。</p>}
     {session.turns.map((turn, index) => {
      const date = new Date(turn.createdAt);
      const day = date.toDateString();
@@ -127,23 +165,16 @@ export function ChatPage({ state, controller, reference, appearance, onOpenPets,
     <button type="button" disabled={!controller || state.canRetry === false} onClick={() => { void controller?.retry(); }}>重试</button>
     <button type="button" disabled={!controller || !!session.draft} onClick={() => { controller?.restoreDraft(); input.current?.focus(); }}>恢复输入</button>
    </div> : <p className="chat-status" role="status">{session.status}</p>}
-   <ChatComposer key={character.id} state={state} controller={controller} name={character.name} input={input} />
+   <ChatComposer key={session.editorKey ?? character.id} state={state} controller={controller} name={character.name} input={input} />
   </footer>}
-  {session.confirmingClear && <ClearChat onCancel={() => controller?.cancelClear()} onConfirm={() => controller?.confirmClear()} />}
+  {!entry && session.confirmingClear && <ClearChat onCancel={() => controller?.cancelClear()} onConfirm={() => controller?.confirmClear()} />}
+  </div>
+  {history && historyView && character && <ChatHistoryDialog key={character.id} petID={character.id} name={character.name}
+    pending={session.pending} bridge={history} opener={historyView.opener} reading={!!entry}
+    onCleared={() => { controller?.historyCleared(character.id); }}
+    onRead={selected => setOpenHistory(current => current === historyView ? { ...current, entry: selected } : current)}
+    onClose={() => setOpenHistory(undefined)} />}
  </section>;
-}
-function ChatAvatar({ reference }: { reference?: PackageReference }) {
- return <span className="chat-avatar"><PetCover reference={reference} avatar /></span>;
-}
-function ChatMessage({ turn, name, reference }: { turn: ChatTurn; name: string; reference?: PackageReference }) {
- const timestamp = replyTimestamp(turn.createdAt);
- return <article className={`chat-message chat-message-${turn.role}`} data-turn-id={turn.id} aria-label={turn.role === 'assistant' ? turn.localOnly ? '本机资料回复' : '助手回复' : '你的消息'}>
-  {turn.role === 'assistant' ? <><ChatAvatar reference={reference} /><div className="chat-reply">
-   <div className="chat-message-meta"><strong>{name}</strong>{turn.localOnly && <span className="chat-local-label"><PetNookIcon name="lock" />本机资料</span>}
-    <time dateTime={new Date(turn.createdAt).toISOString()} aria-label={`回复时间 ${timestamp}`} title={timestamp}>{timestamp.slice(0, 5)}</time>
-   </div><div className="chat-bubble">{turn.text}</div>
-  </div></> : <div className="chat-bubble">{turn.text}</div>}
- </article>;
 }
 function ClearChat({onCancel,onConfirm}:{onCancel():void;onConfirm():void}) {
  const cancel = useRef<HTMLButtonElement>(null);
@@ -166,5 +197,5 @@ function ClearChat({onCancel,onConfirm}:{onCancel():void;onConfirm():void}) {
   const first = buttons?.[0], last = buttons?.[buttons.length - 1];
   if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
- }} onCancel={event => { event.preventDefault(); onCancel(); }}><h2 id="chat-clear-title">清空本轮聊天？</h2><p id="chat-clear-copy">只清空本轮消息，未发送的草稿和角色资料会保留。</p><div className="button-row"><button type="button" className="button secondary" ref={cancel} onClick={onCancel}>取消</button><button type="button" className="button destructive" onClick={onConfirm}>清空聊天</button></div></dialog>;
+ }} onCancel={event => { event.preventDefault(); onCancel(); }}><h2 id="chat-clear-title">清空本轮聊天？</h2><p id="chat-clear-copy">重新开始聊天。已保存的历史、未发送的草稿和角色资料会保留。</p><div className="button-row"><button type="button" className="button secondary" ref={cancel} onClick={onCancel}>取消</button><button type="button" className="button destructive" onClick={onConfirm}>清空聊天</button></div></dialog>;
 }

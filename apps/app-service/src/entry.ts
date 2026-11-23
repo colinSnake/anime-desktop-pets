@@ -2,10 +2,12 @@ import { WorkspaceVideoClient } from './workspace-video-client.ts';
 import { CodexTaskFollowing } from './codex-task-following.ts';
 import { CodexTaskReaderProcess } from './codex-task-reader-process.ts';
 import { readCodexPresence } from './codex-presence.ts';
+import { ChatHistory } from './chat-history.ts';
 import { CharacterRepository } from "./characters/repository.ts";
 import { BubbleSpeech } from "./speech/bubble-speech.ts";
 import { isSpeechRuntimeConfig, LocalBubbleSpeechBackend } from "./speech/process-backend.ts";
 /** 由 Electron utility process 或测试 Node fork 引导；不提供公共 CLI 服务。 */
+import { PrivateDirectory } from './models/private-directory.ts';
 import { ModelManagement } from "./models/management.ts";
 import { MacKeychainBackend } from "./models/mac-keychain.ts";
 import { PetWorkspace } from "./pet-workspace.ts";
@@ -19,9 +21,9 @@ import { PetPackageImporter } from "./pet-package-importer.ts";
 
 import { longmei as defaultVideoPet, dafeiyu, samePetPackage } from "../../../packages/contracts/src/built-in-pets.ts";
 
-type WorkspaceBootstrap = { root: string; catalog: CatalogEntry[]; packageToolPath?: string };
+type WorkspaceBootstrap = { root: string; catalog: CatalogEntry[]; packageToolPath?: string; packageProfileRoot?: string };
 function validWorkspaceBootstrap(value: unknown): value is WorkspaceBootstrap {
-  return shape(value, ["root", "catalog", "packageToolPath"]) && typeof value.root === "string" && isAbsolute(value.root) && Array.isArray(value.catalog) && value.catalog.length <= 32 && value.catalog.every(catalogEntry) && (value.packageToolPath === undefined || typeof value.packageToolPath === "string" && isAbsolute(value.packageToolPath));
+  return shape(value, ["root", "catalog", "packageToolPath", "packageProfileRoot"]) && typeof value.root === "string" && isAbsolute(value.root) && Array.isArray(value.catalog) && value.catalog.length <= 32 && value.catalog.every(catalogEntry) && (value.packageToolPath === undefined || typeof value.packageToolPath === "string" && isAbsolute(value.packageToolPath)) && (value.packageProfileRoot === undefined || typeof value.packageProfileRoot === "string" && isAbsolute(value.packageProfileRoot));
 }
 
 type ParentPort = {
@@ -115,9 +117,15 @@ function message(value: unknown) {
     };
     if (input.workspaceVideo === true) video = new WorkspaceVideoClient(send, undefined, playerSpeech);
     const workspaceOptions = input.workspace as WorkspaceBootstrap | undefined;
+    const businessRoot = input.businessRoot;
+    if (businessRoot !== undefined) {
+      if (process.platform !== 'darwin' || typeof businessRoot !== 'string' || !isAbsolute(businessRoot) || businessRoot.includes('\0') ||
+        workspaceOptions?.root !== join(businessRoot, 'workspace') || input.modelsRoot !== join(businessRoot, 'models')) throw new Error('invalid_data_root');
+      await new PrivateDirectory(businessRoot, false).ready();
+    }
     workspace = workspaceOptions ? await (async () => {
       const packageImporter = workspaceOptions.packageToolPath ? new PetPackageImporter({
-        root: workspaceOptions.root, scriptPath: workspaceOptions.packageToolPath, python: python as string | undefined,
+        root: workspaceOptions.packageProfileRoot ?? workspaceOptions.root, scriptPath: workspaceOptions.packageToolPath, python: python as string | undefined,
       }) : undefined;
       const catalog = [...workspaceOptions.catalog];
       if (packageImporter) {
@@ -130,7 +138,7 @@ function message(value: unknown) {
           workspaceOptions.catalog.some(entry => entry.launchable === true && samePetPackage(entry, pet.package)),
         create: pet => video!.controller(pet.id, pet.package),
       });
-      return new PetWorkspace({ ...workspaceOptions, catalog, playerMode: video ? 'video' : undefined,
+      return new PetWorkspace({ ...workspaceOptions, requirePrivate: businessRoot !== undefined, catalog, playerMode: video ? 'video' : undefined,
         importOne: packageImporter?.importOne.bind(packageImporter), lifecycle,
         onPauseRequested: () => { taskFollowing?.setEnabled(false); void speech?.pause().catch(() => {}); },
         stopAdditional: () => speech?.pause().then(() => true) ?? Promise.resolve(true),
@@ -160,12 +168,13 @@ function message(value: unknown) {
     service = createService({
       token,
       models,
+      chatHistory: typeof businessRoot === 'string' ? new ChatHistory(businessRoot) : undefined,
       // The normal desktop service always composes the SDK route. Missing
       // Node/worker/SDK fails before reading a model Key.
       chatRuntime: models && createHarnessRuntime({
         worker: typeof __dirname === 'string' ? join(__dirname, 'harness-worker.mjs') : '',
         executable: typeof input.harnessExecutable === 'string' ? input.harnessExecutable : (parentPort ? '' : process.execPath),
-        privateRoots: [input.modelsRoot, workspaceOptions?.root].filter((value): value is string => typeof value === 'string'),
+        privateRoots: [businessRoot, input.modelsRoot, workspaceOptions?.root].filter((value): value is string => typeof value === 'string'),
       }),
       speech,
       characters: process.platform === "darwin" && workspaceOptions ? new CharacterRepository(join(workspaceOptions.root, "characters")) : undefined,
@@ -176,6 +185,7 @@ function message(value: unknown) {
         python: python as string | undefined,
       }),
     });
+    if (businessRoot && !(await workspace?.list())?.ok) throw new Error('workspace_storage_unavailable');
     await service.listen({ host: "127.0.0.1", port: 0 });
     const address = service.server.address();
     if (!address || typeof address === "string")

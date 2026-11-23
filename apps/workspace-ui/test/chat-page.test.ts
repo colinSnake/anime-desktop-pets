@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { ChatPage, replyTimestamp } from '../src/ChatPage.tsx';
+import { ChatPage } from '../src/ChatPage.tsx';
+import { replyTimestamp } from '../src/ChatMessage.tsx';
 import { ChatWorkspaceController, type ChatRequest } from '../src/chat-session.ts';
 import { WorkspaceView } from '../src/App.tsx';
 const diagnostics={busy:false,error:'',onRefresh(){},onProbe(){},onStartPlayer(){},onStopPlayer(){}};
@@ -43,7 +44,7 @@ test('waiting offers stop instead of send and keeps next-question editing availa
 test('clear confirmation preserves the conversation until confirmed and errors retain restore/retry actions',async()=>{
  const c=create(async()=>{throw Error('/private');});c.edit('问题');await c.send();
  assert.match(render(c),/重试/);assert.match(render(c),/恢复输入/);assert.doesNotMatch(render(c),/private/);
- c.requestClear();assert.match(render(c),/<dialog[^>]*role="alertdialog"/);assert.match(render(c),/只清空本轮消息/);
+ c.requestClear();assert.match(render(c),/<dialog[^>]*role="alertdialog"/);assert.match(render(c),/已保存的历史、未发送的草稿和角色资料会保留/);
  assert.equal(c.getSnapshot().session.turns.length,1);c.cancelClear();assert.doesNotMatch(render(c),/role="alertdialog"/);
 });
 test('input counter exposes rather than silently truncates overlong drafts',()=>{
@@ -167,4 +168,21 @@ test('composer and adjacent memory proposal disclose the local route and require
  const html = render(c);
  assert.match(html, /data-turn-id="[^"]+"[\s\S]*给龙妹的记忆提案[\s\S]*示例 &lt;b&gt;正文&lt;\/b&gt;[\s\S]*保存为记忆[\s\S]*忽略/);
  assert.doesNotMatch(html, /已记住|<b>正文<\/b>/);
+});
+
+test('the chat options expose retained drafts by conversation label, without showing draft content', async () => {
+ const c = new ChatWorkspaceController(undefined, undefined, {
+  list: async () => ({ ok: true, models: [], persistentConversations: true }), cancel: async () => {},
+  send: async () => { throw Error('must not send'); },
+ }, undefined, true);
+ c.syncCharacters([{ id: 'pet-one', name: '合成桌宠' }]); await c.refreshModels();
+ const completedAt = 1700000000000;
+ assert.equal(c.continueConversation('pet-one', { session: { id: crypto.randomUUID(), number: 14, completedAt },
+  turns: [{ requestID: crypto.randomUUID(), user: '旧问题', assistant: '旧回答', completedAt }], hasEarlier: false }), true);
+ c.edit('未发送的合成正文');
+ assert.equal(c.returnToCurrentChat(), true);
+ assert.equal(c.historyCleared('pet-one'), true);
+ const html = render(c);
+ assert.match(html, /<button[^>]*>恢复草稿 · 会话 14<\/button>/);
+ assert.doesNotMatch(html, /未发送的合成正文/);
 });

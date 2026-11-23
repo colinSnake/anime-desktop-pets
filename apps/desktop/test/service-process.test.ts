@@ -397,3 +397,30 @@ test('workspace video uses the private utility channel for frames, pause and shu
   await service.close(); // The pending opening must receive its stop acknowledgement before exit.
   assert.deepEqual(stopped, [id, id]);
 });
+
+
+test('the selected macOS business root reaches authenticated history in the real service process', { skip: process.platform !== 'darwin' }, async () => {
+  const { mkdir, mkdtemp, realpath, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { LocalDataRoot } = await import('../src/local-data-root.ts');
+  const base = await mkdtemp(join(await realpath(tmpdir()), 'pet-service-adpets-'));
+  const home = join(base, 'home');
+  await mkdir(home, { mode: 0o700 });
+  const { root: businessRoot } = await new LocalDataRoot(home, join(base, 'electron')).select();
+  const pkg = { id: 'test.pet', version: '1.0.0' };
+  const service = new ServiceProcess(() => transport(fork(resolve('apps/app-service/src/entry.ts'), [], {
+    execArgv: ['--import', 'tsx'], stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+  })), { guardianPath, workerPath: resolve('apps/runtime-bridge/worker.py'), businessRoot,
+    modelsRoot: join(businessRoot, 'models'), workspace: { root: join(businessRoot, 'workspace'), catalog: [{ ...pkg, name: '合成桌宠' }] } });
+  try {
+    await service.start();
+    const result = await service.petRequest('add', { expectedRevision: 0, package: pkg });
+    assert.ok(result.ok);
+    const petID = result.workspace.instances[0]!.id;
+    assert.deepEqual(await service.chatHistory('list', { petID }), { ok: true, page: { rows: [], nextBefore: null } });
+    assert.deepEqual(await service.chatHistory('detail', { petID, id: '0f000000-0000-4000-8000-000000000001' }), { ok: false, error: 'not_found' });
+    assert.deepEqual(await service.chatHistory('clear', { petID, confirmed: true }), { ok: true });
+    assert.deepEqual(await service.chatHistory('list', { petID: 'unregistered' }), { ok: false, error: 'not_found' });
+  } finally { await service.close(); await rm(base, { recursive: true, force: true }); }
+});

@@ -1,3 +1,4 @@
+import { textDraft } from '../src/chat-draft.ts';
 import type { OnlineChatInput, ChatSendResult } from '../../../packages/contracts/src/online-chat.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -263,4 +264,195 @@ test('editor drafts keep semantic offsets per pet, reject delayed cross-pet even
  c.edit('下一条');
  assert.equal(await c.retry(),false);
  assert.equal(c.getSnapshot().session.draft,'下一条');
+});
+
+const savedID = '8f000000-0000-4000-8000-000000000001';
+const savedTurn = { requestID: '8f000000-0000-4000-8000-000000000002', user: '合成历史提问', assistant: '合成历史回复', completedAt: 1700000000000 };
+const savedDetail = { session: { id: savedID, number: 14, completedAt: savedTurn.completedAt }, turns: [savedTurn], hasEarlier: false };
+
+test('resuming is explicit, preserves per-session drafts, and sends the saved ID with the selected model', async () => {
+ const sent: OnlineChatInput[] = [];
+ const c = new ChatWorkspaceController(undefined, undefined, {
+  list: async () => ({ ok: true, models: onlineOptions, persistentConversations: true }), cancel: async () => {},
+  send: async input => { sent.push(input); return { ok: true, requestID: input.requestID, text: '续聊回复', replayable: true }; },
+ }, undefined, true);
+ c.syncCharacters(characters); await c.refreshModels();
+ c.edit('当前聊天草稿');
+ const oldKey = c.getSnapshot().session.editorKey;
+ assert.equal(c.continueConversation('pet-two', savedDetail), false);
+ assert.equal(c.continueConversation('pet-one', savedDetail), true);
+ assert.equal(c.getSnapshot().session.title, '会话 14');
+ assert.deepEqual(c.getSnapshot().session.turns.map(turn => turn.text), ['合成历史提问', '合成历史回复']);
+ assert.equal(c.editDraft('pet-one', textDraft('迟到的旧输入'), oldKey), false);
+ c.edit('这条是续聊草稿');
+ assert.equal(await c.send(), false, 'the destination needs an explicit choice when opening saved history');
+ c.returnToCurrentChat();
+ assert.equal(c.getSnapshot().session.draft, '当前聊天草稿');
+ assert.equal(c.continueConversation('pet-one', savedDetail), true);
+ assert.equal(c.getSnapshot().session.draft, '这条是续聊草稿');
+ c.selectModel(c.getSnapshot().models[1]!.id);
+ assert.equal(sent.length, 0);
+ assert.equal(await c.send(), true);
+ assert.deepEqual(sent[0]?.route, onlineOptions[1]!.route);
+ assert.deepEqual(sent[0]?.conversation, { id: savedID, mode: 'resume' });
+ assert.deepEqual(sent[0]?.history, []);
+ c.selectModel(c.getSnapshot().models[0]!.id); c.edit('再切另一个模型');
+ assert.equal(await c.send(), true);
+ assert.deepEqual(sent[1]?.conversation, sent[0]?.conversation);
+ assert.deepEqual(c.getSnapshot().session.turns.slice(-2).map(turn => turn.text), ['再切另一个模型', '续聊回复']);
+});
+
+test('new durable turns keep one ID, do not switch in flight, and start afresh after clearing saved history', async () => {
+ const sent: OnlineChatInput[] = [], cancelled: string[] = [];
+ const reply = deferred<ChatSendResult>();
+ const c = new ChatWorkspaceController(undefined, undefined, {
+  list: async () => ({ ok: true, models: onlineOptions, persistentConversations: true }), cancel: async id => { cancelled.push(id); },
+  send: async input => { sent.push(input); return sent.length === 1 ? reply.promise : { ok: true, requestID: input.requestID, text: '回复', replayable: true }; },
+ }, undefined, true);
+ c.syncCharacters(characters); await c.refreshModels();
+ c.edit('第一问'); const pending = c.send();
+ assert.equal(c.continueConversation('pet-one', savedDetail), false);
+ assert.deepEqual(cancelled, []);
+ assert.equal(sent[0]?.conversation?.mode, 'new');
+ reply.resolve({ ok: true, requestID: sent[0]!.requestID, text: '回复', replayable: true });
+ assert.equal(await pending, true);
+ c.edit('第二问'); assert.equal(await c.send(), true);
+ assert.deepEqual(sent[1]?.conversation, { id: sent[0]?.conversation?.id, mode: 'resume' });
+ c.edit('清历史也保留这条草稿');
+ assert.equal(c.historyCleared('pet-one'), true);
+ assert.equal(c.getSnapshot().session.draft, '清历史也保留这条草稿');
+ assert.equal(await c.send(), true);
+ assert.equal(sent[2]?.conversation?.mode, 'new');
+ assert.notEqual(sent[2]?.conversation?.id, sent[0]?.conversation?.id);
+ assert.deepEqual(sent[2]?.history, []);
+});
+
+test('a preview opened during generation cannot replace the newer live reply after completion', async () => {
+ const sent: OnlineChatInput[] = [];
+ const reply = deferred<ChatSendResult>();
+ const c = new ChatWorkspaceController(undefined, undefined, {
+  list: async () => ({ ok: true, models: onlineOptions, persistentConversations: true }), cancel: async () => {},
+  send: async input => { sent.push(input); return sent.length === 1 ? { ok: true, requestID: input.requestID, text: '先前回复', replayable: true } : reply.promise; },
+ }, undefined, true);
+ c.syncCharacters(characters); await c.refreshModels();
+ c.edit('先前问题'); assert.equal(await c.send(), true);
+ const oldPreview = { session: { id: sent[0]!.conversation!.id, number: 1, completedAt: savedTurn.completedAt },
+  turns: [{ ...savedTurn, requestID: sent[0]!.requestID, user: '先前问题', assistant: '先前回复' }], hasEarlier: false };
+ c.edit('新问题'); const pending = c.send();
+ assert.equal(c.continueConversation('pet-one', oldPreview), false);
+ reply.resolve({ ok: true, requestID: sent[1]!.requestID, text: '生成完成的新回复', replayable: true });
+ assert.equal(await pending, true);
+ assert.equal(c.continueConversation('pet-one', oldPreview), true);
+ assert.equal(c.getSnapshot().session.turns.at(-1)?.text, '生成完成的新回复');
+});
+
+test('a detached draft cannot be discarded when switching to another saved conversation', async () => {
+ const c = new ChatWorkspaceController(undefined, undefined, {
+  list: async () => ({ ok: true, models: onlineOptions, persistentConversations: true }), cancel: async () => {},
+  send: async () => ({ ok: false, error: 'invalid_request' }),
+ }, undefined, true);
+ c.syncCharacters(characters); await c.refreshModels();
+ assert.equal(c.continueConversation('pet-one', savedDetail), true);
+ c.edit('先留着这条草稿'); c.requestClear(); assert.equal(c.confirmClear(), true);
+ const other = { ...savedDetail, session: { ...savedDetail.session, id: crypto.randomUUID(), number: 15 } };
+ assert.equal(c.continueConversation('pet-one', other), false);
+ assert.equal(c.getSnapshot().session.draft, '先留着这条草稿');
+ c.edit(''); assert.equal(c.continueConversation('pet-one', other), true);
+});
+
+test('retry keeps its logical turn identifier even when the transport acknowledgement was lost', async () => {
+ const sent: OnlineChatInput[] = [];
+ const c = new ChatWorkspaceController(undefined, undefined, {
+  list: async () => ({ ok: true, models: onlineOptions, persistentConversations: true }), cancel: async () => {},
+  send: async input => {
+   sent.push(input);
+   return sent.length === 1 ? { ok: false, error: 'unavailable' } : { ok: true, requestID: input.requestID, text: '已提交的回复', replayable: true };
+  },
+ }, undefined, true);
+ c.syncCharacters(characters); await c.refreshModels();
+ c.edit('合成请求'); assert.equal(await c.send(), false);
+ assert.equal(await c.retry(), true);
+ assert.notEqual(sent[0]?.requestID, sent[1]?.requestID);
+ assert.match(sent[0]?.turnID ?? '', /^[0-9a-f-]{36}$/);
+ assert.equal(sent[0]?.turnID, sent[1]?.turnID);
+ assert.deepEqual(sent[0]?.conversation, sent[1]?.conversation);
+});
+
+test('clearing saved history preserves other conversations’ draft text and selection behind a recovery entry', async () => {
+ const sent: OnlineChatInput[] = [];
+ const c = new ChatWorkspaceController(undefined, undefined, {
+  list: async () => ({ ok: true, models: onlineOptions, persistentConversations: true }), cancel: async () => {},
+  send: async input => { sent.push(input); return { ok: true, requestID: input.requestID, text: '新会话回复', replayable: true }; },
+ }, undefined, true);
+ c.syncCharacters(characters); await c.refreshModels();
+ assert.equal(c.continueConversation('pet-one', savedDetail), true);
+ const draft = { text: '还没发出的会话草稿', selection: { anchor: 2, focus: 5 } };
+ c.editDraft('pet-one', draft);
+ c.selectModel(c.getSnapshot().models[1]!.id);
+ assert.equal(c.returnToCurrentChat(), true);
+ c.edit('当前聊天草稿');
+ assert.equal(c.historyCleared('pet-one'), true);
+ assert.equal(c.getSnapshot().session.draft, '当前聊天草稿');
+ const [parked] = c.getSnapshot().detachedDrafts ?? [];
+ assert.equal(parked?.label, '会话 14');
+ c.selectCharacter('pet-two');
+ assert.deepEqual(c.getSnapshot().detachedDrafts, []);
+ assert.equal(c.openDetachedDraft(parked!.id), false);
+ c.selectCharacter('pet-one');
+ assert.equal(c.openDetachedDraft(parked!.id), true);
+ assert.deepEqual(c.getSnapshot().session.draftSnapshot, draft);
+ assert.deepEqual(c.getSnapshot().session.turns, []);
+ assert.equal(c.historyCleared('pet-one'), true, 'repeated clears do not erase the preserved draft');
+ assert.equal(c.returnToCurrentChat(), true);
+ assert.equal(c.getSnapshot().session.draft, '当前聊天草稿');
+ assert.equal(c.openDetachedDraft(parked!.id), true);
+ assert.equal(await c.send(), true);
+ assert.equal(sent[0]?.conversation?.mode, 'new');
+ assert.notEqual(sent[0]?.conversation?.id, savedID);
+ assert.deepEqual(sent[0]?.route, onlineOptions[1]!.route);
+ assert.deepEqual(sent[0]?.history, []);
+});
+
+test('sending the same failed durable turn after changing models reconciles it without duplicating the user message', async () => {
+ const sent: OnlineChatInput[] = [];
+ const c = new ChatWorkspaceController(undefined, undefined, {
+  list: async () => ({ ok: true, models: onlineOptions, persistentConversations: true }), cancel: async () => {},
+  send: async input => {
+   sent.push(input);
+   if (sent.length === 1) return { ok: false, error: 'unavailable' };
+   if (sent.length === 2) return { ok: true, requestID: input.requestID, text: '已保存的原回复', replayable: true, recovered: true };
+   return { ok: true, requestID: input.requestID, text: '新回复', replayable: true };
+  },
+ }, undefined, true);
+ c.syncCharacters(characters); await c.refreshModels();
+ assert.equal(c.continueConversation('pet-one', savedDetail), true);
+ c.selectModel(c.getSnapshot().models[0]!.id); c.edit('合成问题');
+ assert.equal(await c.send(), false);
+ c.selectModel(c.getSnapshot().models[1]!.id);
+ assert.equal(c.getSnapshot().canRetry, false);
+ assert.equal(await c.send(), true);
+ assert.equal(sent[0]?.turnID, sent[1]?.turnID);
+ assert.notEqual(sent[0]?.requestID, sent[1]?.requestID);
+ assert.deepEqual(sent[0]?.conversation, sent[1]?.conversation);
+ assert.deepEqual(sent[1]?.route, onlineOptions[1]!.route);
+ assert.deepEqual(c.getSnapshot().session.turns.slice(-2).map(turn => turn.text), ['合成问题', '已保存的原回复']);
+ assert.equal(c.getSnapshot().session.turns.filter(turn => turn.text === '合成问题').length, 1);
+ assert.match(c.getSnapshot().session.status, /没有向模型发送/);
+ c.edit('下一问'); assert.equal(await c.send(), true);
+ assert.notEqual(sent[2]?.turnID, sent[1]?.turnID);
+ assert.deepEqual(sent[2]?.route, onlineOptions[1]!.route);
+});
+
+test('a page of older messages cannot replace the latest detail when resuming a saved conversation', async () => {
+ const c = new ChatWorkspaceController(undefined, undefined, {
+  list: async () => ({ ok: true, models: onlineOptions, persistentConversations: true }), cancel: async () => {},
+  send: async () => { throw Error('reading must not send'); },
+ }, undefined, true);
+ c.syncCharacters(characters); await c.refreshModels();
+ c.edit('现有聊天草稿');
+ const older = { ...savedDetail, before: crypto.randomUUID(), turns: [{ ...savedTurn, requestID: crypto.randomUUID(), user: '以前的提问' }] };
+ assert.equal(c.continueConversation('pet-one', older), false);
+ assert.equal(c.getSnapshot().session.draft, '现有聊天草稿');
+ assert.equal(c.continueConversation('pet-one', savedDetail), true);
+ assert.deepEqual(c.getSnapshot().session.turns.map(turn => turn.text), [savedTurn.user, savedTurn.assistant]);
 });

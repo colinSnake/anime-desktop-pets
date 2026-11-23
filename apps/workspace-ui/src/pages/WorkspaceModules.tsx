@@ -24,7 +24,7 @@ function useDraft<T>(initial: T): Draft<T> {
 }
 
 /** Remains mounted across navigation; renders only the active module. */
-export function WorkspaceModules({ page, workspace, diagnostics, speech, appearance, characters, selectedInstance, openWorkspaceData, agent }: { agent?: { name: string; opener: HTMLElement; chat: AgentChatAvailability; onClose(): void }; page: Module | null; workspace?: WorkspaceData; diagnostics: DiagnosticProps; speech?: SpeechBridge; appearance?: ReactNode; characters?: CharactersBridge; openWorkspaceData?: DesktopBridge['openWorkspaceData']; selectedInstance?: Pick<PetDefinition, 'id' | 'displayName' | 'package'> }) {
+export function WorkspaceModules({ page, workspace, diagnostics, speech, appearance, characters, selectedInstance, openWorkspaceData, migrateWorkspaceData, agent }: { agent?: { name: string; opener: HTMLElement; chat: AgentChatAvailability; onClose(): void }; page: Module | null; workspace?: WorkspaceData; diagnostics: DiagnosticProps; speech?: SpeechBridge; appearance?: ReactNode; characters?: CharactersBridge; openWorkspaceData?: DesktopBridge['openWorkspaceData']; migrateWorkspaceData?: DesktopBridge['migrateWorkspaceData']; selectedInstance?: Pick<PetDefinition, 'id' | 'displayName' | 'package'> }) {
   const identity = useDraft(emptyIdentity);
   const identityWorkspace = useMemo(() => characters ? new IdentityWorkspace(characters) : undefined, [characters]);
   const memoryWorkspace = useMemo(() => characters ? new RecordWorkspace(id => createMemorySession(characters, id)) : undefined, [characters]);
@@ -59,7 +59,7 @@ export function WorkspaceModules({ page, workspace, diagnostics, speech, appeara
     case 'identity': case 'memory': case 'goals': return dataPage(page);
     case 'speech': return <SpeechPage draft={speechDraft} bridge={speech} appearance={appearance} />;
     case 'live': return <LivePage draft={live} appearance={appearance} />;
-    case 'advanced': return <AdvancedPage appearance={appearance} openWorkspaceData={openWorkspaceData} diagnostics={diagnostics} />;
+    case 'advanced': return <AdvancedPage appearance={appearance} openWorkspaceData={openWorkspaceData} migrateWorkspaceData={migrateWorkspaceData} diagnostics={diagnostics} />;
     case null: return null;
   }
 }

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { IpcMainInvokeEvent } from 'electron';
+import { chatHistoryIPC } from '../../../packages/contracts/src/chat-history.ts';
 import { chatIPC } from '../../../packages/contracts/src/online-chat.ts';
 import { modelProbeIPC } from '../../../packages/contracts/src/model-probe.ts';
 import { MODEL_DISCOVERY_IPC, MODEL_IPC } from '../src/model-ipc.ts';
@@ -8,7 +9,7 @@ import { registerWorkspaceModelIPC } from '../src/workspace-model-ipc.ts';
 
 const readable = [chatIPC.list, chatIPC.cancel, MODEL_IPC.list,
   MODEL_DISCOVERY_IPC.cancelDiscovery, modelProbeIPC.cancelConnectionTest];
-const actions = [chatIPC.send, MODEL_IPC.save, MODEL_IPC.setDefault, MODEL_IPC.remove,
+const actions = [chatIPC.send, chatHistoryIPC.list, chatHistoryIPC.detail, chatHistoryIPC.clear, MODEL_IPC.save, MODEL_IPC.setDefault, MODEL_IPC.remove,
   MODEL_DISCOVERY_IPC.discover, modelProbeIPC.testConnection];
 
 function fixture() {
@@ -23,7 +24,7 @@ function fixture() {
     return Promise.resolve({ version: 1, ok: false, error: 'unavailable' } as const);
   };
   registerWorkspaceModelIPC((channel, handler) => { handlers.set(channel, handler); }, {
-    chat: { invoke }, models: { invoke, invokeDiscovery: invoke, invokeProbe: invoke },
+    chat: { invoke }, history: { invokeHistory: (method, eligible, forwarded) => invoke(method, eligible(), forwarded) }, models: { invoke, invokeDiscovery: invoke, invokeProbe: invoke },
     trusted: (received, forwarded) => {
       assert.equal(received, event);
       assert.deepEqual(forwarded, args);

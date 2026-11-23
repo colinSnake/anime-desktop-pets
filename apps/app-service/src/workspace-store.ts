@@ -5,13 +5,14 @@ import { isAbsolute, join, parse, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { definition, revision, shape, theme, type PetError, type Theme } from '../../../packages/contracts/src/pets.ts';
 import type { PetRegistry } from './pet-registry.ts';
+import { PrivateDirectory } from './models/private-directory.ts';
 
 export class WorkspaceError extends Error { constructor(readonly code: PetError) { super(code); } }
 export type WorkspaceState = { schemaVersion: 1; revision: number; theme: Theme; registry: PetRegistry; autoStartConfigured?: true };
 const empty = (): WorkspaceState => ({ schemaVersion: 1, revision: 0, theme: 'system', registry: { schemaVersion: 1, instances: [] } });
-const limit = 128 * 1024;
+export const WORKSPACE_STATE_LIMIT = 128 * 1024;
 const missing = (error: unknown) => !!error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT';
-function decode(value: unknown): WorkspaceState {
+export function validateWorkspaceState(value: unknown): WorkspaceState {
   if (!shape(value, ['schemaVersion', 'revision', 'theme', 'registry', 'autoStartConfigured']) || value.schemaVersion !== 1 || !revision(value.revision) || !theme(value.theme) || (Object.hasOwn(value, 'autoStartConfigured') && value.autoStartConfigured !== true)) throw new WorkspaceError('storage');
   const r = value.registry;
   if (!shape(r, ['schemaVersion', 'instances']) || r.schemaVersion !== 1 || !Array.isArray(r.instances) || r.instances.length > 32 || !r.instances.every(definition) || new Set(r.instances.map(i => i.id)).size !== r.instances.length) throw new WorkspaceError('storage');
@@ -21,11 +22,14 @@ function decode(value: unknown): WorkspaceState {
 export class WorkspaceStore {
   private lease?: FileHandle;
   private rootIdentity?: { dev: number; ino: number };
-  constructor(private root: string, private beforeCommit?: () => Promise<void>) {
+  private readonly privateDirectory?: PrivateDirectory;
+  constructor(private root: string, private beforeCommit?: () => Promise<void>, requirePrivate = false) {
     if (!isAbsolute(root)) throw new WorkspaceError('storage');
     this.root = resolve(root);
+    if (requirePrivate) this.privateDirectory = new PrivateDirectory(this.root, false);
   }
   private async directory() {
+    await this.privateDirectory?.ready();
     let path = parse(this.root).root;
     for (const part of this.root.slice(path.length).split(sep).filter(Boolean)) {
       path = join(path, part);
@@ -47,33 +51,38 @@ export class WorkspaceStore {
   }
   async read(): Promise<WorkspaceState> {
     await this.acquire();
+    if (this.privateDirectory) {
+      const stored = await this.privateDirectory.read('workspace-state.json', WORKSPACE_STATE_LIMIT);
+      if (!stored) throw new WorkspaceError('storage');
+      return validateWorkspaceState(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(stored.bytes)));
+    }
     const file = join(this.root, 'workspace-state.json');
     let handle: FileHandle | undefined;
     try {
       const info = await lstat(file).catch(e => { if (missing(e)) return undefined; throw e; });
       if (!info) return empty();
-      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > limit) throw new WorkspaceError('storage');
+      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > WORKSPACE_STATE_LIMIT) throw new WorkspaceError('storage');
       handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
       const opened = await handle.stat();
-      if (opened.ino !== info.ino || opened.dev !== info.dev || !opened.isFile() || opened.size > limit) throw new WorkspaceError('storage');
-      const buffer = Buffer.alloc(limit + 1);
+      if (opened.ino !== info.ino || opened.dev !== info.dev || !opened.isFile() || opened.size > WORKSPACE_STATE_LIMIT) throw new WorkspaceError('storage');
+      const buffer = Buffer.alloc(WORKSPACE_STATE_LIMIT + 1);
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-      if (bytesRead > limit) throw new WorkspaceError('storage');
-      return decode(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, bytesRead))));
+      if (bytesRead > WORKSPACE_STATE_LIMIT) throw new WorkspaceError('storage');
+      return validateWorkspaceState(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, bytesRead))));
     } finally { await handle?.close(); }
   }
   async write(state: WorkspaceState, requireCurrent?: () => void) {
-    decode(state);
+    validateWorkspaceState(state);
     await this.acquire();
     const file = join(this.root, 'workspace-state.json');
     // Refuse links/directories before replace; only this process holds the writer lease.
     await this.read();
     const bytes = JSON.stringify(state, null, 2) + '\n';
-    if (Buffer.byteLength(bytes) > limit) throw new WorkspaceError('storage');
+    if (Buffer.byteLength(bytes) > WORKSPACE_STATE_LIMIT) throw new WorkspaceError('storage');
     const tmp = join(this.root, `.workspace-${randomBytes(16).toString('hex')}.tmp`);
     let handle: FileHandle | undefined;
     try {
-      handle = await open(tmp, 'wx', 0o600);
+      handle = this.privateDirectory ? await this.privateDirectory.create(tmp.split(sep).at(-1)!) : await open(tmp, 'wx', 0o600);
       await handle.writeFile(bytes, 'utf8'); await handle.sync(); await handle.close(); handle = undefined;
       await this.beforeCommit?.();
       await this.directory();

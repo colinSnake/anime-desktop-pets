@@ -25,11 +25,14 @@ export type Snapshot = {
   runtime: RuntimeSnapshot;
 };
 export type WorkspaceFolderResult = "opened" | "not-ready" | "busy" | "unavailable";
+export type WorkspaceMigrationResult = "not-needed" | "cancelled" | "busy" | "closing" | "unavailable";
 export interface DesktopBridge {
+  migrateWorkspaceData?(): Promise<WorkspaceMigrationResult>;
   openWorkspaceData?(): Promise<WorkspaceFolderResult>;
   legacyCharacterHandoff?: import("./legacy-character-snapshot.ts").LegacyHandoffBridge;
   characters?: import("./characters.ts").CharactersBridge;
   speech?: import("./speech.ts").SpeechBridge;
+  chatHistory?: import("./chat-history.ts").ChatHistoryBridge;
   onlineChat?: import("./online-chat.ts").OnlineChatBridge;
   models?: import("./models.ts").ModelsBridge;
   pets?: import("./pets.ts").PetsBridge;

@@ -12,10 +12,16 @@ export type CommitOptions = { authority?: OnlineAuthority; onPublished?: (state:
 export type Publication = { configuration: ModelConfiguration; durability: 'confirmed' | 'unconfirmed' };
 /** Trusted filesystem adapter; never exposed through IPC. */
 export type PublicationIO = { rename?: typeof rename; syncDirectory?: () => Promise<void> };
-const FILE = 'model-providers.json', LOCK = '.models-writer.lock', ONLINE = '.models-online-owner.lock', LIMIT = 1_048_576;
+export const MODEL_CONFIGURATION_LIMIT = 1_048_576;
+const FILE = 'model-providers.json', LOCK = '.models-writer.lock', ONLINE = '.models-online-owner.lock';
 const empty = (): ModelConfiguration => ({ schemaVersion: 2, revision: 0, defaultConnectionID: null, connections: [] });
 const storage = () => new ModelError('storage_unavailable');
 const validReferences = (state: ModelConfiguration) => state.connections.every(c => c.credentialRef === undefined || isVaultReference(c.credentialRef));
+export function decodeModelConfiguration(bytes: Buffer): ModelConfiguration {
+  const configuration = validateConfiguration(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)));
+  if (!validReferences(configuration) || configuration.connections.some(c => c.revision > configuration.revision)) throw storage();
+  return configuration;
+}
 export class ModelConfigurationStore {
   private readonly directory: PrivateDirectory;
   private observed = false;
@@ -24,11 +30,10 @@ export class ModelConfigurationStore {
   constructor(root: string, private readonly io: PublicationIO = {}) { this.directory = new PrivateDirectory(root); }
   private async load() {
     try {
-      const result = await this.directory.read(FILE, LIMIT);
+      const result = await this.directory.read(FILE, MODEL_CONFIGURATION_LIMIT);
       if (!result) { if (this.observed) throw storage(); return { configuration: empty(), source: undefined }; }
       this.observed = true;
-      const configuration = validateConfiguration(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(result.bytes)));
-      if (!validReferences(configuration) || configuration.connections.some(c => c.revision > configuration.revision)) throw storage();
+      const configuration = decodeModelConfiguration(result.bytes);
       return { configuration, source: result };
     } catch { this.observed = true; throw storage(); }
   }
@@ -108,14 +113,14 @@ export class ModelConfigurationStore {
       candidate.revision = before.configuration.revision + 1;
       if (!validReferences(candidate) || candidate.connections.some(c => c.revision > candidate.revision)) throw new ModelError('invalid_configuration');
       const bytes = Buffer.from(JSON.stringify(candidate, null, 2) + '\n');
-      if (bytes.length > LIMIT) throw new ModelError('invalid_configuration');
+      if (bytes.length > MODEL_CONFIGURATION_LIMIT) throw new ModelError('invalid_configuration');
       tmp = await this.directory.create(temporary); tmpIdentity = await tmp.stat();
       await tmp.writeFile(bytes); await tmp.sync(); await tmp.close(); tmp = undefined;
       const current = await this.load();
       // Protect even same-revision edits and disappearance/replacement by an
       // uncooperative writer. Cooperating writers share the short lock above.
       if (before.source ? !current.source || !sameFile(before.source.info, current.source.info) || !before.source.bytes.equals(current.source.bytes) : !!current.source) throw new ModelError('configuration_conflict');
-      const prepared = await this.directory.read(temporary, LIMIT);
+      const prepared = await this.directory.read(temporary, MODEL_CONFIGURATION_LIMIT);
       if (!prepared || !tmpIdentity || !sameFile(tmpIdentity, prepared.info) || !prepared.bytes.equals(bytes)) throw storage();
       let renameUncertain = false;
       try { await (this.io.rename ?? rename)(this.directory.path(temporary), this.directory.path(FILE)); }
@@ -124,7 +129,7 @@ export class ModelConfigurationStore {
         // Reconcile using the prepared inode AND exact bytes, never revision
         // alone. An indeterminate outcome must retain its credential version.
         let after: Awaited<ReturnType<PrivateDirectory['read']>>;
-        try { after = await this.directory.read(FILE, LIMIT); }
+        try { after = await this.directory.read(FILE, MODEL_CONFIGURATION_LIMIT); }
         catch { throw new ModelError('publication_uncertain'); }
         if (after && tmpIdentity && sameFile(tmpIdentity, after.info) && after.bytes.equals(bytes)) renameUncertain = true;
         else if (before.source ? after && sameFile(before.source.info, after.info) && before.source.bytes.equals(after.bytes) : !after) throw storage();

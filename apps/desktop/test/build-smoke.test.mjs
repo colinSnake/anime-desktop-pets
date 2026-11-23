@@ -505,6 +505,26 @@ test('compiled character bridge exposes only fixed identity, context, memory and
   }
 });
 
+test('compiled preload gives macOS only fixed data migration and instance history channels', async () => {
+  const { runInNewContext } = await import('node:vm');
+  const preload = await readFile(`${out}/preload.cjs`, 'utf8');
+  for (const platform of ['darwin', 'win32', 'linux']) {
+    let bridge; const calls = [];
+    runInNewContext(preload, { process: { platform }, require: () => ({
+      contextBridge: { exposeInMainWorld: (_name, value) => { bridge = value; } },
+      ipcRenderer: { invoke: async (...args) => calls.push(args) },
+    }) });
+    if (platform !== 'darwin') {
+      assert.equal(bridge.migrateWorkspaceData, undefined); assert.equal(bridge.chatHistory, undefined); continue;
+    }
+    await bridge.migrateWorkspaceData({ root: '/not-accepted' });
+    assert.deepEqual(Object.keys(bridge.chatHistory), ['list', 'detail', 'clear']);
+    const input = { petID: 'pet-synthetic' }, detail = { ...input, id: '0f000000-0000-4000-8000-000000000001' }, clear = { ...input, confirmed: true };
+    await bridge.chatHistory.list(input, '/not-accepted'); await bridge.chatHistory.detail(detail, '/not-accepted'); await bridge.chatHistory.clear(clear, '/not-accepted');
+    assert.deepEqual(calls, [['pet:migrate-workspace-data'], ['pet:chat-history-list', input], ['pet:chat-history-detail', detail], ['pet:chat-history-clear', clear]]);
+  }
+});
+
 test('compiled preload exposes only fixed online chat methods on macOS', async () => {
   const { runInNewContext } = await import('node:vm');
   const preload = await readFile(`${out}/preload.cjs`, 'utf8');

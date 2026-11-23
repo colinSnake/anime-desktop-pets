@@ -17,25 +17,28 @@ async function main() {
     resourcesPath: dirname(stage), environment: { PET_HARNESS_NODE: originalNode } }) : join(stage, 'bin', 'node');
   assert.equal(await realpath(process.execPath), executable);
   const runtime = createHarnessRuntime({ worker: join(__dirname, 'harness-worker.mjs'), executable, privateRoots: [checkout, originalNode, HOME] });
-  const fixture = createSdkChatFixture(HOME);
+  const fixture = createSdkChatFixture(HOME, { desktop: true });
   const outcomes = [];
   try {
-    await fixture.initialize();
-    for (const mode of ['text', 'disconnect']) {
+    const transport = await fixture.initialize();
+    assert.deepEqual(transport, { transport: 'desktop-loopback' });
+    for (const mode of ['cancel', 'text', 'disconnect']) {
       const outcome = await fixture.run(mode, async ({ text, request, signal }) => {
         try {
           const finalText = await runtime(text, request, signal);
           assert.equal(mode, 'text');
           return { finalText };
         } catch (error) {
+          if (mode === 'cancel' && signal.aborted && error === signal.reason) return {};
           if (mode !== 'disconnect' || !(error instanceof ModelError) || error.code !== 'upstream_unavailable') throw error;
           return {};
         }
       }, mode === 'text' ? { text: '/help', expectMemory: false } : undefined);
+      if (mode === 'cancel') assert.deepEqual(outcome, { serviceOutcome: 'cancelled', providerDispatches: 1, providerAborted: true, replayRejected: true });
       assert.deepEqual(await readdir(TMPDIR), [], 'SDK turn root was not removed');
       outcomes.push({ mode, ...outcome });
     }
-    console.log(JSON.stringify({ node: process.versions.node, arch: process.arch, outcomes }));
+    console.log(JSON.stringify({ node: process.versions.node, arch: process.arch, ...transport, outcomes }));
   } finally {
     await fixture.close();
   }

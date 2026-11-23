@@ -48,6 +48,7 @@ import { STARTUP_SCHEME } from "./startup-playback.ts";
 import { installStartupPlayer } from "./startup-window.ts";
 import { installWorkspaceTray } from "./workspace-tray.ts";
 import { windowColors } from './window-colors.ts';
+import { LocalDataRoot, type DataSelection } from './local-data-root.ts';
 import { WorkspaceDataFolder, workspaceProfilePath } from './workspace-data-folder.ts';
 import { fitWorkspace, sameWorkspaceBounds, validWorkspaceBounds, WorkspacePlacement, workspaceDefault, workspaceMinimum, type WorkspaceBounds } from './workspace-placement.ts';
 import { adjustWorkspacePlacement, watchWorkspaceDisplayChanges, type PlacementTrigger } from './workspace-display-recovery.ts';
@@ -65,7 +66,13 @@ delete process.env.PET_WORKSPACE_VIDEO_DIR;
 
 app.setName("桌边小崽");
 const appData = app.getPath("appData");
-app.setPath("userData", workspaceProfilePath(appData));
+const electronProfile = workspaceProfilePath(appData);
+app.setPath("userData", electronProfile);
+const localData = process.platform === 'darwin' ? new LocalDataRoot(app.getPath('home'), electronProfile) : undefined;
+const primary = !localData || app.requestSingleInstanceLock();
+let data: DataSelection = { kind: 'legacy', root: electronProfile };
+let confirmMigration = false;
+let migrateAtQuit = false;
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -142,6 +149,11 @@ function requestCodexLaunch(): void {
 
 async function start() {
   await app.whenReady();
+  if (exiting) return;
+  if (localData) {
+    try { data = await localData.select(); }
+    catch { throw new Error('local_data_unavailable'); }
+  }
   if (exiting) return;
   const video = process.platform === 'darwin' && workspaceVideoDirectory
     ? await prepareWorkspaceVideo(join(__dirname, 'video'), workspaceVideoDirectory).catch(() => undefined) : undefined;
@@ -235,9 +247,11 @@ async function start() {
       onTaskFollowingState: state => { taskState = state; workspaceStatus?.render(); },
       // DSH rc.5 does not support this Electron build's native fingerprint.
       harnessExecutable,
-      modelsRoot: process.platform === "darwin" ? join(app.getPath("userData"), "models") : undefined,
+      modelsRoot: process.platform === "darwin" ? join(data.root, "models") : undefined,
+      businessRoot: data.kind === 'adpets' ? data.root : undefined,
       workspace: {
-        root: join(app.getPath("userData"), "workspace"),
+        root: join(data.root, "workspace"),
+        ...(data.kind === 'adpets' && { packageProfileRoot: join(electronProfile, 'workspace') }),
         packageToolPath: join(__dirname, 'runtime', 'pet_sources.py'),
         catalog: process.platform === 'darwin'
           ? [{ ...longmei, name: "龙妹", launchable: video?.longmeiReady === true },
@@ -324,7 +338,7 @@ async function start() {
         mainFrame: workspace.webContents.mainFrame, url: event.senderFrame?.url ?? '', args,
       });
     registerWorkspaceModelIPC((channel, listener) => ipcMain.handle(channel, listener), {
-      chat, models, trusted: trustedModelFrame, visible: isWorkspaceVisible,
+      chat, history: chat, models, trusted: trustedModelFrame, visible: isWorkspaceVisible,
     });
   }
 
@@ -357,15 +371,35 @@ async function start() {
       return service!.request(command);
     });
   }
-  const workspaceData = new WorkspaceDataFolder(appData, path => shell.openPath(path));
-  ipcMain.handle('pet:open-workspace-data', (event, ...args: unknown[]) => {
-    const eligible = () => isWorkspaceVisible() && !!workspace && trustedCaller({
+  const workspaceData = new WorkspaceDataFolder(appData, path => shell.openPath(path), data.kind === 'adpets' ? data.root : undefined);
+  const dataCaller = (event: Electron.IpcMainInvokeEvent, args: unknown[]) => isWorkspaceVisible() && !!workspace && trustedCaller({
       senderId: event.sender.id, ownerId: workspace.webContents.id,
       senderFrame: event.senderFrame, mainFrame: workspace.webContents.mainFrame,
       url: event.senderFrame?.url ?? '', args,
     });
+  ipcMain.handle('pet:open-workspace-data', (event, ...args: unknown[]) => {
+    const eligible = () => dataCaller(event, args);
     if (!eligible()) throw new Error('forbidden');
     return workspaceData.open(eligible);
+  });
+  if (localData) ipcMain.handle('pet:migrate-workspace-data', async (event, ...args: unknown[]) => {
+    const owner = workspace;
+    if (!owner || !dataCaller(event, args)) throw new Error('forbidden');
+    if (data.kind !== 'legacy') return 'not-needed';
+    if (confirmMigration || migrateAtQuit) return 'busy';
+    confirmMigration = true;
+    try {
+      const { response } = await dialog.showMessageBox(owner, {
+        type: 'warning', title: '迁移本机数据', message: '将工作区数据迁移到 ~/.adpets？',
+        detail: '应用会先结束本地服务再迁移。旧资料会保留为备份，不会读取或复制钥匙串密钥。迁移后请手动重开；当前未保存的草稿和内存聊天不会保留。',
+        buttons: ['取消', '迁移并退出'], defaultId: 0, cancelId: 0, noLink: true,
+      });
+      if (response !== 1 || !dataCaller(event, args)) return 'cancelled';
+      migrateAtQuit = true;
+      setImmediate(() => app.quit());
+      return 'closing';
+    } catch { return 'unavailable'; }
+    finally { confirmMigration = false; }
   });
   if (process.platform === 'darwin') {
     const handoff = new LegacyCharacterHandoff(appData, (id, write) => service!.legacyCharacterHandoff(id, write));
@@ -486,6 +520,7 @@ async function start() {
   await workspace.loadURL(WORKSPACE_URL);
 }
 app.on("activate", revealWorkspace);
+app.on("second-instance", revealWorkspace);
 app.on("window-all-closed", () => app.quit());
 app.on("before-quit", (event) => {
   if (cleaned) return;
@@ -506,22 +541,33 @@ app.on("before-quit", (event) => {
       const results = await Promise.allSettled([trayCleanup, launchCleanup, service?.close()]);
       if (results.some(result => result.status === 'rejected')) dialog.showErrorBox(
         "本地服务清理失败",
-        "未确认本应用子进程已完全退出，请检查开发日志。",
+        "未确认本应用子进程已完全退出，没有开始迁移。",
       );
+      else if (migrateAtQuit && localData && service) {
+        try {
+          await localData.migrate();
+          dialog.showMessageBoxSync({ type: 'info', message: '本机数据已迁移', detail: '旧资料已保留为备份。请重新打开桌边小崽。' });
+        } catch {
+          dialog.showErrorBox('未能确认数据迁移', '旧资料未被覆盖或删除。请重开应用核对；若仍提示数据目录异常，请先保留两处资料，不要手动合并。');
+        }
+      }
     } finally {
       cleaned = true;
       app.quit();
     }
   })();
 });
-start().catch(async () => {
+if (!primary) { cleaned = true; app.quit(); }
+else start().catch(async error => {
   const trayCleanup = workspaceStatus?.dispose();
   const launchCleanup = startupLaunch?.dispose();
   if (exiting) return;
   await Promise.allSettled([trayCleanup, launchCleanup, service?.close()]);
   dialog.showErrorBox(
     "桌边小崽启动失败",
-    "本地工作区未能启动；未连接现有桌宠，也未修改用户资料。",
+    error instanceof Error && error.message === 'local_data_unavailable'
+      ? "无法安全确认本机数据目录。请保留 ~/.adpets 和旧的应用资料，不要手动合并。"
+      : "本地工作区未能启动；未连接现有桌宠。",
   );
   app.quit();
 });

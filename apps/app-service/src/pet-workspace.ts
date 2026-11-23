@@ -26,7 +26,7 @@ export class PetWorkspace {
   readonly taskLease = new CodexTaskLease({ canFollow: () => this.canStartOwnedPlayer() });
   private stopAdditional?: () => Promise<boolean>;
   private onPauseRequested?: () => void;
-  constructor(options: { root: string; catalog: CatalogEntry[]; lifecycle?: PetLifecycle; playerMode?: WorkspaceData['playerMode']; stopAdditional?: () => Promise<boolean>; onPauseRequested?: () => void; phase?: (id: string) => PetPhase; beforeCommit?: () => Promise<void>; importOne?: (path: string) => Promise<{ name: string; package: CatalogEntry }> }) {
+  constructor(options: { root: string; requirePrivate?: boolean; catalog: CatalogEntry[]; lifecycle?: PetLifecycle; playerMode?: WorkspaceData['playerMode']; stopAdditional?: () => Promise<boolean>; onPauseRequested?: () => void; phase?: (id: string) => PetPhase; beforeCommit?: () => Promise<void>; importOne?: (path: string) => Promise<{ name: string; package: CatalogEntry }> }) {
     if (options.catalog.length > 32 || !options.catalog.every(catalogEntry) || new Set(options.catalog.map(c => `${c.id}@${c.version}`)).size !== options.catalog.length) throw new Error('invalid_catalog');
     this.catalog = structuredClone(options.catalog);
     this.lifecycle = options.lifecycle;
@@ -35,7 +35,7 @@ export class PetWorkspace {
     this.onPauseRequested = options.onPauseRequested;
     this.importOne = options.importOne;
     this.phase = options.phase ?? (() => 'not-connected');
-    this.store = new WorkspaceStore(options.root, options.beforeCommit);
+    this.store = new WorkspaceStore(options.root, options.beforeCommit, options.requirePrivate);
     this.lifecycle?.setPositionWriter(async (id, position) => (await this.recordRuntimePosition(id, position)).ok);
   }
   private importOne?: (path: string) => Promise<{ name: string; package: CatalogEntry }>;

@@ -1,3 +1,4 @@
+import { isHistoryInput, isHistoryResult, type ChatHistoryMethod } from '../../../packages/contracts/src/chat-history.ts';
 import { isChatListResult, isChatSendResult, validChatRequestID, validOnlineChatInput, type ChatListResult, type ChatSendResult, type OnlineChatInput } from '../../../packages/contracts/src/online-chat.ts';
 
 const invalid = { ok: false, error: 'invalid_request' } as const;
@@ -8,6 +9,7 @@ export class ChatIPC {
   private active?: { id: string; abort: AbortController };
   private listing = false;
   constructor(private readonly service: {
+    chatHistory?(method: ChatHistoryMethod, input: unknown): Promise<unknown>;
     listChatModels(): Promise<ChatListResult>;
     sendOnlineChat(input: OnlineChatInput, signal: AbortSignal): Promise<ChatSendResult>;
   }) {}
@@ -15,6 +17,21 @@ export class ChatIPC {
     const active = this.active;
     this.active = undefined;
     active?.abort.abort();
+  }
+  private historyPending = false;
+  async invokeHistory(method: ChatHistoryMethod, eligible: () => boolean, args: unknown[]) {
+    const [input] = args;
+    if (!eligible() || args.length !== 1 || !isHistoryInput(method, input)) return invalid;
+    if (!this.service.chatHistory) return unavailable;
+    if (this.historyPending) return { ok: false, error: 'busy' } as const;
+    this.historyPending = true;
+    try {
+      const result = await this.service.chatHistory(method, input);
+      // Never return a private history page to a renderer that hid/navigated during the read.
+      if (!eligible()) return unavailable;
+      return isHistoryResult(method, input, result) ? result : unavailable;
+    } catch { return unavailable; }
+    finally { this.historyPending = false; }
   }
   async invoke(method: 'list' | 'send' | 'cancel', trusted: boolean, args: unknown[]) {
     if (!trusted) return invalid;

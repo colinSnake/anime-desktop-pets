@@ -86,7 +86,7 @@ function AgentDialog({ name, reference, opener, onClose, renderDetail, overview,
   };
   const title = sections.find(entry => entry.id === section)?.title ?? '';
   const review = overview.pending;
-  return <dialog className="pet-agent-panel" data-pet-art={petArt(reference)} ref={panel} aria-labelledby="pet-agent-title"
+  return <dialog className="pet-agent-panel workspace-drawer" data-pet-art={petArt(reference)} ref={panel} aria-labelledby="pet-agent-title"
     onPointerDown={event => { backdropPressed.current = event.isPrimary && event.button === 0 && isBackdrop(event); }}
     onPointerCancel={() => { backdropPressed.current = false; }}
     onPointerUp={event => { backdropPressed.current &&= isBackdrop(event); }}
@@ -96,11 +96,11 @@ function AgentDialog({ name, reference, opener, onClose, renderDetail, overview,
       if (pressed && event.detail > 0 && isBackdrop(event)) onClose();
     }}
     onCancel={event => { event.preventDefault(); onClose(); }}>
-    <header className="pet-agent-header"><h2 id="pet-agent-title">桌宠 Agent</h2>
-      <button type="button" ref={close} className="pet-agent-close" aria-label="关闭" title="关闭" onClick={onClose}>
+    <header className="workspace-drawer-header"><h2 id="pet-agent-title">桌宠 Agent</h2>
+      <button type="button" ref={close} className="workspace-drawer-close" aria-label="关闭" title="关闭" onClick={onClose}>
         <PetNookIcon name="close" />
       </button></header>
-    <div className="pet-agent-scroll" ref={overviewScroll} hidden={!!section}>
+    <div className="workspace-drawer-scroll" ref={overviewScroll} hidden={!!section}>
       <div className="pet-agent-role"><PetCover reference={reference} avatar />
         <div><strong>{name}</strong><span role="status">{overview.privacy}</span></div>
       </div>
@@ -116,7 +116,7 @@ function AgentDialog({ name, reference, opener, onClose, renderDetail, overview,
         </li>)}
       </ul>
     </div>
-    {section && <div className="pet-agent-scroll pet-agent-detail" key={section}>
+    {section && <div className="workspace-drawer-scroll pet-agent-detail" key={section}>
       <button type="button" ref={back} className="button secondary pet-agent-back" onClick={() => setSection(undefined)}>
         <PetNookIcon name="chevron" />返回总览<span className="sr-only">（当前：{title}）</span>
       </button>

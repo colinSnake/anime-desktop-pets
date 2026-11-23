@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
+import { createConnection } from "node:net";
+import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { createService } from "../src/server.ts";
 import type {
@@ -131,6 +134,30 @@ test("binds a random loopback port and authenticates a real local request", asyn
     assert.equal(response.status, 200);
   } finally {
     await app.close();
+  }
+});
+test("shutdown retires an owned loopback socket that has not sent an HTTP request", async () => {
+  const { app, closed } = setup();
+  const base = new URL(await app.listen({ host: "127.0.0.1", port: 0 }));
+  const accepted = once(app.server, "connection");
+  const socket = createConnection({ host: "127.0.0.1", port: Number(base.port) });
+  const socketClosed = once(socket, "close");
+  const stopWatch = new AbortController();
+  let closing: Promise<void> | undefined;
+  try {
+    // The desktop pool may open a replacement connection after a chat abort
+    // before it has another request to put on that socket.
+    await accepted;
+    closing = app.close();
+    await Promise.race([
+      Promise.all([closing, socketClosed]),
+      delay(1_000, undefined, { signal: stopWatch.signal }).then(() => assert.fail("shutdown waited for a pre-request loopback socket")),
+    ]);
+    assert.equal(closed(), true);
+  } finally {
+    stopWatch.abort();
+    socket.destroy();
+    await (closing ?? app.close());
   }
 });
 test("runtime failures return sanitized errors rather than process output", async () => {

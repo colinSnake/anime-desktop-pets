@@ -1,8 +1,9 @@
+import type { ChatHistoryMethod } from '../../../packages/contracts/src/chat-history.ts';
 import type { LegacyHandoffReply } from '../../../packages/contracts/src/legacy-character-snapshot.ts';
 import type { WorkspaceVideoHost } from './workspace-video-host.ts';
 import { isTaskFollowingState, type TaskFollowingState } from '../../app-service/src/codex-task-following.ts';
 import { probeError, type ModelProbeInput, type ModelProbeReply } from '../../../packages/contracts/src/model-probe.ts';
-import { chatUnavailable, requestChatModels, requestOnlineChat } from './chat-transport.ts';
+import { chatUnavailable, requestChatHistory, requestChatModels, requestOnlineChat } from './chat-transport.ts';
 import type { ChatListResult, ChatSendResult, OnlineChatInput } from '../../../packages/contracts/src/online-chat.ts';
 import { recordRoutes, type RecordAction } from '../../../packages/contracts/src/character-records.ts';
 import type { IdentityWriteAction } from '../../../packages/contracts/src/characters.ts';
@@ -45,12 +46,13 @@ export class ServiceProcess {
     private factory: () => ServiceTransport,
     private options: {
       modelsRoot?: string;
+      businessRoot?: string;
       harnessExecutable?: string;
       taskFollowingHome?: string;
       onTaskFollowingState?: (state: TaskFollowingState) => void;
       speech?: { python: string; model: string; worker: string };
       videoHost?: WorkspaceVideoHost;
-      workspace?: { root: string; catalog: CatalogEntry[]; packageToolPath?: string };
+      workspace?: { root: string; catalog: CatalogEntry[]; packageToolPath?: string; packageProfileRoot?: string };
       workerPath: string;
       guardianPath: string;
       python?: string;
@@ -133,6 +135,7 @@ export class ServiceProcess {
           python: this.options.python,
           workspace: this.options.workspace,
           modelsRoot: this.options.modelsRoot,
+          ...(this.options.businessRoot ? { businessRoot: this.options.businessRoot } : {}),
           ...(this.options.harnessExecutable ? { harnessExecutable: this.options.harnessExecutable } : {}),
           speech: this.options.speech,
           taskFollowingHome: this.options.taskFollowingHome,
@@ -204,6 +207,12 @@ export class ServiceProcess {
     if (this.closed || !port) return identityUnavailable;
     const result = await requestLocalChatContext({ port, token: this.token }, input);
     return this.closed || this.port !== port ? identityUnavailable : result;
+  }
+  async chatHistory(method: ChatHistoryMethod, input: unknown) {
+    const port = this.port;
+    if (this.closed || !port || !this.options.businessRoot) return chatUnavailable;
+    const result = await requestChatHistory({ port, token: this.token }, method, input);
+    return this.closed || this.port !== port ? chatUnavailable : result;
   }
   async listChatModels(): Promise<ChatListResult> {
     const port = this.port;

@@ -30,6 +30,11 @@ const bridge: DesktopBridge = Object.freeze({
     deleteGoal: input => ipcRenderer.invoke('pet:characters-deleteGoal', input),
     setGoalChatShare: input => ipcRenderer.invoke('pet:characters-setGoalChatShare', input),
   } satisfies NonNullable<DesktopBridge['characters']>) } : {}),
+  ...(process.platform === 'darwin' ? { chatHistory: Object.freeze({
+    list: input => ipcRenderer.invoke('pet:chat-history-list', input),
+    detail: input => ipcRenderer.invoke('pet:chat-history-detail', input),
+    clear: input => ipcRenderer.invoke('pet:chat-history-clear', input),
+  } satisfies NonNullable<DesktopBridge['chatHistory']>) } : {}),
   ...(process.platform === 'darwin' ? { onlineChat: Object.freeze({
     list: () => ipcRenderer.invoke('pet:chat-models'),
     send: input => ipcRenderer.invoke('pet:chat-send', input),
@@ -68,6 +73,7 @@ const bridge: DesktopBridge = Object.freeze({
     pause: (input) => ipcRenderer.invoke("pet:pets-pause", input),
     resume: (input) => ipcRenderer.invoke("pet:pets-resume", input),
   } satisfies NonNullable<DesktopBridge["pets"]>),
+  ...(process.platform === 'darwin' ? { migrateWorkspaceData: () => ipcRenderer.invoke('pet:migrate-workspace-data') } : {}),
   openWorkspaceData: () => ipcRenderer.invoke("pet:open-workspace-data"),
   snapshot: () => ipcRenderer.invoke("pet:snapshot"),
   probeRuntime: () => ipcRenderer.invoke("pet:probe-runtime"),

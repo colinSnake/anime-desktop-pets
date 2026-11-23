@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import type { TextChatRuntime } from "./agent/text-chat-runtime.ts";
+import type { ChatHistory } from './chat-history.ts';
 import { registerOnlineChat } from "./online-chat.ts";
 import { registerCharacterRoutes } from "./characters/routes.ts";
 import type { CharacterRepository } from "./characters/repository.ts";
@@ -25,6 +26,7 @@ export function createService({
   speech,
   characters,
   chatRuntime,
+  chatHistory,
 }: {
   token: string;
   runtime: RuntimeController;
@@ -33,6 +35,7 @@ export function createService({
   speech?: BubbleSpeech;
   characters?: CharacterRepository;
   chatRuntime?: TextChatRuntime;
+  chatHistory?: ChatHistory;
 }) {
   if (!/^[a-f0-9]{64}$/.test(token))
     throw new Error("Invalid session credential");
@@ -40,6 +43,9 @@ export function createService({
     logger: false,
     bodyLimit: 64 * 1024,
     requestTimeout: 15_000,
+    // Once preClose drains owned operations, retire all of this bridge's
+    // sockets, including replacement pool connections with no HTTP request yet.
+    forceCloseConnections: true,
     ajv: { customOptions: { removeAdditional: false, coerceTypes: false } },
   });
   const authorization = Buffer.from(`Bearer ${token}`);
@@ -99,7 +105,7 @@ export function createService({
   );
   registerPetRoutes(app, workspace);
   registerModelManagement(app, models);
-  const chat = registerOnlineChat(app, models, workspace, characters, chatRuntime);
+  const chat = registerOnlineChat(app, models, workspace, characters, chatRuntime, chatHistory);
   registerSpeechRoutes(app, speech);
   registerCharacterRoutes(app, workspace, characters);
   app.addHook("preClose", async () => {

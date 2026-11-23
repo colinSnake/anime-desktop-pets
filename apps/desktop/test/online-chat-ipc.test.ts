@@ -22,3 +22,58 @@ test('chat IPC requires a trusted frame and a fixed payload; cancel is scoped to
   late.resolve({ ok: true, requestID: input.requestID, replayable: true, text: '迟到回复' });
   assert.deepEqual(await pending, { ok: false, error: 'cancelled' });
 });
+
+
+test('history IPC requires a visible trusted frame, validates inputs, and drops results after hiding', async () => {
+  const finish = deferred<unknown>();
+  let calls = 0, visible = true;
+  const bridge = new ChatIPC({ listChatModels: async () => ({ ok: true, models: [] }), sendOnlineChat: async () => ({ ok: false, error: 'unavailable' }),
+    chatHistory: () => { calls++; return finish.promise; } });
+  assert.deepEqual(await bridge.invokeHistory('clear', () => true, [{ petID: 'pet-a' }]), { ok: false, error: 'invalid_request' });
+  assert.deepEqual(await bridge.invokeHistory('list', () => false, [{ petID: 'pet-a' }]), { ok: false, error: 'invalid_request' });
+  assert.equal(calls, 0);
+  const pending = bridge.invokeHistory('list', () => visible, [{ petID: 'pet-a' }]);
+  assert.equal(calls, 1);
+  visible = false;
+  finish.resolve({ ok: true, page: { rows: [], nextBefore: null } });
+  assert.deepEqual(await pending, { ok: false, error: 'unavailable' });
+});
+
+test('history detail IPC only returns the requested conversation and rejects extra arguments', async () => {
+  const readID = '0f000000-0000-4000-8000-000000000005';
+  const time = 1700000000000;
+  const result = { ok: true, detail: { session: { id: readID, number: 2, completedAt: time }, hasEarlier: false,
+    turns: [{ requestID: input.requestID, user: '合成提问', assistant: '合成回答', completedAt: time }] } };
+  const bridge = new ChatIPC({ listChatModels: async () => ({ ok: true, models: [] }), sendOnlineChat: async () => ({ ok: false, error: 'unavailable' }),
+    chatHistory: async () => result });
+  const read = { petID: 'pet-a', id: readID };
+  assert.deepEqual(await bridge.invokeHistory('detail', () => true, [{ ...read, query: 'SELECT' }]), { ok: false, error: 'invalid_request' });
+  assert.deepEqual(await bridge.invokeHistory('detail', () => true, [{ ...read, id: input.requestID }]), { ok: false, error: 'unavailable' });
+  assert.deepEqual(await bridge.invokeHistory('detail', () => true, [read]), result);
+});
+
+test('chat IPC delivers local recovery without relabeling an unsaved reply as recovered', async () => {
+  const recovered = { ok: true, requestID: input.requestID, text: '已保存的回复', replayable: true, recovered: true } as const;
+  let result: ChatSendResult = recovered;
+  const bridge = new ChatIPC({ listChatModels: async () => ({ ok: true, models: [] }), sendOnlineChat: async () => result });
+  const resend = { ...input, conversation: { id: crypto.randomUUID(), mode: 'resume' }, turnID: crypto.randomUUID() };
+  assert.deepEqual(await bridge.invoke('send', true, [resend]), recovered);
+  result = { ...recovered, historyStatus: 'unconfirmed' };
+  assert.deepEqual(await bridge.invoke('send', true, [resend]), { ok: false, error: 'unavailable' });
+});
+
+test('paged history detail is bound to the requested cursor as well as the conversation', async () => {
+  const id = crypto.randomUUID(), before = crypto.randomUUID(), completedAt = 1700000000000;
+  const detail = { session: { id, number: 2, completedAt }, before, hasEarlier: false,
+    turns: [{ requestID: crypto.randomUUID(), user: '合成提问', assistant: '合成回答', completedAt: completedAt - 1000 }] };
+  let result: unknown = { ok: true, detail };
+  const bridge = new ChatIPC({ listChatModels: async () => ({ ok: true, models: [] }), sendOnlineChat: async () => ({ ok: false, error: 'unavailable' }),
+    chatHistory: async () => result });
+  const read = { petID: 'pet-a', id, before };
+  assert.deepEqual(await bridge.invokeHistory('detail', () => true, [read]), result);
+  assert.deepEqual(await bridge.invokeHistory('detail', () => true, [{ ...read, before: '不合法' }]), { ok: false, error: 'invalid_request' });
+  assert.deepEqual(await bridge.invokeHistory('detail', () => true, [{ ...read, before: crypto.randomUUID() }]), { ok: false, error: 'unavailable' });
+  assert.deepEqual(await bridge.invokeHistory('detail', () => true, [{ petID: read.petID, id }]), { ok: false, error: 'unavailable' });
+  result = { ok: true, detail: { ...detail, turns: [{ ...detail.turns[0], requestID: before }] } };
+  assert.deepEqual(await bridge.invokeHistory('detail', () => true, [read]), { ok: false, error: 'unavailable' });
+});

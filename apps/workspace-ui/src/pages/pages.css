@@ -73,31 +73,6 @@
 
 .module-disclosure > .module-stack > .module-footer { margin-top: 0; }
 
-.pet-agent-panel {
-  position: fixed; inset: 0 0 0 auto; margin: 0; padding: 0;
-  width: min(100%, 468px); height: 100%; max-width: none; max-height: none;
-  border: 0; border-inline-start: 1px solid var(--line);
-  background: var(--canvas); color: var(--text); box-shadow: -10px 0 28px var(--shadow-drawer-ink);
-  overflow: hidden;
-}
-.pet-agent-panel[open] { display: flex; flex-direction: column; }
-.pet-agent-panel::backdrop { background: var(--backdrop-dialog); }
-.pet-agent-header {
-  display: flex; align-items: center; justify-content: space-between; flex: none; gap: 12px;
-  padding: 14px clamp(16px, 4vw, 24px); background: var(--surface); border-bottom: 1px solid var(--line);
-}
-.pet-agent-header h2 { margin: 0; font-size: 19px; }
-.pet-agent-close {
-  display: grid; flex: none; place-items: center; width: 40px; height: 38px;
-  padding: 0; border: 0; border-radius: 0; background: var(--transparent); color: var(--muted); cursor: pointer;
-}
-.pet-agent-close:hover { color: var(--accent-text); }
-.pet-agent-close svg { width: 22px; height: 22px; }
-.pet-agent-scroll {
-  min-height: 0; flex: 1; overflow: auto; overscroll-behavior: contain;
-  padding: 18px clamp(16px, 4vw, 24px) 24px;
-}
-.pet-agent-scroll[hidden] { display: none; }
 .pet-agent-role {
   display: flex; align-items: center; gap: 14px; min-width: 0;
   padding: 14px; border: 1px solid var(--pet-art-line); border-radius: 14px; background: var(--pet-art-background);
@@ -124,6 +99,3 @@
 .pet-agent-back { display: inline-flex; align-items: center; gap: 5px; margin-bottom: 10px; }
 .pet-agent-back svg { width: 14px; height: 14px; transform: rotate(180deg); }
 .pet-agent-detail .module-heading h1 { font-size: 24px; }
-@media (max-width: 600px) {
-  .pet-agent-panel { width: 100%; border-inline-start: 0; }
-}

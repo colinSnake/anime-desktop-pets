@@ -4,10 +4,12 @@ import { diagnosticBadge, DiagnosticsView, type DiagnosticProps } from '../Diagn
 import { PetNookIcon } from '../PetNookIcon.tsx';
 import { InteractionLayout } from './InteractionLayout.tsx';
 
-export function AdvancedPage({ diagnostics, openWorkspaceData, appearance }: {
-  diagnostics: DiagnosticProps; openWorkspaceData?: DesktopBridge['openWorkspaceData']; appearance?: ReactNode;
+export function AdvancedPage({ diagnostics, openWorkspaceData, migrateWorkspaceData, appearance }: {
+  diagnostics: DiagnosticProps; openWorkspaceData?: DesktopBridge['openWorkspaceData']; migrateWorkspaceData?: DesktopBridge['migrateWorkspaceData']; appearance?: ReactNode;
 }) {
   const [opening, setOpening] = useState(false);
+  const [migrating, setMigrating] = useState(false);
+  const [migrationNotice, setMigrationNotice] = useState('');
   const [notice, setNotice] = useState('');
   const badge = diagnosticBadge(diagnostics.snapshot);
   async function openData() {
@@ -21,6 +23,19 @@ export function AdvancedPage({ diagnostics, openWorkspaceData, appearance }: {
         : result === 'busy' ? '正在打开，请稍候。' : '暂时无法打开工作区数据目录。');
     } catch { setNotice('暂时无法打开工作区数据目录。'); }
     finally { setOpening(false); }
+  }
+  async function migrateData() {
+    if (migrating || !migrateWorkspaceData) return;
+    setMigrating(true);
+    setMigrationNotice('');
+    let closing = false;
+    try {
+      const result = await migrateWorkspaceData();
+      closing = result === 'closing';
+      setMigrationNotice({ 'not-needed': '当前已使用 ~/.adpets，无需迁移。', cancelled: '已取消迁移。',
+        busy: '已有迁移确认正在进行。', closing: '正在退出并迁移，请稍候。', unavailable: '暂时无法迁移本机数据。' }[result]);
+    } catch { setMigrationNotice('暂时无法迁移本机数据。'); }
+    finally { if (!closing) setMigrating(false); }
   }
   return <InteractionLayout page="advanced" title="高级" description="管理本机工作区，按需查看运行详情。" appearance={appearance}>
     <section className="interaction-hero advanced-hero" aria-labelledby="advanced-local-title">
@@ -41,6 +56,16 @@ export function AdvancedPage({ diagnostics, openWorkspaceData, appearance }: {
     </section>
     <section className="advanced-tools" aria-labelledby="advanced-tools-title">
       <div className="advanced-tools-heading"><h2 id="advanced-tools-title">维护工具</h2></div>
+      {migrateWorkspaceData && <details className="advanced-tool">
+        <summary><span className="advanced-tool-icon"><PetNookIcon name="folder" /></span>
+          <strong className="advanced-tool-title">迁移本机数据</strong><PetNookIcon name="down" />
+        </summary>
+        <div className="advanced-tool-body">
+          <p>将旧工作区和模型配置迁入 ~/.adpets。旧资料保留，确认后应用退出。</p>
+          <button type="button" className="interaction-button" disabled={migrating} onClick={() => { void migrateData(); }}>迁移到 ~/.adpets</button>
+          <p role="status" hidden={!migrationNotice}>{migrationNotice}</p>
+        </div>
+      </details>}
       <details className="advanced-tool">
         <summary>
           <span className="advanced-tool-icon"><PetNookIcon name="pulse" /></span>

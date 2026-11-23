@@ -1,3 +1,4 @@
+import { chatHistoryPaths, chatHistoryReplyBytes, historyStatus, isHistoryInput, isHistoryResult } from '../../../packages/contracts/src/chat-history.ts';
 import { chatListBytes, chatPaths, chatReplyBytes, chatStatus, isChatListResult, isChatSendResult, validOnlineChatInput, type ChatError, type ChatListResult, type ChatSendResult, type OnlineChatInput } from '../../../packages/contracts/src/online-chat.ts';
 import { readBoundedJSON } from './bounded-json.ts';
 
@@ -28,3 +29,16 @@ export async function requestOnlineChat(session: Session, input: OnlineChatInput
     return isChatSendResult(result, input.requestID) && status === (result.ok ? 200 : chatStatus[result.error]) ? result : chatUnavailable;
   } catch { return signal.aborted ? { ok: false, error: 'cancelled' } : deadline.aborted ? { ok: false, error: 'timed_out' } : chatUnavailable; }
 }
+
+export const requestChatHistory = async (session: Session, method: keyof typeof chatHistoryPaths, input: unknown) => {
+  if (!isHistoryInput(method, input)) return { ok: false, error: 'invalid_request' } as const;
+  try {
+    const response = await fetch(`http://127.0.0.1:${session.port}${chatHistoryPaths[method]}`, {
+      method: 'POST', signal: AbortSignal.timeout(6500), redirect: 'error', credentials: 'omit', cache: 'no-store',
+      headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify(input),
+    });
+    const result = await readBoundedJSON(response, method === 'detail' ? chatHistoryReplyBytes : method === 'list' ? 2048 : 512);
+    if (isHistoryResult(method, input, result) && response.status === (result.ok ? 200 : historyStatus[result.error])) return result;
+  } catch { /* No transport details or history content in errors. */ }
+  return chatUnavailable;
+};

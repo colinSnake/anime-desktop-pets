@@ -59,14 +59,21 @@ export class PrivateDirectory {
   private regular(info: Stats): void {
     if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== process.getuid!() || (info.mode & 0o777) !== 0o600) storage();
   }
-  async read(name: string, limit: number, onPresent?: () => void): Promise<{ bytes: Buffer; info: Stats } | undefined> {
+  async file(name: string, onPresent?: () => void): Promise<Stats | undefined> {
     await this.ready();
     const path = this.path(name);
     const info = await lstat(path).catch(e => { if (absent(e)) return undefined; throw e; });
     if (!info) return undefined;
     onPresent?.();
-    this.regular(info); if (info.size > limit) storage();
+    this.regular(info);
     await this.verifyACL(path, info);
+    return info;
+  }
+  async read(name: string, limit: number, onPresent?: () => void): Promise<{ bytes: Buffer; info: Stats } | undefined> {
+    const info = await this.file(name, onPresent);
+    if (!info) return undefined;
+    if (info.size > limit) storage();
+    const path = this.path(name);
     const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
       const opened = await handle.stat(); this.regular(opened);

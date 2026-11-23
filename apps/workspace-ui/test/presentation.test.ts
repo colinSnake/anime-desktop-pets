@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { WorkspaceView } from '../src/App.tsx';
+import { PageLoadingSkeleton } from '../src/PageLoadingSkeleton.tsx';
 import { PetWorkspaceController } from '../src/pet-state.ts';
 import type { PetsBridge, WorkspaceData } from '../../../packages/contracts/src/pets.ts';
 
@@ -18,6 +19,22 @@ test('sidebar removes the slogan and theme selector while preserving navigation'
   assert.match(html, /工作区侧栏/);
   const sidebar = html.match(/<aside[\s\S]*?<\/aside>/)?.[0];
   assert.ok(sidebar); assert.doesNotMatch(sidebar, /让喜欢的角色，陪在桌边。|界面主题|workspace-theme|theme-toggle/);
+});
+
+test('lazy page fallbacks use an accessible skeleton instead of loading copy', async () => {
+  const html = await renderWorkspace(createElement(PageLoadingSkeleton));
+  assert.match(html, /class="page-loading-skeleton" role="status" aria-label="页面加载中" aria-busy="true"/);
+  assert.match(html, /aria-hidden="true"/);
+  assert.doesNotMatch(html, /正在加载页面/);
+
+  const app = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.equal((app.match(/<PageLoadingSkeleton \/>/g) ?? []).length, 2);
+  assert.doesNotMatch(app, /正在加载页面/);
+
+  const css = await readFile(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.page-loading-skeleton\s*\{/);
+  assert.match(css, /@keyframes workspace-skeleton/);
+  assert.match(css, /prefers-reduced-motion:\s*reduce/);
 });
 
 test('workspace document uses only the product name, not the old title banner', async () => {

@@ -35,13 +35,15 @@ export function ChatComposer({ state, controller, name, input }: { state: ChatWo
   label: '本机查询', icon: 'lock',
   description: !state.localAvailable ? '本机查询暂不可用，此命令不会转发给模型。' : localError ? '请输入查询关键词。本机指令不会发送给模型服务。' : '只查当前角色的本机资料，不发送给模型服务。',
  } as const : state.available || pendingRoute ? (state.online ? {
-  label: '在线文字', icon: 'globe', description: '消息、同一连接和模型可用的聊天记录及已授权资料会发给所选服务，可能产生费用。',
+  label: '在线文字', icon: 'globe', description: state.persistentConversations ? '消息、当前会话近期可回放的普通问答及本轮已授权资料会发给所选模型，可能产生费用。'
+   : '消息、同一连接和模型可用的聊天记录及已授权资料会发给所选服务，可能产生费用。',
  } as const : { label: '文字聊天', icon: 'chat', description: '为当前角色发送消息。' } as const) : {
   label: state.models.length ? '模型不可用' : state.online ? '未配置模型' : '模型服务未连接', icon: 'models',
   description: state.models.length ? '请选择可用模型，或在「模型管理」中检查连接。' : state.online ? (state.localAvailable ? '仍可查询本机资料；在线发送需先在「模型管理」配置模型。' : '在线发送需先在「模型管理」配置模型。') : '模型服务尚未接入，草稿会保留。',
  } as const;
  const submitCurrent = () => {
-  if (state.selectedId && controller?.getSnapshot().selectedId === state.selectedId) void controller.send();
+  const current = controller?.getSnapshot();
+  if (state.selectedId && current?.selectedId === state.selectedId && current.session.editorKey === session.editorKey) void controller?.send();
  };
  const send = () => {
   if (keyboard.current.action({ key: 'Enter', shiftKey: false, ctrlKey: false, metaKey: false, altKey: false, isComposing: false, keyCode: 13 }, canSend, performance.now()) === 'send') submitCurrent();
@@ -54,7 +56,7 @@ export function ChatComposer({ state, controller, name, input }: { state: ChatWo
  <div className="chat-composer" aria-label="消息输入区">
   <div hidden={previewing}><ChatDraftEditor hidden={previewing} input={input} draft={session.draftSnapshot} editable={!!controller && !!state.selectedId} placeholder={`和${name}聊聊……`}
    invalid={count > 1200 || invalidOnlineText || localError || memoryInvalid} describedBy={`chat-delivery${invalidOnlineText ? ' chat-text-boundary' : ''}${count > 1000 ? ' chat-character-count' : ''}`}
-   onDraft={value => !!state.selectedId && !!controller?.editDraft(state.selectedId, value)} onTrouble={setEditorIssue}
+   onDraft={value => !!state.selectedId && !!controller?.editDraft(state.selectedId, value, session.editorKey)} onTrouble={setEditorIssue}
    onCompose={active => { if (active) keyboard.current.start(); else keyboard.current.end(performance.now()); setComposing(active); }}
    onKeyDown={event => {
     const action = keyboard.current.action({ key: event.key, shiftKey: event.shiftKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey, altKey: event.altKey, isComposing: event.nativeEvent.isComposing, keyCode: event.nativeEvent.keyCode, repeat: event.repeat }, canSend, performance.now());

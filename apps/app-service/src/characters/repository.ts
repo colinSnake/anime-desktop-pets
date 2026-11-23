@@ -10,6 +10,12 @@ const storage = () => new CharacterError('character_storage_unavailable');
 const encoder = (state: CharacterState) => Buffer.from(JSON.stringify(state) + '\n');
 const decoder = new TextDecoder('utf-8', { fatal: true });
 const empty = (petID: string): CharacterState => ({ schemaVersion: 1, petID, revision: 0, identity: null, identityHistory: [], memories: [], goals: [] });
+export function decodeCharacterState(bytes: Buffer, petID: string): CharacterState {
+  const document: unknown = JSON.parse(decoder.decode(bytes));
+  // Roundtrip rejects non-canonical or duplicate-key app-owned documents.
+  if (!isState(document, petID) || !encoder(document).equals(bytes)) throw storage();
+  return document;
+}
 type OwnedLock = { handle: FileHandle; info: Stats };
 type Source = Awaited<ReturnType<PrivateDirectory['read']>>;
 type Options = { clock?: () => Date; io?: { rename?: typeof rename; syncDirectory?: () => Promise<void> } };
@@ -39,11 +45,7 @@ export class CharacterRepository {
         if (this.observed.has(petID)) throw storage();
         return { state: empty(petID), source };
       }
-      const document: unknown = JSON.parse(decoder.decode(source.bytes));
-      // This is an app-owned format. A compact roundtrip also rejects duplicate
-      // JSON keys, malformed UTF-8 and non-canonical escapes instead of normalizing them on save.
-      if (!isState(document, petID) || !encoder(document).equals(source.bytes)) throw storage();
-      return { state: document, source };
+      return { state: decodeCharacterState(source.bytes, petID), source };
     } catch { throw storage(); }
   }
 

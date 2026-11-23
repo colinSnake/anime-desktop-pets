@@ -10,16 +10,17 @@ export const chatReplyBytes = 50 * 1024;
 export type ChatRoute = { connectionID: string; modelEntryID: string; fingerprint: string; useDefault?: true };
 export type ChatOption = { route: Omit<ChatRoute, 'useDefault'>; connectionName: string; modelName: string; ready: boolean; isDefault: boolean };
 export type ChatExchange = { user: string; assistant: string };
-export type OnlineChatInput = { requestID: string; petID: string; route: ChatRoute; text: string; history: ChatExchange[] };
+export type ChatConversation = { id: string; mode: 'new' | 'resume' };
+export type OnlineChatInput = { requestID: string; petID: string; route: ChatRoute; text: string; history: ChatExchange[]; conversation?: ChatConversation; turnID?: string };
 export const chatStatus = {
-  invalid_request: 400, not_found: 404, route_changed: 409, context_changed: 409, not_configured: 409, credentials_unavailable: 409,
+  invalid_request: 400, not_found: 404, conversation_missing: 409, route_changed: 409, context_changed: 409, not_configured: 409, credentials_unavailable: 409,
   cancelled: 409, busy: 409, authentication_failed: 502, rate_limited: 429, invalid_response: 502, upstream_unavailable: 502,
   timed_out: 504, unavailable: 503,
 } as const;
 export type ChatErrorCode = keyof typeof chatStatus;
 export type ChatError = { ok: false; error: ChatErrorCode };
-export type ChatListResult = { ok: true; models: ChatOption[] } | ChatError;
-export type ChatSendResult = { ok: true; requestID: string; text: string; replayable: boolean } | ChatError;
+export type ChatListResult = { ok: true; models: ChatOption[]; persistentConversations?: true } | ChatError;
+export type ChatSendResult = { ok: true; requestID: string; text: string; replayable: boolean; recovered?: true; historyStatus?: 'unconfirmed' | 'omitted' } | ChatError;
 export interface OnlineChatBridge {
   list(): Promise<ChatListResult>;
   send(input: OnlineChatInput): Promise<ChatSendResult>;
@@ -36,6 +37,7 @@ const segmenter = new Intl.Segmenter('zh', { granularity: 'grapheme' });
 export const onlineCharacterCount = (value: string) => [...segmenter.segment(value)].length;
 export const acceptedChatText = (value: unknown): value is string => safeText(value, 12 * 1024) && onlineCharacterCount(value) <= 1200 && !parseLocalChatCommand(value) && !isChatMemoryCommand(value);
 export const validChatRequestID = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+export const isChatConversation = (value: unknown): value is ChatConversation => shape(value, ['id', 'mode']) && validChatRequestID(value.id) && (value.mode === 'new' || value.mode === 'resume');
 export const validChatReplyText = (value: unknown): value is string => safeText(value, 24 * 1024);
 export const sameChatRoute = (a: ChatRoute, b: ChatRoute): boolean => a.connectionID === b.connectionID && a.modelEntryID === b.modelEntryID && a.fingerprint === b.fingerprint;
 function validRoute(value: unknown, allowDefault: boolean): value is ChatRoute {
@@ -43,15 +45,17 @@ function validRoute(value: unknown, allowDefault: boolean): value is ChatRoute {
     identifier(value.connectionID) && identifier(value.modelEntryID) && fingerprint(value.fingerprint) && (value.useDefault === undefined || value.useDefault === true);
 }
 export function validOnlineChatInput(value: unknown): value is OnlineChatInput {
-  return shape(value, ['requestID', 'petID', 'route', 'text', 'history']) && validChatRequestID(value.requestID) &&
+  return shape(value, ['requestID', 'petID', 'route', 'text', 'history', 'conversation', 'turnID']) && validChatRequestID(value.requestID) &&
     petId(value.petID) && validRoute(value.route, true) && acceptedChatText(value.text) && Array.isArray(value.history) && value.history.length <= 5 &&
+    (value.conversation === undefined || isChatConversation(value.conversation) && value.history.length === 0) &&
+    (value.turnID === undefined || value.conversation !== undefined && validChatRequestID(value.turnID)) &&
     value.history.every(item => shape(item, ['user', 'assistant']) && acceptedChatText(item.user) && safeText(item.assistant, 12 * 1024)) &&
     size(JSON.stringify(value)) <= chatRequestBytes && value.history.reduce((count, pair) => count + onlineCharacterCount(pair.user) + onlineCharacterCount(pair.assistant), onlineCharacterCount(value.text)) <= 6000;
 }
 const isError = (value: unknown): value is ChatError => shape(value, ['ok', 'error']) && value.ok === false && typeof value.error === 'string' && Object.hasOwn(chatStatus, value.error);
 export function isChatListResult(value: unknown): value is ChatListResult {
   if (isError(value)) return true;
-  if (!shape(value, ['ok', 'models']) || value.ok !== true || !Array.isArray(value.models) || value.models.length > 32 * 33) return false;
+  if (!shape(value, ['ok', 'models', 'persistentConversations']) || value.ok !== true || (value.persistentConversations !== undefined && value.persistentConversations !== true) || !Array.isArray(value.models) || value.models.length > 32 * 33) return false;
   let defaults = 0;
   const seen = new Set<string>();
   return value.models.every(item => {
@@ -63,6 +67,8 @@ export function isChatListResult(value: unknown): value is ChatListResult {
   });
 }
 export function isChatSendResult(value: unknown, requestID: string): value is ChatSendResult {
-  return isError(value) || shape(value, ['ok', 'requestID', 'text', 'replayable']) && value.ok === true && value.requestID === requestID &&
-    validChatReplyText(value.text) && typeof value.replayable === 'boolean';
+  return isError(value) || shape(value, ['ok', 'requestID', 'text', 'replayable', 'historyStatus', 'recovered']) && value.ok === true && value.requestID === requestID &&
+    validChatReplyText(value.text) && typeof value.replayable === 'boolean' &&
+    (value.recovered === undefined || value.recovered === true && value.historyStatus === undefined) &&
+    (value.historyStatus === undefined || value.historyStatus === 'unconfirmed' || value.historyStatus === 'omitted');
 }

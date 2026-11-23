@@ -2,10 +2,12 @@ import { fileURLToPath } from 'node:url';
 import { createHarnessRuntime } from '../src/agent/harness-runtime.ts';
 import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
-import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { ChatHistory } from '../src/chat-history.ts';
+import { chatHistoryPaths, isHistoryDetailResult } from '../../../packages/contracts/src/chat-history.ts';
 import { ModelManagement } from '../src/models/management.ts';
 import { PetWorkspace } from '../src/pet-workspace.ts';
 import { CharacterRepository } from '../src/characters/repository.ts';
@@ -27,7 +29,7 @@ const writeDraft = (id: string) => {
   return { ...draft, id, displayName: id, baseURL: `https://${id}.invalid/v1` };
 };
 const syntheticRuntime: TextChatRuntime = (text, complete) => complete(text);
-async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, beforeRead?: () => Promise<void>, chatRuntime: TextChatRuntime | null = syntheticRuntime) {
+async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, beforeRead?: () => Promise<void>, chatRuntime: TextChatRuntime | null = syntheticRuntime, withHistory = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'pet-online-chat-')));
   const { backend } = syntheticVault(); let reads = 0;
   const models = new ModelManagement(join(root, 'models'), { ...backend, read: async (...args) => { reads++; await beforeRead?.(); return backend.read(...args); } }, undefined, { fetch });
@@ -35,7 +37,10 @@ async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, befo
   const workspace = new PetWorkspace({ root, catalog: [{ ...pkg, name: '合成桌宠' }] });
   const characters = new CharacterRepository(join(root, 'characters'));
   const snapshot = () => ({ kind: 'diagnostic' as const, status: 'idle' as const, detail: '' });
-  const app = createService({ token, models, workspace, characters, chatRuntime: chatRuntime ?? undefined, runtime: { snapshot, probe: async () => snapshot(), close: async () => {} } });
+  const historyFile = join(root, 'chats.sqlite');
+  if (withHistory) await writeFile(historyFile, '', { mode: 0o600 });
+  const chatHistory = withHistory ? new ChatHistory(root) : undefined;
+  const app = createService({ token, models, workspace, characters, chatHistory, chatRuntime: chatRuntime ?? undefined, runtime: { snapshot, probe: async () => snapshot(), close: async () => {} } });
   t.after(async () => { await app.close(); await rm(root, { recursive: true, force: true }); });
   const created = await workspace.mutate('add', { expectedRevision: 0, package: pkg });
   assert.ok(created.ok);
@@ -46,7 +51,7 @@ async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, befo
   const defaultTo = async (connectionID: string, expectedRevision: number) => assert.ok((await models.run('default', { connectionID, entryID: 'entry-one', expectedRevision })).ok);
   const list = () => app.inject({ url: paths.list, headers });
   const send = (route: object, fields: object = {}) => app.inject({ method: 'POST', url: paths.send, headers,
-    payload: { requestID: randomUUID(), petID, text: '聊聊纸船', history: [], route, ...fields } });
+    payload: { requestID: randomUUID(), petID, text: '聊聊纸船', history: [], route, ...(withHistory && { conversation: { id: randomUUID(), mode: 'new' } }), ...fields } });
   const routes = async () => {
     const result = await list(); assert.equal(result.statusCode, 200);
     return result.json().models as { route: { connectionID: string; modelEntryID: string; fingerprint: string }; ready: boolean }[];
@@ -58,7 +63,7 @@ async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, befo
     await characters.apply(petID, 2, { type: 'setMemoryChatShare', id, enabled: true });
     return () => workspace.withRegisteredInstance(petID, registered => characters.apply(registered, 3, { type: 'setMemoryChatShare', id, enabled: false }));
   };
-  return { app, petID, workspace, models, characters, reads: () => reads, write, defaultTo, list, routes, send, share };
+  return { app, petID, workspace, models, characters, historyFile, reads: () => reads, write, defaultTo, list, routes, send, share };
 }
 
 test('fixed authenticated chat sends the visible destination and only authorized context, with no secret or endpoint in its list', use, async t => {
@@ -135,25 +140,26 @@ test('withdrawing authorization while a contextual request is in flight discards
   assert.deepEqual(response.json(), { ok: false, error: 'context_changed' });
 });
 
-test('aborting the trusted loopback request reaches the provider signal and suppresses a late reply', use, async t => {
+test('aborting the trusted loopback request reaches the provider signal and suppresses a late reply', { ...use, timeout: 10_000 }, async t => {
   const entered = deferred<void>(), aborted = deferred<void>(), release = deferred<void>();
   const f = await fixture(t, async (_url, init) => {
     init!.signal!.addEventListener('abort', () => aborted.resolve());
     entered.resolve(); await release.promise; return completion();
-  });
+  }, undefined, syntheticRuntime, true);
   await f.write('first'); const [first] = await f.routes();
   await f.app.listen({ host: '127.0.0.1', port: 0 });
   const address = f.app.server.address(); assert.ok(address && typeof address === 'object');
   const session = { port: address.port, token };
-  const { requestChatModels, requestOnlineChat } = await import('../../desktop/src/chat-transport.ts');
+  const { requestChatHistory, requestChatModels, requestOnlineChat } = await import('../../desktop/src/chat-transport.ts');
   const listed = await requestChatModels(session);
   assert.ok(listed.ok && listed.models.length === 1);
   const controller = new AbortController();
-  const sent = requestOnlineChat(session, { requestID: randomUUID(), petID: f.petID, route: first!.route, text: '合成问题', history: [] }, controller.signal);
+  const sent = requestOnlineChat(session, { requestID: randomUUID(), petID: f.petID, route: first!.route, text: '合成问题', history: [], conversation: { id: randomUUID(), mode: 'new' } }, controller.signal);
   try {
     await entered.promise; controller.abort();
     assert.deepEqual(await sent, { ok: false, error: 'cancelled' }); await aborted.promise;
   } finally { release.resolve(); }
+  assert.deepEqual(await requestChatHistory(session, 'list', { petID: f.petID }), { ok: true, page: { rows: [], nextBefore: null } });
 });
 
 test('cancelling during a pending credential read prevents the first provider call', use, async t => {
@@ -416,4 +422,156 @@ test('a Worker failure revokes but does not release a pet slot before its admitt
     }, signal), { message: 'upstream_unavailable' });
     await assert.rejects(turns.run({ ...input, requestID: randomUUID() }, async () => assert.fail('slot was released'), signal), { message: 'busy' });
   } finally { release.resolve(); await turns.close(); }
+});
+
+
+test('authenticated history saves only a verified terminal, gates clearing, and denies a retired pet', use, async t => {
+  const consumed = deferred<void>(), finish = deferred<void>();
+  let calls = 0;
+  const f = await fixture(t, async () => { calls++; return completion(); }, undefined, async (text, complete) => {
+    const response = await complete(text);
+    consumed.resolve(); await finish.promise;
+    return response;
+  }, true);
+  await f.write('first'); const [first] = await f.routes();
+  const history = (method: keyof typeof chatHistoryPaths, payload: object, auth = headers) => f.app.inject({ method: 'POST', url: chatHistoryPaths[method], headers: auth, payload });
+  assert.equal((await history('list', { petID: f.petID }, { host: headers.host, authorization: 'forged' })).statusCode, 401);
+  for (const text of ['查个人记忆：纸船', '记住：纸船']) assert.equal((await f.send(first!.route, { text })).statusCode, 400);
+  const requestID = randomUUID();
+  const conversation = { id: randomUUID(), mode: 'new' };
+  const pending = f.send(first!.route, { requestID, conversation });
+  try {
+    await consumed.promise;
+    assert.deepEqual((await history('list', { petID: f.petID })).json(), { ok: true, page: { rows: [], nextBefore: null } });
+    assert.equal((await history('clear', { petID: f.petID, confirmed: true })).statusCode, 409);
+  } finally { finish.resolve(); }
+  assert.equal((await pending).statusCode, 200);
+  assert.equal((await f.send(first!.route, { requestID })).statusCode, 400);
+  assert.equal(calls, 1);
+  assert.equal((await history('clear', { petID: f.petID })).statusCode, 400);
+  const rows = (await history('list', { petID: f.petID })).json().page.rows;
+  assert.deepEqual(rows, [{ id: conversation.id, number: 1, completedAt: rows[0].completedAt }]);
+  assert.deepEqual((await history('detail', { petID: f.petID, id: conversation.id })).json(), { ok: true, detail: { session: rows[0], turns: [{ requestID, user: '聊聊纸船', assistant: '合成回应', completedAt: rows[0]!.completedAt }], hasEarlier: false } });
+  assert.deepEqual((await history('clear', { petID: f.petID, confirmed: true })).json(), { ok: true });
+  assert.deepEqual((await history('list', { petID: f.petID })).json(), { ok: true, page: { rows: [], nextBefore: null } });
+  assert.equal((await f.send(first!.route)).statusCode, 200);
+  assert.ok((await f.workspace.mutate('delete', { id: f.petID, expectedRevision: 1 })).ok);
+  assert.equal((await history('list', { petID: f.petID })).statusCode, 404);
+  assert.equal((await history('clear', { petID: f.petID, confirmed: true })).statusCode, 404);
+});
+
+test('history failure does not retry the model or suppress its verified reply', use, async t => {
+  let calls = 0;
+  const f = await fixture(t, async () => { calls++; return completion(); }, undefined, syntheticRuntime, true);
+  await f.write('first'); const [first] = await f.routes();
+  await rm(f.historyFile);
+  const requestID = randomUUID();
+  assert.deepEqual((await f.send(first!.route, { requestID })).json(), { ok: true, requestID, text: '合成回应', replayable: true, historyStatus: 'unconfirmed' });
+  assert.equal(calls, 1);
+});
+
+
+test('switches saved models inside one conversation without replaying role data, another session, or renderer text', use, async t => {
+  const outbound: { url: string; messages: { role: string; content: string }[] }[] = [];
+  const f = await fixture(t, async (url, init) => {
+    outbound.push({ url: String(url), messages: JSON.parse(String(init?.body)).messages });
+    return completion();
+  }, undefined, syntheticRuntime, true);
+  await f.write('first'); await f.write('second');
+  const [first, second] = await f.routes();
+  const id = randomUUID(), conversation = { id, mode: 'resume' };
+  const history = (method: keyof typeof chatHistoryPaths, payload: object) => f.app.inject({ method: 'POST', url: chatHistoryPaths[method], headers, payload });
+  assert.equal((await f.send(first!.route, { conversation, history: [{ user: '伪造历史', assistant: '伪造回答' }] })).statusCode, 400);
+  assert.equal((await f.send(first!.route, { conversation })).json().error, 'conversation_missing');
+  assert.equal((await f.send(first!.route, { conversation: null })).statusCode, 400);
+  assert.equal(outbound.length, 0);
+  assert.equal((await f.send(first!.route, { text: '合成普通提问', conversation: { id, mode: 'new' } })).statusCode, 200);
+  assert.equal((await f.send(first!.route, { text: '另一个会话' })).statusCode, 200);
+  const withdraw = await f.share();
+  assert.equal((await f.send(first!.route, { text: '请说说蓝色纸船', conversation })).json().replayable, false);
+  assert.match(JSON.stringify(outbound[2]), /蓝色纸船/);
+  await withdraw();
+  assert.equal((await history('detail', { petID: f.petID, id })).statusCode, 200);
+  assert.equal(outbound.length, 3, 'opening history does not generate');
+  const added = await f.workspace.mutate('add', { expectedRevision: 1, package: { id: 'local.pet', version: '1.0.0' } });
+  assert.ok(added.ok);
+  const other = added.workspace.instances.find(pet => pet.id !== f.petID)!.id;
+  assert.equal((await history('detail', { petID: other, id })).statusCode, 404);
+  for (const mode of ['new', 'resume']) assert.equal((await f.send(second!.route, { petID: other, conversation: { id, mode } })).json().error, 'conversation_missing');
+  assert.equal(outbound.length, 3);
+  assert.equal((await f.send(second!.route, { text: '接着聊', conversation })).statusCode, 200);
+  assert.equal(outbound[3]!.url, 'https://second.invalid/v1/chat/completions');
+  assert.deepEqual(outbound[3]!.messages, [
+    { role: 'user', content: '合成普通提问' }, { role: 'assistant', content: '合成回应' }, { role: 'user', content: '接着聊' },
+  ]);
+  assert.deepEqual((await history('list', { petID: f.petID })).json().page.rows.map((row: { id: string }) => row.id).slice(0, 1), [id]);
+  assert.equal((await history('detail', { petID: f.petID, id })).json().detail.turns.length, 3);
+  assert.equal((await history('clear', { petID: f.petID, confirmed: true })).statusCode, 200);
+  assert.equal((await f.send(second!.route, { conversation })).json().error, 'conversation_missing');
+  assert.equal(outbound.length, 4);
+});
+
+test('retry of a completed logical turn recovers the saved answer without dispatching or appending again', use, async t => {
+  let calls = 0;
+  const f = await fixture(t, async () => { calls++; return completion(); }, undefined, syntheticRuntime, true);
+  await f.write('first'); const [first] = await f.routes();
+  const id = randomUUID(), turnID = randomUUID(), conversation = { id, mode: 'new' };
+  assert.equal((await f.send(first!.route, { conversation, turnID })).statusCode, 200);
+  const requestID = randomUUID();
+  assert.deepEqual((await f.send(first!.route, { requestID, conversation, turnID })).json(), { ok: true, requestID, text: '合成回应', replayable: true, recovered: true });
+  assert.equal((await f.send(first!.route, { conversation, turnID, text: '不是原问题' })).json().error, 'invalid_request');
+  const other = { id: randomUUID(), mode: 'new' };
+  assert.equal((await f.send(first!.route, { conversation: other, turnID })).json().error, 'invalid_request');
+  assert.equal(calls, 1);
+  const res = await f.app.inject({ method: 'POST', url: chatHistoryPaths.detail, headers, payload: { petID: f.petID, id } });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json().detail.turns.map((row: { requestID: string }) => row.requestID), [turnID]);
+});
+
+test('recovery is local even if the resend route changes; a missing saved reply may go to the explicit new model', use, async t => {
+  const providerCalls: string[] = [];
+  const f = await fixture(t, async url => { providerCalls.push(new URL(String(url)).hostname); return completion(); }, undefined, syntheticRuntime, true);
+  await f.write('first'); await f.write('second');
+  const [first, second] = await f.routes();
+  const turnID = randomUUID(), id = randomUUID();
+  assert.equal((await f.send(first!.route, { requestID: turnID, turnID, conversation: { id, mode: 'new' } })).statusCode, 200);
+  const conversation = { id, mode: 'resume' }, requestID = randomUUID();
+  const recovered = await f.send(second!.route, { requestID, turnID, conversation });
+  assert.deepEqual(recovered.json(), { ok: true, requestID, text: '合成回应', replayable: true, recovered: true });
+  assert.deepEqual(providerCalls, ['first.invalid']);
+  assert.equal(f.reads(), 1);
+  const staleRoute = { ...second!.route, fingerprint: 'f'.repeat(64) };
+  const stale = await f.send(staleRoute, { turnID, conversation });
+  assert.equal(stale.json().recovered, true, 'local access is not tied to the availability of a provider route');
+  const missing = await f.send(second!.route, { turnID: randomUUID(), text: '未保存的上一轮', conversation });
+  assert.equal(missing.statusCode, 200);
+  assert.equal(missing.json().recovered, undefined);
+  assert.deepEqual(providerCalls, ['first.invalid', 'second.invalid']);
+  const res = await f.app.inject({ method: 'POST', url: chatHistoryPaths.detail, headers, payload: { petID: f.petID, id } });
+  assert.equal(res.json().detail.turns.length, 2);
+});
+
+test('trusted loopback reads older messages without opening a credential or invoking a provider', use, async t => {
+  let providerCalls = 0;
+  const f = await fixture(t, async () => { providerCalls++; return completion(); }, undefined, syntheticRuntime, true);
+  await f.write('first'); const [first] = await f.routes();
+  const id = randomUUID();
+  for (let i = 1; i <= 7; i++) {
+    const result = await f.send(first!.route, { text: `合成第 ${i} 问`, conversation: { id, mode: i === 1 ? 'new' : 'resume' } });
+    assert.equal(result.statusCode, 200);
+  }
+  const readsBefore = f.reads();
+  await f.app.listen({ host: '127.0.0.1', port: 0 });
+  const address = f.app.server.address(); assert.ok(address && typeof address === 'object');
+  const { requestChatHistory } = await import('../../desktop/src/chat-transport.ts');
+  const session = { port: address.port, token }, input = { petID: f.petID, id };
+  const latest = await requestChatHistory(session, 'detail', input);
+  assert.ok(isHistoryDetailResult(latest, id) && latest.ok && latest.detail.hasEarlier);
+  const before = latest.detail.turns[0]!.requestID;
+  const earlier = await requestChatHistory(session, 'detail', { ...input, before });
+  assert.ok(isHistoryDetailResult(earlier, id, before) && earlier.ok && !earlier.detail.hasEarlier);
+  assert.deepEqual(earlier.detail.turns.map(turn => turn.user), ['合成第 1 问']);
+  assert.deepEqual(await requestChatHistory(session, 'detail', { ...input, before: randomUUID() }), { ok: false, error: 'not_found' });
+  assert.equal(f.reads(), readsBefore);
+  assert.equal(providerCalls, 7);
 });

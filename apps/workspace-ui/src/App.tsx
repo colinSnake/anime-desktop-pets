@@ -10,6 +10,7 @@ import { PetNookIcon } from './PetNookIcon.tsx';
 import { PetPage } from './PetPage.tsx';
 import { PetWorkspaceController, emptyPetState, isDraftDirty, petDisplayName, type PetWorkspaceState } from './pet-state.ts';
 import { petErrorMessages } from './pet-client.ts';
+import { PageLoadingSkeleton } from './PageLoadingSkeleton.tsx';
 
 declare global { interface Window { petDesktop?: DesktopBridge } }
 const loadChat = () => import('./routes/chat.ts');
@@ -18,7 +19,6 @@ const noSubscription = () => () => {};
 const getEmptyChatState = () => emptyChatState;
 const ModelPage = lazy(() => import('./routes/models.ts'));
 const WorkspaceModules = lazy(() => import('./routes/workspace-modules.ts'));
-const loadingPage = <p role="status">正在加载页面…</p>;
 const groups = [
   { name: '陪伴', pages: [{ id: 'pets', label: '桌宠' }, { id: 'chat', label: '聊天' }] },
   { name: '设置', pages: [{ id: 'models', label: '模型管理' }, { id: 'speech', label: '语音互动' }, { id: 'live', label: '直播管理' }, { id: 'advanced', label: '高级' }] },
@@ -27,10 +27,10 @@ const groups = [
 const rolePages = [{ id: 'identity', label: '身份' }, { id: 'memory', label: '记忆' }, { id: 'goals', label: '能力与目标' }] as const;
 type Page = typeof groups[number]['pages'][number]['id'] | typeof rolePages[number]['id'];
 const isModulePage = (page: Page) => page !== 'pets' && page !== 'chat' && page !== 'models';
-type ViewProps = DiagnosticProps & { petState?: PetWorkspaceState; petController?: PetWorkspaceController; initialPage?: Page; chatState?: ChatWorkspaceState; chatController?: ChatWorkspaceController; onChatOpen?: () => void; modelController?: ModelWorkspaceController; speech?: DesktopBridge['speech']; characters?: DesktopBridge['characters']; openWorkspaceData?: DesktopBridge['openWorkspaceData'] };
+type ViewProps = DiagnosticProps & { petState?: PetWorkspaceState; petController?: PetWorkspaceController; initialPage?: Page; chatState?: ChatWorkspaceState; chatController?: ChatWorkspaceController; chatHistory?: DesktopBridge['chatHistory']; onChatOpen?: () => void; modelController?: ModelWorkspaceController; speech?: DesktopBridge['speech']; characters?: DesktopBridge['characters']; openWorkspaceData?: DesktopBridge['openWorkspaceData']; migrateWorkspaceData?: DesktopBridge['migrateWorkspaceData'] };
 
 /** Kept exported for offline rendering; diagnostics are now explicitly under Advanced. */
-export function WorkspaceView({ petState = emptyPetState, petController, initialPage = 'pets', chatState = emptyChatState, chatController, onChatOpen, modelController, speech, characters, openWorkspaceData, ...diagnostics }: ViewProps) {
+export function WorkspaceView({ petState = emptyPetState, petController, initialPage = 'pets', chatState = emptyChatState, chatController, chatHistory, onChatOpen, modelController, speech, characters, openWorkspaceData, migrateWorkspaceData, ...diagnostics }: ViewProps) {
   const [page, setPage] = useState<Page>(initialPage);
   const [visitedModules, setVisitedModules] = useState(() => isModulePage(initialPage));
   const headingRef = useRef<HTMLElement>(null);
@@ -96,14 +96,14 @@ export function WorkspaceView({ petState = emptyPetState, petController, initial
           {!nookStyle && theme}
         </div>
         <div className={`feedback${error || busy ? ' visible' : ''}`} aria-live="polite" aria-atomic="true">{error ? <p role="alert" className="error">{error}</p> : petState.notice ? <p className="sr-only">{petState.notice}</p> : busy ? <p>{({ load: '正在读取配置', importPackages: '正在导入并校验素材', save: '正在保存配置', add: '正在登记配置', clone: '正在复制配置', delete: '正在删除配置', theme: '正在保存主题', start: '正在请求启动实例', stop: '正在请求停止实例', applyDisplay: '正在应用显示偏好', applyBehavior: '正在应用行为偏好', visibility: '正在调整窗口显隐', pause: '正在暂停自有播放器', resume: '正在解除暂停' } as const)[petState.operation!] ?? '正在处理'}…</p> : null}</div>
-        <Suspense fallback={loadingPage}>
-          {page === 'pets' ? <PetPage appearance={theme} state={petState} controller={petController} /> : page === 'chat' ? <ChatPage state={chatState} controller={chatController} appearance={theme} onOpenPets={() => changePage('pets')}
+        <Suspense fallback={<PageLoadingSkeleton />}>
+          {page === 'pets' ? <PetPage appearance={theme} state={petState} controller={petController} /> : page === 'chat' ? <ChatPage state={chatState} controller={chatController} history={chatHistory} appearance={theme} onOpenPets={() => changePage('pets')}
             onOpenPetAgent={chatInstance && !petState.deleteId ? opener => { setVisitedModules(true); setOpenAgent({ petID: chatInstance.id, opener }); } : undefined}
             reference={chatInstance?.package} /> : page === 'models' ? <ModelPage controller={modelController} appearance={theme} /> : null}
         </Suspense>
         {/* Mount on first visit, then retain the module drafts across navigation. */}
-        {visitedModules && <Suspense fallback={isModulePage(page) || activeAgent ? loadingPage : null}>
-          <WorkspaceModules page={activeAgent ? 'agent' : isModulePage(page) ? page : null} workspace={petState.workspace} diagnostics={diagnostics} speech={speech} appearance={interactionLayout ? theme : undefined} characters={characters} openWorkspaceData={openWorkspaceData}
+        {visitedModules && <Suspense fallback={isModulePage(page) || activeAgent ? <PageLoadingSkeleton /> : null}>
+          <WorkspaceModules page={activeAgent ? 'agent' : isModulePage(page) ? page : null} workspace={petState.workspace} diagnostics={diagnostics} speech={speech} appearance={interactionLayout ? theme : undefined} characters={characters} openWorkspaceData={openWorkspaceData} migrateWorkspaceData={migrateWorkspaceData}
             agent={activeAgent && chatCharacter ? { name: chatCharacter.name, opener: activeAgent.opener, chat: chatState, onClose: () => setOpenAgent(undefined) } : undefined}
             selectedInstance={activeAgent ? chatInstance : petState.needsRefresh ? undefined : petState.workspace?.instances.find(pet => pet.id === petState.selectedId)} />
         </Suspense>}
@@ -155,9 +155,9 @@ export function App() {
     // Share the existing lazy route; keep its controller alive after the first visit.
     void loadChat().then(({ ChatWorkspaceController }) => {
       if (!mounted.current) return;
-      const { characters, onlineChat } = window.petDesktop ?? {};
+      const { characters, onlineChat, chatHistory } = window.petDesktop ?? {};
       const memory = typeof characters?.saveChatMemory === 'function' && typeof characters.readMemories === 'function' ? characters : undefined;
-      setChatController(current => current ?? new ChatWorkspaceController(undefined, characters, onlineChat, memory));
+      setChatController(current => current ?? new ChatWorkspaceController(undefined, characters, onlineChat, memory, !!chatHistory));
     }).catch(() => { /* The lazy page surfaces load failures. */ });
   }
   async function refresh(command: 'snapshot' | 'probe') {
@@ -204,5 +204,5 @@ export function App() {
     void refresh('snapshot');
     return () => { mounted.current = false; sequence.current++; running.current = false; };
   }, [controller]);
-  return <WorkspaceView openWorkspaceData={window.petDesktop?.openWorkspaceData} speech={window.petDesktop?.speech} characters={window.petDesktop?.characters} modelController={modelController} chatState={chatState} chatController={chatController} onChatOpen={openChat} petState={petState} petController={controller} snapshot={snapshot} busy={busy} error={error} onRefresh={() => { void refresh('snapshot'); }} onProbe={() => { void refresh('probe'); }} />;
+  return <WorkspaceView openWorkspaceData={window.petDesktop?.openWorkspaceData} migrateWorkspaceData={window.petDesktop?.migrateWorkspaceData} speech={window.petDesktop?.speech} characters={window.petDesktop?.characters} modelController={modelController} chatState={chatState} chatController={chatController} chatHistory={window.petDesktop?.chatHistory} onChatOpen={openChat} petState={petState} petController={controller} snapshot={snapshot} busy={busy} error={error} onRefresh={() => { void refresh('snapshot'); }} onProbe={() => { void refresh('probe'); }} />;
 }
