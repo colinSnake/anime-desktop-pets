@@ -1,4 +1,4 @@
-/** Local model management metadata. No raw credential, reference, or online request API. */
+/** Local model management. Only save accepts a new Key; no reads return Key material or private references. */
 export const MODEL_PROTOCOLS = ['chat-completions', 'responses', 'anthropic', 'gemini'] as const;
 export type ModelProtocol = typeof MODEL_PROTOCOLS[number];
 export const isModelLoopback = (url: URL): boolean => ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname.toLowerCase());
@@ -22,7 +22,10 @@ export type ModelDraft = { id: string; displayName: string; preset: 'openai' | '
 export type SavedModelConnection = ModelDraft & { revision: number; credentialState: 'missing' | 'reference-present' | 'not-required' };
 export type SavedModelConfiguration = { revision: number; defaultConnectionID: string | null; connections: SavedModelConnection[] };
 export type ModelEdit = { connection: ModelDraft; expectedRevision: number };
-export type ModelSave = ModelEdit & { credential: { kind: 'keep' | 'remove' } };
+export const MODEL_API_KEY_MAX_LENGTH = 8192;
+export const validModelAPIKey = (value: unknown): value is string => typeof value === 'string' && value.length > 0 &&
+  value.length <= MODEL_API_KEY_MAX_LENGTH && !/[^\x21-\x7e]/.test(value);
+export type ModelSave = ModelEdit & { credential: { kind: 'keep' | 'remove' } | { kind: 'replace'; key: string } };
 export type ModelDefault = { expectedRevision: number; connectionID: string; entryID: string } | { expectedRevision: number; connectionID: null };
 export type ModelRemove = { expectedRevision: number; connectionID: string; replacementDefault?: string | null };
 export const MODEL_MANAGEMENT_ERRORS = ['invalid_configuration', 'configuration_conflict', 'credentials_unavailable', 'storage_unavailable', 'publication_uncertain', 'busy', 'unavailable'] as const;
@@ -32,7 +35,7 @@ export type ModelManagementReply = { version: 1 } & (
   { ok: true; configuration: SavedModelConfiguration; durability?: 'confirmed' | 'unconfirmed'; retainedCredentialVersions?: boolean; writesBlocked?: true } |
   { ok: false; error: ModelManagementFailure; credentialCleanup?: ModelCleanup }
 );
-export type ModelWorkspaceError = 'write_outcome_unknown' | 'key_input_cancelled' | 'key_input_expired' | 'clipboard_not_key';
+export type ModelWorkspaceError = 'write_outcome_unknown';
 export type ModelWorkspaceReply = ModelManagementReply | { version: 1; ok: false; error: ModelWorkspaceError };
 export type ModelDiscoveryInput = { connectionID: string; expectedRevision: number };
 export type ModelDiscoveryRequest = ModelDiscoveryInput & { operationID: string };
@@ -59,8 +62,6 @@ export interface ModelsBridge {
   save(input: ModelSave): Promise<ModelWorkspaceReply>;
   setDefault(input: ModelDefault): Promise<ModelWorkspaceReply>;
   remove(input: ModelRemove): Promise<ModelWorkspaceReply>;
-  prepareKeySave(input: ModelEdit): Promise<ModelWorkspaceReply>;
-  cancelKeySave(): Promise<void>;
   discover?(input: ModelDiscoveryRequest): Promise<ModelDiscoveryReply>;
   cancelDiscovery?(operationID: string): Promise<void>;
   testConnection?(input: import("./model-probe.ts").ModelProbeOperation): Promise<import("./model-probe.ts").ModelProbeReply>;

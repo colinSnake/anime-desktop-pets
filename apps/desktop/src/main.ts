@@ -10,7 +10,6 @@ import { identityWriteActions, isIdentityWriteInput, validIdentityInput } from '
 import {
   app,
   BrowserWindow,
-  clipboard,
   Menu,
   dialog,
   ipcMain,
@@ -36,7 +35,7 @@ import {
 import { validPackagePickerArgs, validPetArgs } from "./pet-ipc.ts";
 import { PetCoverProvider } from "./pet-cover.ts";
 import { ServiceProcess } from "./service-process.ts";
-import { ModelIPC, type ModelMenuIntent } from './model-ipc.ts';
+import { ModelIPC } from './model-ipc.ts';
 import { KnowledgeFilePicker } from "./knowledge-file.ts";
 import { LegacyCharacterHandoff } from "./legacy-character-handoff.ts";
 import { speechMethods, validSpeechArgs } from "./speech-ipc.ts";
@@ -309,16 +308,12 @@ async function start() {
     markWindowUnavailable();
   });
   if (process.platform === 'darwin') {
-    const installModelMenu = (intent?: ModelMenuIntent) => Menu.setApplicationMenu(Menu.buildFromTemplate([
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
       { role: 'appMenu' }, { role: 'editMenu' },
       { label: 'Codex', submenu: [{ label: '打开 Codex', click: requestCodexLaunch }] },
-      { label: '模型', submenu: [{
-        label: intent ? `保存剪贴板中的 API Key → ${intent.origin}` : '保存剪贴板中的 API Key',
-        enabled: !!intent, click: () => intent?.submit(isWorkspaceVisible() && BrowserWindow.getFocusedWindow() === workspace),
-      }] }, { role: 'windowMenu' },
+      { role: 'windowMenu' },
     ]));
-    models = new ModelIPC(service, { readClipboard: () => clipboard.readText(), menuChanged: installModelMenu });
-    installModelMenu();
+    models = new ModelIPC(service);
     chat = new ChatIPC(service);
     const cancelWorkspaceRequests = () => { models?.cancel(); chat?.cancel(); };
     workspace.webContents.on('did-start-navigation', cancelWorkspaceRequests);

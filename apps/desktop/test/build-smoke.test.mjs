@@ -449,10 +449,10 @@ test('compiled sandbox preload exposes only fixed model management, discovery an
       } };
     } });
     if (platform !== 'darwin') { assert.equal(bridge.models, undefined); continue; }
-    const channels = { list: 'list', save: 'save', setDefault: 'default', remove: 'remove', prepareKeySave: 'prepare-key-save', cancelKeySave: 'cancel-key-save', discover: 'discover', cancelDiscovery: 'cancel-discovery', testConnection: 'test-connection', cancelConnectionTest: 'cancel-connection-test' };
+    const channels = { list: 'list', save: 'save', setDefault: 'default', remove: 'remove', discover: 'discover', cancelDiscovery: 'cancel-discovery', testConnection: 'test-connection', cancelConnectionTest: 'cancel-connection-test' };
     assert.deepEqual(Object.keys(bridge.models), Object.keys(channels));
     for (const [method, channel] of Object.entries(channels)) {
-      const args = method === 'list' || method === 'cancelKeySave' ? [] : method === 'cancelDiscovery' || method === 'cancelConnectionTest' ? ['synthetic-operation'] : [{ synthetic: true }];
+      const args = method === 'list' ? [] : method === 'cancelDiscovery' || method === 'cancelConnectionTest' ? ['synthetic-operation'] : [{ synthetic: true }];
       await bridge.models[method](...args);
       assert.deepEqual(calls.pop(), [`pet:models-${channel}`, ...args]);
     }

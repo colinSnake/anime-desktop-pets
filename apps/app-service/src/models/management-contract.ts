@@ -1,7 +1,7 @@
 /** Private main ↔ utility process contract. Not exported by packages/contracts. */
 import { validateConfiguration } from './config.ts';
 import type { CredentialChange } from './repository.ts';
-import { MODEL_MANAGEMENT_ERRORS, type ModelCleanup, type ModelDefault, type ModelEdit, type ModelManagementFailure, type ModelManagementReply, type ModelRemove } from '../../../../packages/contracts/src/models.ts';
+import { MODEL_MANAGEMENT_ERRORS, validModelAPIKey, type ModelCleanup, type ModelDefault, type ModelEdit, type ModelManagementFailure, type ModelManagementReply, type ModelRemove } from '../../../../packages/contracts/src/models.ts';
 export type { ModelManagementReply, SavedModelConfiguration } from '../../../../packages/contracts/src/models.ts';
 
 export const MODEL_MANAGEMENT_VERSION = 1;
@@ -23,7 +23,6 @@ const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v ===
 const only = (v: Record<string, unknown>, keys: readonly string[]) => Object.keys(v).every(key => keys.includes(key));
 const id = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(v);
 const revision = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
-const validKey = (v: unknown) => typeof v === 'string' && v.length <= 8192 && /^[\x21-\x7e]+$/.test(v);
 
 export function validModelInput(method: ModelAction, value: unknown): boolean {
   if (method === 'list') return value === undefined;
@@ -35,7 +34,7 @@ export function validModelInput(method: ModelAction, value: unknown): boolean {
   if (method !== 'save' || !only(value, ['expectedRevision', 'connection', 'credential'])) return false;
   const { connection, credential } = value;
   if (!record(connection) || Object.hasOwn(connection, 'credentialRef') || Object.hasOwn(connection, 'revision') || !record(credential)) return false;
-  if (credential.kind === 'replace' ? !only(credential, ['kind', 'key']) || !validKey(credential.key) || connection.authMode !== 'apiKey' :
+  if (credential.kind === 'replace' ? !only(credential, ['kind', 'key']) || !validModelAPIKey(credential.key) || connection.authMode !== 'apiKey' :
     (credential.kind !== 'keep' && credential.kind !== 'remove') || !only(credential, ['kind'])) return false;
   try { validateConfiguration({ schemaVersion: 2, revision: 0, defaultConnectionID: null, connections: [{ ...connection, revision: 0 }] }); return true; }
   catch { return false; }

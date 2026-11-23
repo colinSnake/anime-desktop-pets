@@ -1,5 +1,5 @@
 import { isProbeReply, probeError, validProbeInput, type ModelProbeInput, type ModelProbeOperation, type ModelProbeReply } from '../../../packages/contracts/src/model-probe.ts';
-import { validDiscoveryCandidate, type ModelCandidate, type ModelDiscoveryError, type ModelDiscoveryReply, type ModelDefault, type ModelDraft, type ModelEntry, type ModelProtocol, type ModelsBridge, type ModelWorkspaceReply, type SavedModelConfiguration, type SavedModelConnection } from '../../../packages/contracts/src/models.ts';
+import { validDiscoveryCandidate, validModelAPIKey, type ModelCandidate, type ModelDiscoveryError, type ModelDiscoveryReply, type ModelDefault, type ModelDraft, type ModelEntry, type ModelProtocol, type ModelsBridge, type ModelWorkspaceReply, type SavedModelConfiguration, type SavedModelConnection } from '../../../packages/contracts/src/models.ts';
 
 export const modelProtocols: Record<ModelProtocol, string> = {
   'chat-completions': 'Chat Completions', responses: 'OpenAI Responses', anthropic: 'Anthropic Messages', gemini: 'Gemini 原生 API',
@@ -25,7 +25,7 @@ export const modelProviderTemplates = {
 export type ModelProviderTemplate = keyof typeof modelProviderTemplates;
 
 type DraftState = { edit: ModelDraft; expectedRevision: number; isNew: boolean; detach: boolean; provider?: ModelProviderTemplate; proposedProtocol?: ModelProtocol };
-type Operation = { kind: 'load' | 'save' | 'key' | 'default' | 'remove' | 'remove-entry'; id?: string };
+type Operation = { kind: 'load' | 'save' | 'default' | 'remove' | 'remove-entry'; id?: string };
 type Feedback = { text: string; id?: string; error?: boolean };
 type Discovery = {
   id: string;
@@ -72,8 +72,6 @@ const messages: Record<Extract<ModelWorkspaceReply, { ok: false }>['error'], str
   publication_uncertain: '无法确认配置是否已发布。可以重新读取，核对磁盘版本；本次服务重启前不会再写入。',
   write_outcome_unknown: '未收到保存结果。请重新读取，核对已保存的版本。',
   busy: '已有配置操作在处理，请稍后再试。', unavailable: '本地模型管理暂不可用。',
-  key_input_cancelled: '已取消凭证保存，草稿仍保留。', key_input_expired: '凭证操作已超时，请重新准备。',
-  clipboard_not_key: '剪贴板中没有可用的单行 API Key。请重新复制后再试。',
 };
 export const emptyModelState: ModelWorkspaceState = { drafts: new Map(), expanded: new Set(), expandedModels: new Map(), needsRefresh: false, requiresRestart: false };
 const toDraft = ({ revision, credentialState: _status, ...edit }: SavedModelConnection): DraftState => ({ edit: structuredClone(edit), expectedRevision: revision, isNew: false, detach: false });
@@ -88,7 +86,6 @@ export class ModelWorkspaceController {
   private state = emptyModelState;
   private readonly listeners = new Set<() => void>();
   private requested = false;
-  private cancellationSent = false;
   private visibilityGeneration = 0;
   constructor(private readonly bridge?: ModelsBridge, private readonly makeID: () => string = () => crypto.randomUUID()) {}
   get canTest(): boolean { return !!this.bridge?.testConnection && !!this.bridge.cancelConnectionTest; }
@@ -103,9 +100,6 @@ export class ModelWorkspaceController {
     this.visibilityGeneration++;
     this.cancelDiscovery();
     this.cancelConnectionTest();
-    if (this.state.operation?.kind !== 'key' || this.cancellationSent) return;
-    this.cancellationSent = true;
-    void this.bridge?.cancelKeySave().catch(() => { this.cancellationSent = false; });
   }
   async load(): Promise<void> {
     if (!this.bridge || this.state.operation) return;
@@ -139,7 +133,6 @@ export class ModelWorkspaceController {
   }
   toggleConnection(id: string): void {
     if (this.state.expanded.has(id)) this.cancelDiscovery(id);
-    if (this.state.expanded.has(id) && this.state.operation?.kind === 'key' && this.state.operation.id === id) this.leave();
     this.update({ expanded: flip(this.state.expanded, id) });
   }
   toggleModel(id: string, entry: string): void {
@@ -206,7 +199,7 @@ export class ModelWorkspaceController {
   }
   cancelProtocol(id: string): void { this.change(id, draft => ({ ...draft, proposedProtocol: undefined })); }
   detachKey(id: string, detach: boolean): void { this.change(id, draft => ({ ...draft, detach })); }
-  async save(id: string, useClipboard = false, testAfterSave?: readonly string[]): Promise<boolean> {
+  async save(id: string, apiKey = '', testAfterSave?: readonly string[]): Promise<boolean> {
     const draft = this.state.drafts.get(id);
     if (!draft || !this.canWrite() || this.stale(id) || draft.proposedProtocol) return false;
     const { edit, expectedRevision } = draft;
@@ -214,13 +207,21 @@ export class ModelWorkspaceController {
       || [model.contextWindow, model.maxOutputTokens].some(value => value !== undefined && (!Number.isInteger(value) || value < 1 || value > 2147483647)))) {
       this.update({ feedback: { id, error: true, text: '请检查连接名称、接入地址及各模型的名称、API ID 和 Token 容量。' } }); return false;
     }
-    if (useClipboard ? edit.authMode !== 'apiKey' || draft.detach : keyNeedsDecision(draft, this.saved(id)) && !draft.detach) {
+    if (apiKey && (!validModelAPIKey(apiKey) || edit.authMode !== 'apiKey' || draft.detach)) {
+      this.update({ feedback: { id, error: true, text: '请输入有效的单行 API Key，不含空格。' } }); return false;
+    }
+    const saved = this.saved(id);
+    if (!apiKey && keyNeedsDecision(draft, saved) && !draft.detach) {
       this.update({ feedback: { id, error: true, text: '地址、协议或鉴权已变更。请明确解除旧凭证绑定，或用新 Key 保存。' } }); return false;
     }
+    if (testAfterSave?.length && edit.authMode === 'apiKey' && !apiKey && (draft.detach || saved?.credentialState !== 'reference-present')) {
+      this.update({ feedback: { id, error: true, text: '测试连接前请填写 API Key，或取消勾选测试后仅保存配置。' } }); return false;
+    }
     const generation = this.visibilityGeneration;
-    const input = { connection: edit, expectedRevision };
-    const published = await this.perform({ kind: useClipboard ? 'key' : 'save', id }, () => useClipboard
-      ? this.bridge!.prepareKeySave(input) : this.bridge!.save({ ...input, credential: { kind: draft.detach ? 'remove' : 'keep' } }));
+    const published = await this.perform({ kind: 'save', id }, () => this.bridge!.save({ connection: edit, expectedRevision,
+      credential: apiKey ? { kind: 'replace', key: apiKey } : { kind: draft.detach ? 'remove' : 'keep' },
+    }));
+    apiKey = ''; // Do not retain the submitted value while a post-save probe runs.
     if (published && testAfterSave?.length) {
       const revision = this.saved(id)?.revision;
       let started = false;
@@ -385,7 +386,6 @@ export class ModelWorkspaceController {
   private async perform(operation: Operation, run: () => Promise<ModelWorkspaceReply>): Promise<boolean> {
     this.cancelDiscovery();
     this.cancelConnectionTest();
-    if (operation.kind === 'key') this.cancellationSent = false;
     this.update({ operation, feedback: undefined });
     let result: ModelWorkspaceReply;
     try { result = await run(); }
@@ -396,11 +396,11 @@ export class ModelWorkspaceController {
       const suffix = cleanup === 'pending' || cleanup === 'retained_uncertain' ? ' 无法确认新凭证是否已清理。' : '';
       this.update({ operation: undefined, needsRefresh: kind === 'load' || ['storage_unavailable', 'configuration_conflict', 'publication_uncertain', 'write_outcome_unknown'].includes(result.error),
         requiresRestart: this.state.requiresRestart || result.error === 'publication_uncertain',
-        feedback: { id, text: messages[result.error] + suffix, error: result.error !== 'key_input_cancelled' } });
+        feedback: { id, text: messages[result.error] + suffix, error: true } });
       return false;
     }
     const drafts = new Map(this.state.drafts);
-    if (id && (kind === 'save' || kind === 'key' || kind === 'remove')) drafts.delete(id);
+    if (id && (kind === 'save' || kind === 'remove')) drafts.delete(id);
     const note = kind === 'remove-entry' ? '模型已从本地配置移除。' : kind === 'remove' ? '连接已从本地配置移除。' : kind === 'default' ? '已更新本地默认值。' : '已保存本地配置，尚未测试连接。';
     const durability = result.durability === 'unconfirmed' ? ' 文件发布后未确认磁盘同步，请重新读取核对。' : '';
     const retained = result.retainedCredentialVersions ? ' 旧凭证条目仍保留。' : '';

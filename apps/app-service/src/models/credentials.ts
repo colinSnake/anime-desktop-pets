@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { validModelAPIKey } from '../../../../packages/contracts/src/models.ts';
 import { ModelError } from './errors.ts';
 
 /** Trusted host port to an OS secure store. create MUST be add-only (never upsert),
@@ -16,7 +17,6 @@ export class CredentialPreparationUncertain extends ModelError {
 export type PreparedCredential = Readonly<{ ref: string }>;
 export const CREDENTIAL_SERVICE = 'local.anime-desktop-pets.models.v2';
 export const isVaultReference = (ref: unknown): ref is string => typeof ref === 'string' && /^mcred-v1-[a-f0-9]{64}$/.test(ref);
-const validKey = (key: unknown): key is string => typeof key === 'string' && key.length > 0 && key.length <= 8192 && /^[\x21-\x7e]+$/.test(key);
 const MAX_PENDING_READS = 3;
 const cancelled = (signal: AbortSignal) => { if (signal.aborted) throw new ModelError('cancelled'); };
 
@@ -25,7 +25,7 @@ export class CredentialVault {
   private readonly preparations = new WeakMap<PreparedCredential, { phase: 'pending' | 'published' | 'discarding'; receipt?: string }>();
   constructor(private readonly backend?: SecureCredentialBackend) {}
   async prepare(connectionID: string, key: string): Promise<PreparedCredential> {
-    if (!this.backend || typeof connectionID !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(connectionID) || !validKey(key)) throw new ModelError('credentials_unavailable');
+    if (!this.backend || typeof connectionID !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(connectionID) || !validModelAPIKey(key)) throw new ModelError('credentials_unavailable');
     const ref = `mcred-v1-${randomBytes(32).toString('hex')}`;
     // Bind the stored envelope to its immutable version, so copying another
     // account's payload cannot silently change the identity of this reference.
@@ -53,7 +53,7 @@ export class CredentialVault {
       const value: unknown = JSON.parse(raw);
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error();
       const v = value as Record<string, unknown>;
-      if (Object.keys(v).sort().join(',') !== 'connectionID,key,ref,version' || v.version !== 1 || v.ref !== ref || typeof v.connectionID !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(v.connectionID) || !validKey(v.key)) throw Error();
+      if (Object.keys(v).sort().join(',') !== 'connectionID,key,ref,version' || v.version !== 1 || v.ref !== ref || typeof v.connectionID !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(v.connectionID) || !validModelAPIKey(v.key)) throw Error();
       if (connectionID !== undefined && v.connectionID !== connectionID) throw Error();
       return v.key;
     } catch { throw new ModelError('credentials_unavailable'); }

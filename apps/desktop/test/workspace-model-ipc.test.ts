@@ -6,9 +6,9 @@ import { modelProbeIPC } from '../../../packages/contracts/src/model-probe.ts';
 import { MODEL_DISCOVERY_IPC, MODEL_IPC } from '../src/model-ipc.ts';
 import { registerWorkspaceModelIPC } from '../src/workspace-model-ipc.ts';
 
-const readable = [chatIPC.list, chatIPC.cancel, MODEL_IPC.list, MODEL_IPC.cancelKeySave,
+const readable = [chatIPC.list, chatIPC.cancel, MODEL_IPC.list,
   MODEL_DISCOVERY_IPC.cancelDiscovery, modelProbeIPC.cancelConnectionTest];
-const actions = [chatIPC.send, MODEL_IPC.save, MODEL_IPC.setDefault, MODEL_IPC.remove, MODEL_IPC.prepareKeySave,
+const actions = [chatIPC.send, MODEL_IPC.save, MODEL_IPC.setDefault, MODEL_IPC.remove,
   MODEL_DISCOVERY_IPC.discover, modelProbeIPC.testConnection];
 
 function fixture() {

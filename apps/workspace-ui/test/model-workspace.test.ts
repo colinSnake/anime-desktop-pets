@@ -18,12 +18,36 @@ function fixture(overrides: Partial<ModelsBridge> = {}) {
   const bridge: ModelsBridge = {
     list: async () => good(), save: async input => { inputs.push(['save', input]); return good({ ...initial(), revision: 4, connections: [...initial().connections.filter(c => c.id !== input.connection.id), { ...input.connection, credentialState: 'missing', revision: 4 }] }); },
     setDefault: async input => { inputs.push(['default', input]); return good(); }, remove: async input => { inputs.push(['remove', input]); return good(); },
-    prepareKeySave: async input => { inputs.push(['key', input]); return bad('key_input_cancelled'); }, cancelKeySave: async () => { inputs.push(['cancel', undefined]); }, ...overrides,
+    ...overrides,
   };
   const controller = new ModelWorkspaceController(bridge, () => `generated-${inputs.length}-${++next}`);
   let next = 0;
   return { controller, inputs, get: controller.getSnapshot };
 }
+
+test('the model editor offers an empty password input without the clipboard menu workflow', async () => {
+  const config = initial(); config.connections[0]!.credentialState = 'reference-present';
+  const { controller: c, get } = fixture({ list: async () => good(config) });
+  await c.load(); c.edit('a');
+  const html = renderToStaticMarkup(createElement(ModelEditorDialog, { editor: { kind: 'edit', id: 'a' },
+    state: get(), controller: c, onMode() {}, onClose() {}, onSaved() {} }));
+  assert.match(html, /API Key[\s\S]*<input[^>]+type="password"[^>]+placeholder="留空保留原凭证"/);
+  assert.doesNotMatch(html, /从剪贴板保存|保存剪贴板中的 API Key|type="password"[^>]*value=/);
+});
+
+test('a new Key replaces the bound Key in one save without entering controller state or probing', async () => {
+  const config = initial(); config.connections[0]!.credentialState = 'reference-present';
+  const key = 'synthetic-entered-key';
+  const { controller: c, get, inputs } = fixture({ list: async () => good(config),
+    testConnection: async () => assert.fail('ordinary save must not probe'), cancelConnectionTest: async () => {} });
+  await c.load(); c.edit('a'); c.patch('a', { baseURL: 'https://another.invalid/v1' });
+  assert.equal(await c.save('a'), false); assert.equal(inputs.length, 0);
+  assert.equal(await c.save('a', 'invalid key'), false); assert.equal(inputs.length, 0);
+  const { edit: connection, expectedRevision } = get().drafts.get('a')!;
+  assert.equal(await c.save('a', key), true);
+  assert.deepEqual(inputs, [['save', { connection, expectedRevision, credential: { kind: 'replace', key } }]]);
+  assert.doesNotMatch(JSON.stringify({ ...get(), drafts: [...get().drafts] }), /synthetic-entered-key/);
+});
 
 test('independent connection and model folds retain both connection drafts and stable model entry IDs', async () => {
   const { controller: c, get, inputs } = fixture(); await c.load();
@@ -62,15 +86,15 @@ test('changing protocol confirms removal of incompatible options, never overwrit
   assert.deepEqual((inputs[0]![1] as Parameters<ModelsBridge['save']>[0]).credential, { kind: 'remove' });
 });
 
-test('new drafts start with explicit protocol and stable IDs and never send a Key value through the bridge', async () => {
+test('new drafts start with explicit protocol and stable IDs and can save a not-yet-bound connection', async () => {
   const { controller: c, get, inputs } = fixture(); await c.load();
   const id = c.add('openai')!; const draft = get().drafts.get(id)!.edit;
   assert.equal(draft.apiProtocol, 'responses'); assert.notEqual(id, draft.defaultModelEntryID);
   c.patchEntry(id, draft.defaultModelEntryID, { modelID: 'manual-model', displayName: '手工目录' });
-  await c.save(id, true);
-  assert.equal(inputs[0]?.[0], 'key'); assert.deepEqual(Object.keys(inputs[0]![1] as object).sort(), ['connection', 'expectedRevision']);
-  assert.equal(get().drafts.has(id), true);
-  await c.save(id); assert.equal(get().drafts.has(id), false);
+  assert.equal(await c.save(id), true);
+  assert.equal(inputs.length, 1);
+  assert.deepEqual((inputs[0]![1] as Parameters<ModelsBridge['save']>[0]).credential, { kind: 'keep' });
+  assert.equal(get().drafts.has(id), false);
 });
 
 test('unknown write outcome blocks retry; refresh keeps the draft and stale revisions need explicit reload', async () => {
@@ -263,14 +287,13 @@ test('a readable manifest after indeterminate publication is read-only until the
   assert.match(html, /重启前只读/);
 });
 
-test('leaving the model page cancels a prepared Key save once and retains the draft', async () => {
-  let finish!: (reply: ModelWorkspaceReply) => void, cancels = 0;
-  const { controller: c, get } = fixture({ prepareKeySave: () => new Promise(resolve => { finish = resolve; }), cancelKeySave: async () => { cancels++; } });
-  await c.load(); c.edit('a'); c.patch('a', { displayName: '跨页草稿' });
-  const pending = c.save('a', true);
-  c.leave(); c.leave(); assert.equal(cancels, 1);
-  finish(bad('key_input_cancelled')); await pending;
-  assert.equal(get().drafts.get('a')?.edit.displayName, '跨页草稿');
+test('an uncertain Key save leaves the non-secret draft and requires re-reading before any retry', async () => {
+  const { controller: c, get } = fixture({ save: async () => bad('write_outcome_unknown') });
+  await c.load(); c.edit('a'); c.patch('a', { displayName: '保留的配置草稿' });
+  assert.equal(await c.save('a', 'synthetic-uncertain-key'), false);
+  assert.equal(get().drafts.get('a')?.edit.displayName, '保留的配置草稿');
+  assert.equal(get().needsRefresh, true);
+  assert.doesNotMatch(JSON.stringify({ ...get(), drafts: [...get().drafts] }), /synthetic-uncertain-key/);
 });
 
 test('deleting a saved connection with an older revision works against the isolated configuration service', { skip: process.platform === 'win32' }, async t => {
@@ -404,7 +427,7 @@ test('post-save batch tests require explicit opt-in and a confirmed write, and p
       return { version: 1, ok: true, connectionID: input.connectionID, revision: 9, entryID: input.entryID };
     }, cancelConnectionTest: async () => {} });
     await c.load(); c.edit('a');
-    assert.equal(await c.save('a', false, optIn ? ['m', 'n'] : undefined), !fails);
+    assert.equal(await c.save('a', 'synthetic-test-key', optIn ? ['m', 'n'] : undefined), !fails);
     assert.deepEqual(requests, optIn && !fails ? ['m', 'n'] : []);
   }
 });
@@ -426,7 +449,7 @@ test('leaving before save settles prevents any post-save connection test', async
   const { controller: c } = fixture({ save: () => new Promise(resolve => { confirm = resolve; }),
     testConnection: async () => { assert.fail('a departed editor must not send'); }, cancelConnectionTest: async () => {} });
   await c.load(); c.edit('a');
-  const pending = c.save('a', false, ['m']); c.leave();
+  const pending = c.save('a', 'synthetic-test-key', ['m']); c.leave();
   const saved = initial(); saved.connections[0]!.credentialState = 'reference-present';
   confirm(good(saved)); assert.equal(await pending, true);
 });

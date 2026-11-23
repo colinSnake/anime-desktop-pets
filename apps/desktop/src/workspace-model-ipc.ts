@@ -21,7 +21,7 @@ export function registerWorkspaceModelIPC(handle: (channel: string, listener: Ha
   for (const method of Object.keys(chatIPC) as (keyof typeof chatIPC)[])
     handle(chatIPC[method], (event, ...args) => chat.invoke(method, admit(event, args, method === 'list' || method === 'cancel'), args));
   for (const method of Object.keys(MODEL_IPC) as (keyof typeof MODEL_IPC)[])
-    handle(MODEL_IPC[method], (event, ...args) => models.invoke(method, admit(event, args, method === 'list' || method === 'cancelKeySave'), args));
+    handle(MODEL_IPC[method], (event, ...args) => models.invoke(method, admit(event, args, method === 'list'), args));
   for (const method of Object.keys(modelProbeIPC) as (keyof typeof modelProbeIPC)[])
     handle(modelProbeIPC[method], (event, ...args) => models.invokeProbe(method, admit(event, args, method === 'cancelConnectionTest'), args));
   for (const method of Object.keys(MODEL_DISCOVERY_IPC) as (keyof typeof MODEL_DISCOVERY_IPC)[])

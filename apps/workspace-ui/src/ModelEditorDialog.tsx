@@ -1,5 +1,5 @@
-import { useRef, useState } from 'react';
-import { isModelLoopback, normalizeModelBaseURL } from '../../../packages/contracts/src/models.ts';
+import { useEffect, useRef, useState } from 'react';
+import { isModelLoopback, MODEL_API_KEY_MAX_LENGTH, normalizeModelBaseURL } from '../../../packages/contracts/src/models.ts';
 import { ModelConnectionFields, ModelConnectionOptions, ModelEntryOptions, ModelField, modelName } from './ModelConnectionEditor.tsx';
 import { ModelDialog } from './ModelDialog.tsx';
 import { PetNookIcon } from './PetNookIcon.tsx';
@@ -16,7 +16,15 @@ export function ModelEditorDialog({ editor, state, controller, onMode, onClose, 
   const [parameterDrafts, setParameterDrafts] = useState<ReadonlySet<string>>(new Set());
   const [confirmClear, setConfirmClear] = useState(false);
   const modelToFocus = useRef<string>(undefined);
+  const keyInput = useRef<HTMLInputElement>(null);
   const [approved, setApproved] = useState<{ id: string; draft: object }>();
+  useEffect(() => {
+    const clear = () => { if (keyInput.current) keyInput.current.value = ''; setApproved(undefined); controller.leave(); };
+    const visibility = () => { if (document.hidden) clear(); };
+    document.addEventListener('visibilitychange', visibility);
+    window.addEventListener('pagehide', clear);
+    return () => { document.removeEventListener('visibilitychange', visibility); window.removeEventListener('pagehide', clear); };
+  }, [controller]);
   const adding = editor.kind === 'add', id = (adding ? editor[editor.mode] : editor.id)!;
   const draft = state.drafts.get(id), connection = draft?.edit;
   const parametersOpen = parameterDrafts.has(id);
@@ -28,19 +36,21 @@ export function ModelEditorDialog({ editor, state, controller, onMode, onClose, 
   const saved = state.configuration?.connections.find(item => item.id === id);
   const busy = !!state.operation || state.connectionTest?.kind === 'pending';
   const blocked = busy || state.needsRefresh || state.requiresRestart;
-  const stale = controller.stale(id), awaitingKey = state.operation?.kind === 'key' && state.operation.id === id;
+  const stale = controller.stale(id);
   const feedback = !state.feedback?.id || state.feedback.id === id ? state.feedback : undefined;
   const decision = draft && keyNeedsDecision(draft, saved);
   const shown = connection?.models ?? [];
   const global = state.configuration?.defaultConnectionID === id;
   const defaultUnsaved = !!saved && connection?.defaultModelEntryID !== saved.defaultModelEntryID;
-  const oldKeyRetained = saved?.credentialState === 'reference-present' && !decision && !draft?.detach;
   const offerTestAfterSave = controller.canTest && !!connection && (connection.authMode === 'none' || !draft?.detach);
   const normalizedBase = connection && normalizeModelBaseURL(connection.baseURL, connection.apiProtocol);
   const canTestAfterSave = offerTestAfterSave && !!normalizedBase && (connection.authMode === 'apiKey' || isModelLoopback(new URL(normalizedBase)));
   const testAfterSave = canTestAfterSave && approved?.id === id && approved.draft === draft;
-  const save = (clipboard: boolean) => {
-    void controller.save(id, clipboard, testAfterSave ? shown.map(entry => entry.entryID) : undefined).then(published => {
+  const save = () => {
+    const input = keyInput.current;
+    const apiKey = input?.value ?? '';
+    if (input) input.value = '';
+    void controller.save(id, apiKey, testAfterSave ? shown.map(entry => entry.entryID) : undefined).then(published => {
       if (published) onSaved();
       else {
         if (shown.some(entry => !entry.modelID.trim() || !entry.displayName.trim()
@@ -64,12 +74,10 @@ export function ModelEditorDialog({ editor, state, controller, onMode, onClose, 
   const detachKey = saved?.credentialState === 'reference-present' && draft && <label className="model-check model-note"><input type="checkbox" checked={draft.detach}
     onChange={event => controller.detachKey(id, event.currentTarget.checked)} />保存时解除旧 Key 绑定</label>;
   return <ModelDialog title={adding ? '添加配置' : '编辑配置'} subtitle={adding ? undefined : saved?.displayName} locked={busy} onClose={onClose} footer={<>{testOption}
-    {awaitingKey ? <button type="button" className="button secondary" onClick={() => controller.leave()}>取消等待</button>
-      : state.connectionTest?.kind === 'pending' ? <button type="button" className="button secondary" onClick={() => controller.cancelConnectionTest(id, true)}>停止等待测试</button>
+    {state.connectionTest?.kind === 'pending' ? <button type="button" className="button secondary" onClick={() => controller.cancelConnectionTest(id, true)}>停止等待测试</button>
       : <button type="button" className="button secondary" disabled={busy} onClick={onClose}>取消</button>}
     {draft && <>
-      <button type="button" className="button primary" disabled={blocked || stale || !!draft.proposedProtocol || (!!decision && !draft.detach)
-        || (testAfterSave && connection?.authMode === 'apiKey' && !oldKeyRetained)} onClick={() => save(false)}>保存</button>
+      <button type="button" className="button primary" disabled={blocked || stale || !!draft.proposedProtocol} onClick={save}>保存</button>
     </>}
   </>}>
     {adding && <div className="model-modes" role="group" aria-label="添加方式">
@@ -89,11 +97,15 @@ export function ModelEditorDialog({ editor, state, controller, onMode, onClose, 
         {draft.proposedProtocol && <div className="model-inline"><p>切换至 {modelProtocols[draft.proposedProtocol]} 会清除不兼容的输出设置。</p>
           <div className="model-actions"><button type="button" className="button secondary" onClick={() => controller.cancelProtocol(id)}>保留原协议</button>
             <button type="button" className="button primary" onClick={() => controller.confirmProtocol(id)}>清除兼容项并切换</button></div></div>}
-        {connection.authMode === 'apiKey' && <section className="model-key" aria-label="API Key"><PetNookIcon name="lock" /><strong>API Key</strong>
-          <span className="model-key-state">{draft.detach ? '保存时解除' : saved?.credentialState === 'reference-present' ? '已绑定' : '缺少 Key'}</span>
-          {!draft.detach && <button type="button" className="model-text-button" disabled={blocked || stale || !!draft.proposedProtocol}
-            title="需在 macOS「模型」菜单确认" onClick={() => save(true)}>从剪贴板保存</button>}
-        </section>}
+        {connection.authMode === 'apiKey' && <label className="model-field model-key">
+          <span className="model-key-label"><PetNookIcon name="lock" />API Key
+            <span className="model-key-state" aria-hidden="true">{draft.detach ? '保存时解除' : saved?.credentialState === 'reference-present' ? '已绑定' : '缺少 Key'}</span>
+          </span>
+          {!draft.detach && <input key={JSON.stringify([id, draft.expectedRevision, draft.provider, connection.baseURL, connection.apiProtocol])}
+            ref={keyInput} type="password" placeholder={decision ? '输入新的 API Key' : saved?.credentialState === 'reference-present' ? '留空保留原凭证' : '输入或粘贴 API Key'}
+            maxLength={MODEL_API_KEY_MAX_LENGTH} autoComplete="new-password" autoCapitalize="none" spellCheck={false}
+            disabled={!!draft.proposedProtocol} onChange={() => setApproved(undefined)} />}
+        </label>}
         {decision && <p className="model-alert">地址、协议或鉴权已变更。请更换 Key，或明确解除旧绑定。</p>}
         {(decision || draft.detach) && detachKey}
         <ModelParameters draftKey={`${id}:${draft.provider ?? ''}:${draft.expectedRevision}`} entries={shown} expanded={parametersOpen}
@@ -136,7 +148,6 @@ export function ModelEditorDialog({ editor, state, controller, onMode, onClose, 
         <ModelDiscoveryPanel id={id} discovery={state.discovery} controller={controller} models={connection.models} />
       </div></details>}
     </>}
-    {awaitingKey && <p className="model-note" role="status">请在 macOS 菜单栏选择「模型 → 保存剪贴板中的 API Key」，核对目标地址。等待确认超过 45 秒会取消。</p>}
     {feedback && <p className={feedback.error ? 'model-alert' : 'model-note'} role={feedback.error ? 'alert' : 'status'}>{feedback.text}</p>}
   </ModelDialog>;
 }
