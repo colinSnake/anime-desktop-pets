@@ -74,3 +74,42 @@ test('six one-shot movements use the authored media interval, appropriate direct
   assert.notEqual(schedule.next(40_000, gate, atEdge)?.clip, right.clip);
   assert.equal(schedule.next(60_000, gate, { ...atEdge, size: area, origin: area })?.kind, 'pose');
 });
+
+test('companion daily shuffle only uses approved, present one-shot poses', () => {
+  const files = new Set(['companion-stretch', 'companion-4f74c11cf2c1', 'companion-24eb1c6816e4', 'companion-jump', 'companion-hover']);
+  const schedule = new ActivitySchedule(0, prefs, () => 0, files);
+  const clips = [20_000, 40_000, 60_000, 80_000].map(now => schedule.next(now, gate, geometry)?.clip);
+  assert.deepEqual(new Set(clips.slice(0, 3)), new Set(['companion-stretch', 'companion-4f74c11cf2c1', 'companion-24eb1c6816e4']));
+  assert.notEqual(clips[2], clips[3]);
+  const missing = new ActivitySchedule(0, { ...prefs, movement: true }, () => 0, new Set(['companion-wave']));
+  assert.equal(missing.next(20_000, gate, geometry), undefined);
+  const partial = new ActivitySchedule(0, { ...prefs, movement: true }, () => 0, new Set(['companion-stretch']));
+  assert.deepEqual(partial.next(20_000, gate, geometry), { kind: 'pose', clip: 'companion-stretch' });
+});
+
+test('companion plans keep both directions bounded and use shorter, distinct movement profiles', () => {
+  const files = new Set(['companion-26bf18c72287', 'companion-77bd0761591e', 'companion-307947b984ef']);
+  const schedule = new ActivitySchedule(0, { ...prefs, movement: true }, () => 0, files);
+  assert.equal(schedule.next(20_000, { ...gate, interaction: true }, geometry), undefined);
+  assert.equal(schedule.next(40_000, gate, geometry)?.clip, 'companion-travel-move02');
+  const profiles = {
+    move01left: ['companion-26bf18c72287', 100, 0], move01right: ['companion-26bf18c72287', 100, 0],
+    move02left: ['companion-77bd0761591e', 100, 0], move02: ['companion-77bd0761591e', 100, 0],
+    move03left: ['companion-307947b984ef', 86, 40], move03right: ['companion-307947b984ef', 86, 40],
+  } as const;
+  for (const move of movements) {
+    const [file, distance, height] = profiles[move];
+    const plan = schedule.plan(move, geometry)!;
+    assert.equal(clipSource(plan.clip).file, file);
+    assert.deepEqual(clipSource(plan.clip).range, plan.range);
+    assert.equal(loops(plan.clip), false);
+    const [start, end] = plan.range;
+    assert.deepEqual(travelPosition(plan, start - 1), origin);
+    assert.equal(travelPosition(plan, (end + start) / 2).y, origin.y - height);
+    assert.deepEqual(travelPosition(plan, end), { x: origin.x + (moveFacing(move) === 'left' ? -distance : distance), y: origin.y });
+  }
+  assert.ok(schedule.plan('move02', geometry)!.range[1] - schedule.plan('move02', geometry)!.range[0] <
+    schedule.plan('move01right', geometry)!.range[1] - schedule.plan('move01right', geometry)!.range[0]);
+  assert.equal(schedule.plan('move01left', { ...geometry, origin: { x: area.x, y: 0 } }), undefined);
+  assert.equal(new ActivitySchedule(0, prefs, () => 0, new Set(['companion-26bf18c72287'])).plan('move02', geometry), undefined);
+});

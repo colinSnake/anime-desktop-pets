@@ -129,6 +129,17 @@ test('video settings offer visibility and both behavior controls', async () => {
  assert.doesNotMatch(html, /id="[^"]*-scheduled"[^>]*disabled/);
 });
 
+test('whale settings expose both saved behavior controls without tying release to movement', async () => {
+ const { PetSettings } = await import('../src/PetSettings.tsx');
+ const s = state();
+ s.workspace!.playerMode = 'video';
+ s.workspace!.instances[0]!.package = dafeiyu;
+ const html = renderToStaticMarkup(createElement(PetSettings, { state: s, controller, onClose() {} }));
+ assert.match(html, /id="[^"]*-scheduled"/);
+ assert.match(html, /id="[^"]*-movement"/);
+ assert.match(html, /不影响拖拽回弹/);
+});
+
 test('the pet cover and member avatar disable native image dragging, including the fallback', () => {
  for (const avatar of [false, true]) {
   const html = renderToStaticMarkup(createElement(PetCover, { reference: dafeiyu, avatar }));

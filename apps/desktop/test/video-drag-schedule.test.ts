@@ -41,13 +41,13 @@ print(json.dumps([vel,rows]))`;
   assert.equal(spring.position().y, 460);
 });
 
-function session(options?: DragScheduleOptions) {
-  let position = origin;
+function session(options?: DragScheduleOptions, start = origin, workArea = area) {
+  let position = start;
   let reduced = false;
   const poses: DragPose[] = [];
   const drops: typeof origin[] = [];
   const faces: string[] = [];
-  const drag = new DragSchedule({ position: () => position, size: () => ({ width: 200, height: 200 }), workArea: () => area,
+  const drag = new DragSchedule({ position: () => position, size: () => ({ width: 200, height: 200 }), workArea: () => workArea,
     move: point => { position = point; }, show: pose => { poses.push(pose); }, face: face => { if (face) faces.push(face); },
     onDrop: point => { drops.push(point); }, reducedMotion: () => reduced, random: () => 0 }, options);
   return { drag, poses, drops, faces, position: () => position, reduced: () => { reduced = true; } };
@@ -162,8 +162,9 @@ test('press threshold, slow drag, and held-fast drag never turn into release ani
   drag.move({ x: 180, y: 160 }, 150);
   assert.equal(poses.at(-1), 'move02');
   drag.tick(231);
-  assert.equal(poses.at(-1), 'idle');
+  assert.equal(poses.at(-1), 'move02', 'a brief pointer gap does not restart the idle decoder');
   assert.equal(drag.finish(235, true), 'drop');
+  assert.equal(poses.at(-1), 'idle', 'a light release returns to idle immediately');
   assert.deepEqual(drops, [{ x: 150, y: 110 }]);
   assert.deepEqual(position(), drops[0]);
   assert.ok(!poses.some(p => p.startsWith('release-')));
@@ -271,4 +272,166 @@ test('new left press supersedes a spring; canceled or disabled movement never fa
   drag.move({ x: 215, y: 160 }, 190);
   assert.equal(drag.finish(200, true), 'drop');
   assert.equal(drops.length, 2);
+});
+
+
+test('flick distance follows the pointer at every work-area edge, including a negative desktop', () => {
+  for (const offset of [0, -1000]) for (const direction of [
+    { x: -1, y: 0 }, { x: -1, y: -1 }, { x: 0, y: -1 }, { x: 1, y: -1 },
+    { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }, { x: -1, y: 1 },
+  ]) for (const releaseMode of ['animation', 'companion'] as const) {
+    const start = { x: offset + (direction.x > 0 ? 288 : 12), y: offset + (direction.y > 0 ? 288 : 12) };
+    const cursor = { x: start.x + 100, y: start.y + 100 };
+    const { drag, position, drops, poses } = session({ releaseMode, companionHover: true, companionRebound: true },
+      start, { x: offset, y: offset, width: 500, height: 500 });
+    drag.begin(cursor, 0);
+    drag.move({ x: cursor.x + direction.x * 12, y: cursor.y + direction.y * 12 }, 20);
+    drag.move({ x: cursor.x + direction.x * 36, y: cursor.y + direction.y * 36 }, 50);
+    const clamped = position();
+    assert.equal(drag.finish(55, true), 'flick', `${releaseMode}: ${JSON.stringify({ offset, direction })}`);
+    assert.deepEqual(drops, [clamped], 'persist the window point, not the unclamped pointer');
+    assert.equal(drag.isAirborne, true);
+    assert.match(poses.at(-1)!, releaseMode === 'companion' ? /^companion-rebound$/ : /^release-/);
+  }
+});
+
+test('slow left and upper-left drags keep their animation across normal gaps between pointer events', () => {
+  for (const dy of [0, -3]) {
+    const { drag, poses } = session(undefined, { x: 500, y: 400 });
+    drag.begin({ x: 600, y: 500 }, 0);
+    for (let step = 1; step <= 8; step++) {
+      const now = step * 100;
+      drag.move({ x: 600 - step * 12, y: 500 + step * dy }, now);
+      for (let tick = now + 16; tick < now + 100; tick += 16) drag.tick(tick);
+    }
+    assert.deepEqual(poses, ['move01left'], 'timer ticks must not alternate walking and idle during one slow drag');
+    drag.tick(1050);
+    assert.equal(poses.at(-1), 'idle', 'a genuine stop still returns to idle');
+    assert.equal(drag.finish(1055, true), 'drop', 'pose smoothing must not revive stale release momentum');
+  }
+});
+
+
+test('edge recognition still rejects tiny, slow, braked and held releases in both pet modes', () => {
+  const traces = [
+    [{ time: 20, distance: 10 }, { time: 40, distance: 20 }],
+    [{ time: 200, distance: 20 }, { time: 400, distance: 40 }],
+    [{ time: 30, distance: 30 }, { time: 60, distance: 32 }],
+    [{ time: 30, distance: 30 }, { time: 60, distance: 60 }],
+  ];
+  for (const releaseMode of ['animation', 'companion'] as const) for (const direction of [
+    { x: -1, y: 0 }, { x: -1, y: -1 }, { x: 1, y: 0 }, { x: 1, y: 1 },
+  ]) for (const [index, trace] of traces.entries()) {
+    const start = { x: direction.x < 0 ? 0 : 300, y: direction.y < 0 ? 0 : 300 };
+    const state = session({ releaseMode, companionHover: true, companionRebound: true }, start,
+      { x: 0, y: 0, width: 500, height: 500 });
+    const cursor = { x: start.x + 100, y: start.y + 100 };
+    state.drag.begin(cursor, 0);
+    for (const sample of trace) {
+      // Normalize diagonals so the tiny trace is genuinely under 24 logical pixels.
+      const distance = sample.distance / Math.hypot(direction.x, direction.y);
+      state.drag.move({ x: cursor.x + distance * direction.x, y: cursor.y + distance * direction.y }, sample.time);
+    }
+    const releaseAt = trace.at(-1)!.time + (index === 3 ? 80 : 5);
+    assert.equal(state.drag.finish(releaseAt, true), 'drop', JSON.stringify({ releaseMode, direction, index }));
+    assert.equal(state.drag.isAirborne, false);
+    assert.equal(state.poses.at(-1), 'idle');
+    assert.deepEqual(state.drops, [state.position()]);
+  }
+});
+
+test('a moving slow drag remains responsive to a sustained speed or direction change', () => {
+  const { drag, poses } = session(undefined, { x: 500, y: 400 });
+  drag.begin({ x: 600, y: 500 }, 0);
+  drag.move({ x: 588, y: 497 }, 100);
+  assert.equal(poses.at(-1), 'move01left');
+  drag.tick(196); // The transient idle candidate must not block deliberate acceleration.
+  drag.move({ x: 500, y: 400 }, 250);
+  drag.move({ x: 450, y: 340 }, 300);
+  assert.equal(poses.at(-1), 'move03left');
+  assert.equal(drag.finish(305, true), 'flick');
+  assert.match(poses.at(-1)!, /^release-.*left$/);
+});
+
+
+test('mirrored flicks agree across pet modes, desktop translations and timer interleavings', () => {
+  for (const releaseMode of ['animation', 'idle-bounce', 'companion'] as const) {
+    for (const offset of [0, -1600]) for (const direction of [-1, 1]) for (const vertical of [0, -1, 1]) {
+      const start = { x: offset + 400, y: 400 };
+      const cursor = { x: offset + 500, y: 500 };
+      const state = session({ releaseMode, companionHover: true, companionRebound: true }, start,
+        { x: offset, y: 0, width: 1200, height: 1000 });
+      state.drag.setTaskActive(true);
+      state.drag.begin(cursor, 0);
+      for (let step = 1; step <= 8; step++) {
+        const now = step * 10;
+        state.drag.move({ x: cursor.x + direction * step * 8, y: cursor.y + vertical * step * 6 }, now);
+        state.drag.tick(now + 4);
+      }
+      const dropped = state.position();
+      assert.equal(state.drag.finish(85, true), 'flick', JSON.stringify({ releaseMode, offset, direction, vertical }));
+      assert.deepEqual(state.drops, [dropped]);
+      state.drag.tick(101);
+      assert.ok((state.position().x - dropped.x) * direction > 0);
+      if (releaseMode === 'animation') assert.equal(state.poses.at(-1), direction < 0 ? 'release-move02left' : 'release-move02');
+      else assert.equal(state.poses.at(-1), releaseMode === 'companion' ? 'companion-rebound' : undefined);
+      state.drag.cancel(105);
+      assert.equal(state.drag.needsTick, false);
+      assert.equal(state.drops.length, 1, 'cancel never persists a second release');
+    }
+  }
+});
+
+test('a slow quantized drag keeps one walking clip across mixed event and timer cadences', () => {
+  for (const direction of [-1, 1]) for (const vertical of [0, -0.25]) {
+    const state = session(undefined, { x: 500, y: 400 });
+    const cursor = { x: 600, y: 500 };
+    state.drag.begin(cursor, 0);
+    let now = 0;
+    for (const gap of [16, 24, 33, 50, 64, 100, 150, 16, 100, 33, 150, 50]) {
+      for (let tick = now + 16; tick < now + gap; tick += 16) state.drag.tick(tick);
+      now += gap;
+      state.drag.move({ x: cursor.x + direction * Math.round(now * .15), y: cursor.y + Math.round(now * .15 * vertical) }, now);
+    }
+    assert.deepEqual(state.poses, [direction < 0 ? 'move01left' : 'move01right']);
+    state.drag.tick(now + 250);
+    assert.equal(state.poses.at(-1), 'idle');
+    assert.equal(state.drag.finish(now + 255, true), 'drop');
+    assert.equal(state.drag.isAirborne, false);
+  }
+});
+
+test('distance and freshness release boundaries remain independent of pose smoothing', () => {
+  for (const releaseMode of ['animation', 'companion'] as const) for (const direction of [-1, 1]) {
+    for (const distance of [23, 24]) for (const age of [79, 80]) {
+      const state = session({ releaseMode, companionHover: true, companionRebound: true }, { x: 400, y: 400 });
+      const cursor = { x: 500, y: 500 };
+      state.drag.begin(cursor, 0);
+      state.drag.move({ x: cursor.x + direction * distance / 2, y: cursor.y }, 15);
+      state.drag.move({ x: cursor.x + direction * distance, y: cursor.y }, 30);
+      state.drag.tick(60);
+      const expected = distance >= 24 && age < 80 ? 'flick' : 'drop';
+      assert.equal(state.drag.finish(30 + age, true), expected, JSON.stringify({ releaseMode, direction, distance, age }));
+      assert.equal(state.drag.isAirborne, expected === 'flick');
+      assert.equal(state.drops.length, 1);
+    }
+  }
+});
+
+test('reduced motion and cancellation interrupt a pending stop without reviving momentum', () => {
+  for (const releaseMode of ['animation', 'companion'] as const) for (const cancel of [false, true]) {
+    const state = session({ releaseMode, companionHover: true, companionRebound: true });
+    state.drag.begin({ x: 100, y: 160 }, 0);
+    state.drag.move({ x: 70, y: 140 }, 40);
+    state.drag.tick(125);
+    state.reduced();
+    state.drag.tick(180);
+    assert.equal(state.poses.at(-1), 'idle');
+    assert.equal(state.drag.finish(185, !cancel), cancel ? 'cancel' : 'drop');
+    assert.equal(state.drag.needsTick, false);
+    assert.equal(state.drops.length, cancel ? 0 : 1);
+    const poses = [...state.poses];
+    for (const now of [200, 500, 5000]) state.drag.tick(now);
+    assert.deepEqual(state.poses, poses);
+  }
 });

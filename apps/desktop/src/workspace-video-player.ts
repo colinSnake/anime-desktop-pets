@@ -79,11 +79,11 @@ export async function prepareWorkspaceVideo(bundle: string, media: string) {
   const fullscreen = new VideoFullscreenObserver(signal => readVideoFullscreen(dirname(bundle), signal));
   const quotaSource = createPreviewQuotaSource(bundle);
   const host = new WorkspaceVideoHost((input, ended, slot, onDrop, onCue, onMenu) => {
-    const idleOnly = samePetPackage(input.package, dafeiyu);
-    const localSession = idleOnly ? companionSession : samePetPackage(input.package, longmei) ? dragonSession : undefined;
+    const companionRole = samePetPackage(input.package, dafeiyu);
+    const localSession = companionRole ? companionSession : samePetPackage(input.package, longmei) ? dragonSession : undefined;
     if (!localSession) throw new Error('workspace_video_package_unavailable');
-    return createVideoWindow({ folder: bundle, localSession, preferences: input.preferences, idleOnly, companionClips: idleOnly ? companionClipsReady as CompanionClip[] : undefined,
-      quotaSource, slot, ended, onDrop, onCue, onMenu, lines: idleOnly ? undefined : lines ?? undefined,
+    return createVideoWindow({ folder: bundle, localSession, preferences: input.preferences, companionRole, companionClips: companionRole ? companionClipsReady as CompanionClip[] : undefined,
+      quotaSource, slot, ended, onDrop, onCue, onMenu, lines: companionRole ? undefined : lines ?? undefined,
       observeFullscreen: listener => fullscreen.subscribe(listener),
     });
   }, undefined, quotaSource.drain);

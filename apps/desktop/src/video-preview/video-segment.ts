@@ -1,4 +1,4 @@
-import { clipSource, loops, type Clip } from './playback';
+import { clipSource, isTravelClip, loops, type Clip } from './playback';
 
 /** Keep the last good layer while the bounded replacement gears up at its media offset. */
 export function prepareFirstFrame(video: HTMLVideoElement, clip: Clip, signal: AbortSignal,
@@ -96,9 +96,10 @@ export function keepSegment(video: HTMLVideoElement, clip: Clip, fail: () => voi
             events?.seamEnd();
           }
         } else {
-          if (legal) events?.frame(ms);
+          const terminal = ms + .5 >= end - frameMs;
+          if (legal) events?.frame(terminal && isTravelClip(clip) ? end : ms);
           // Request the cut from the last legal frame rather than presenting the authored tail.
-          if (ms + .5 >= end - frameMs) {
+          if (terminal) {
             if (!loops(clip)) {
               video.pause();
               events?.ended?.();

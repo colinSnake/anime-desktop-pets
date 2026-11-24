@@ -1,5 +1,5 @@
 import type { PreviewBridge } from './bridge';
-import { type Clip, clipSource, createClipSwitcher, isFullMovement } from './playback';
+import { type Clip, clipSource, createClipSwitcher, isTravelClip } from './playback';
 import { keepSegment, prepareFirstFrame } from './video-segment';
 import type { Facing } from './locomotion';
 import { createQuotaCard } from './quota-card';
@@ -176,7 +176,7 @@ const player = createClipSwitcher({
     const resume = () => { if (target.paused) void target.play().catch(failed); };
     const source = clipSource(clip);
     const followGeometry = source.file === 'move03left';
-    const followTravel = isFullMovement(clip);
+    const followTravel = isTravelClip(clip);
     if (source.range || followGeometry || followTravel) stopSegment = keepSegment(target, clip, failed, {
       frame(mediaMs) {
         mediaTimes.set(target, mediaMs);
@@ -227,7 +227,8 @@ for (const [slot, layer] of layers.entries()) {
 }
 bridge.onAction((clip, generation) => {
   if (requested && generation <= requested.generation) return;
-  requested = { clip, generation, facing: clipSource(clip).facing };
+  const { facing, travelFacing } = clipSource(clip);
+  requested = { clip, generation, facing: travelFacing ?? facing };
   void player.show(clip, generation);
 });
 bridge.onFace((generation, facing) => {

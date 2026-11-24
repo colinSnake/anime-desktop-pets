@@ -279,7 +279,6 @@ export class PetWorkspace {
           state.registry.instances = rows.filter(r => r.id !== id);
         } else if (action === 'save') {
           const save = input as PetInputs['save'];
-          if (isDafeiyu(row.package) && (save.preferences.scheduledActivity || save.preferences.movement)) throw new WorkspaceError('invalid');
           if (save.autoStartOnLaunch !== row.autoStartOnLaunch) state.autoStartConfigured = true;
           Object.assign(row, { displayName: save.displayName.trim(), enabled: save.enabled, autoStartOnLaunch: save.autoStartOnLaunch, preferences: structuredClone(save.preferences) });
         }

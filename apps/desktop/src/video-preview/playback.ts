@@ -1,31 +1,34 @@
 import catalog from './clip-catalog.json';
 import companionMedia from '../../../../config/local-companion-media.json';
-import { moveFacing, movements, releasePoses, releaseRanges, travelRanges, type Facing, type ReleaseAction, type ReleasePose } from './locomotion';
+import { companionTravel, moveFacing, movements, releasePoses, releaseRanges, travelRanges, type Facing, type ReleaseAction, type ReleasePose } from './locomotion';
 
 type MediaFile = keyof typeof catalog;
 export const mediaFiles = Object.keys(catalog) as MediaFile[];
 export const companionClips = Object.keys(companionMedia.actions) as (keyof typeof companionMedia.actions)[];
 export type CompanionClip = typeof companionClips[number] | 'companion-rebound';
 const fullMovements = movements.map(move => `full-${move}` as const);
+const companionMovements = movements.map(move => `companion-travel-${move}` as const);
 const onceIdles = ['once-idle', 'once-idle2'] as const;
-export const clips = [...mediaFiles, ...releasePoses, ...fullMovements, ...onceIdles, ...companionClips, 'companion-rebound'] as const;
+export const clips = [...mediaFiles, ...releasePoses, ...fullMovements, ...companionMovements, ...onceIdles, ...companionClips, 'companion-rebound'] as const;
 export type Clip = typeof clips[number];
 export function isClip(value: unknown): value is Clip { return clips.some(clip => clip === value); }
 export function isGeneration(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
 export const isFullMovement = (clip: Clip): clip is typeof fullMovements[number] => fullMovements.some(move => move === clip);
+export const isCompanionTravel = (clip: Clip): clip is typeof companionMovements[number] => companionMovements.some(move => move === clip);
+export const isTravelClip = (clip: Clip) => isFullMovement(clip) || isCompanionTravel(clip);
 export const isMediaTime = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 60_000;
 export const loops = (clip: Clip) => {
-  if (clip === 'companion-rebound') return false;
+  if (clip === 'companion-rebound' || isCompanionTravel(clip)) return false;
   if (companionClips.some(action => action === clip)) return clip === 'companion-hover';
   return isReleasePose(clip) || (!isFullMovement(clip) && clip !== 'once-idle' && clip !== 'once-idle2' &&
     (isMovement(clip) || catalog[clip as MediaFile].loop));
 };
 const isMovement = (clip: string): clip is typeof movements[number] => movements.some(move => move === clip);
 const isReleasePose = (clip: Clip): clip is ReleasePose => releasePoses.some(pose => pose === clip);
-export function clipSource(clip: Clip): { file: MediaFile | CompanionClip; range?: readonly [number, number]; facing?: Facing } {
+export function clipSource(clip: Clip): { file: MediaFile | CompanionClip; range?: readonly [number, number]; facing?: Facing; travelFacing?: Facing } {
   if (clip === 'once-idle' || clip === 'once-idle2') return { file: clip === 'once-idle' ? 'idle' : 'idle2' };
   if (isReleasePose(clip)) {
     const file = clip.slice(8) as ReleaseAction;
@@ -34,6 +37,11 @@ export function clipSource(clip: Clip): { file: MediaFile | CompanionClip; range
   if (isFullMovement(clip)) {
     const file = clip.slice(5) as typeof movements[number];
     return { file, facing: moveFacing(file) };
+  }
+  if (isCompanionTravel(clip)) {
+    const move = clip.slice('companion-travel-'.length) as typeof movements[number];
+    const { file, range } = companionTravel[move];
+    return { file, range, facing: 'left', travelFacing: moveFacing(move) };
   }
   if (clip === 'companion-rebound') return { file: 'companion-jump', range: [3750, 5300] };
   if (clip.startsWith('companion-')) return { file: clip };
@@ -73,7 +81,9 @@ export function createClipSwitcher(port: VideoPort) {
       if (loading?.clip === clip) { loading.generation = generation; return; }
       loading?.abort.abort();
       loading = undefined;
-      if (active?.clip === clip && !active.terminal && port.canReuse(active.slot)) {
+      // Every travel generation has a new origin. Reusing a decoded mid-run
+      // frame would apply the previous run's progress to the new origin.
+      if (active?.clip === clip && !active.terminal && !isTravelClip(clip) && port.canReuse(active.slot)) {
         active.generation = generation;
         port.reveal(active.slot, clip, generation);
         return;

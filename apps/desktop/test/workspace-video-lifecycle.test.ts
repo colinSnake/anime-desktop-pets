@@ -337,7 +337,7 @@ test('a registered companion package is carried by the private start command, no
 });
 
 
-test('companion registration never starts a player and keeps unsupported behaviors off', async t => {
+test('companion registration never starts a player and persists only explicitly enabled daily behavior', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'pet-companion-workspace-'));
   const { lifecycle, windows } = fixture();
   const workspace = new PetWorkspace({ root: await realpath(directory), lifecycle, playerMode: 'video',
@@ -358,8 +358,12 @@ test('companion registration never starts a player and keeps unsupported behavio
   assert.ok(reopened.ok);
   assert.equal(reopened.workspace.instances[0]?.phase, 'stopped');
   const saved = await workspace.mutate('save', { id: whale.id, expectedRevision: reopened.workspace.revision,
-    displayName: '小蓝', enabled: whale.enabled, autoStartOnLaunch: whale.autoStartOnLaunch, preferences: whale.preferences });
+    displayName: '小蓝', enabled: whale.enabled, autoStartOnLaunch: whale.autoStartOnLaunch, preferences: { ...whale.preferences, scheduledActivity: true, movement: true } });
   assert.ok(saved.ok);
   assert.equal(saved.workspace.instances[0]?.displayName, '小蓝');
+  const nextLaunch = await workspace.startOnLaunch(longmei);
+  assert.ok(nextLaunch.ok);
+  assert.equal(nextLaunch.workspace.instances[0]?.preferences.scheduledActivity, true);
+  assert.equal(nextLaunch.workspace.instances[0]?.preferences.movement, true);
   assert.equal(windows.length, 0);
 });

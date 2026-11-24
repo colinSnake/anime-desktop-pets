@@ -4,14 +4,14 @@ import { join } from 'node:path';
 import { windowColors } from '../window-colors';
 import { companionURL, previewURL } from './video-role';
 import { clampPosition, type Point } from './motion';
-import { ActivitySchedule, activityVariants, planTravel, travelPosition, type Activity } from './activity-schedule';
+import { ActivitySchedule, activityVariants, travelPosition, type Activity } from './activity-schedule';
 import { DragSchedule } from './drag-schedule';
 import type { Movement } from './locomotion';
 import { canPreviewPetMotion, workspacePetMenu } from './pet-menu';
 import { CaptionSchedule, IdleGreetings, interactionClips, workCaptions, type VideoLines } from './captions';
 import { WorkPoseSchedule } from './task-schedule';
 import type { TaskAnimation } from '../../../app-service/src/task-animation.ts';
-import { type Clip, isClip, isMediaTime, loops, videoIPC } from './playback';
+import { type Clip, clipSource, isClip, isCompanionTravel, isMediaTime, loops, videoIPC } from './playback';
 import type { CompanionClip } from './playback';
 import { createPreviewQuota, createPreviewQuotaSource, type PreviewQuotaSource } from './quota';
 import { overscan, paddedSize } from './pose-geometry';
@@ -22,7 +22,7 @@ export function createVideoWindow(options: {
   folder: string; localSession: Session; preferences?: PetPreferences; quotaEnabled?: boolean; quotaSource?: PreviewQuotaSource; slot?: number;
   observeFullscreen?: (listener: (active: boolean) => void) => () => void;
   lines?: VideoLines;
-  idleOnly?: boolean;
+  companionRole?: boolean;
   companionClips?: readonly CompanionClip[];
   onCue?: (text: string | undefined, token: number) => void;
   onMenu?: (intent: VideoMenuIntent) => void;
@@ -30,8 +30,8 @@ export function createVideoWindow(options: {
   ended?: (outcome: 'stopped' | 'failed') => void;
 }) {
   const cursor = screen.getCursorScreenPoint();
-  const { folder, localSession, preferences, ended, idleOnly = false, quotaEnabled = !idleOnly, slot = 0 } = options;
-  const playerURL = idleOnly ? companionURL : previewURL;
+  const { folder, localSession, preferences, ended, companionRole = false, quotaEnabled = !companionRole, slot = 0 } = options;
+  const playerURL = companionRole ? companionURL : previewURL;
   let size = { width: preferences?.size ?? 280, height: preferences?.size ?? 280 };
   const saved = preferences?.x !== undefined && preferences.y !== undefined ? { x: preferences.x, y: preferences.y } : undefined;
   const area = screen.getDisplayNearestPoint(saved ? { x: saved.x + size.width / 2, y: saved.y + size.height / 2 } : cursor).workArea;
@@ -98,8 +98,8 @@ export function createVideoWindow(options: {
   let presentedGeneration = 0;
   let automatic: { plan: Activity; lastAt: number; lastMs: number; manual?: true } | undefined;
   let manualUntil = 0;
-  let behavior = { scheduledActivity: !idleOnly && (preferences?.scheduledActivity ?? false), movement: !idleOnly && (preferences?.movement ?? true) };
-  const activity = new ActivitySchedule(performance.now(), behavior);
+  let behavior = { scheduledActivity: preferences?.scheduledActivity ?? false, movement: preferences?.movement ?? !companionRole };
+  const activity = new ActivitySchedule(performance.now(), behavior, Math.random, companionRole ? availableCompanionClips : undefined);
   const position = () => { const { x, y } = win.getBounds(); return { x: x + padding, y: y + padding }; };
   const move = (point: Point) => win.setPosition(point.x - padding, point.y - padding);
   const workArea = (point: Point) => screen.getDisplayNearestPoint(point).workArea;
@@ -115,9 +115,8 @@ export function createVideoWindow(options: {
   let workFinished = false;
   function action(next: Clip, owner: typeof poseOwner = 'base') {
     if (!loaded || win.isDestroyed()) return;
-    const companionAllowed = availableCompanionClips.has(next as CompanionClip) ||
-      (next === 'companion-rebound' && availableCompanionClips.has('companion-jump'));
-    if (idleOnly && next !== 'idle' && !companionAllowed) return;
+    if (companionRole && next !== 'idle' && !availableCompanionClips.has(clipSource(next).file as CompanionClip)) return;
+    if (!companionRole && isCompanionTravel(next)) return;
     automatic = undefined;
     cueForFrame = undefined;
     if (captions.kind === 'task') captions.clear();
@@ -133,9 +132,9 @@ export function createVideoWindow(options: {
     face(facing) { if (facing && !win.isDestroyed()) contents.send(videoIPC.face, generation, facing); },
     reducedMotion: () => reduced,
     onDrop: options.onDrop,
-  }, { releaseMode: idleOnly ? 'companion' : 'animation', companionHover: availableCompanionClips.has('companion-hover'),
+  }, { releaseMode: companionRole ? 'companion' : 'animation', companionHover: availableCompanionClips.has('companion-hover'),
     companionRebound: availableCompanionClips.has('companion-jump') });
-  if (preferences) schedule.setMovement(behavior.movement);
+  if (preferences && !companionRole) schedule.setMovement(behavior.movement);
   function finishDrag(release: boolean) {
     if (!schedule.pressed) return;
     const now = performance.now();
@@ -145,6 +144,24 @@ export function createVideoWindow(options: {
     if (endedWhilePressed === generation && !schedule.protectsPlay) action('idle');
     ignoreMouse(true);
     if (!release) contents.send(videoIPC.resetDrag);
+  }
+  // Only one explicit menu command may wait for the current release spring.
+  let pendingMotionMenuAction: (() => void) | undefined;
+  let menuCloseFlush: ReturnType<typeof setImmediate> | undefined;
+  function invalidateMenuCommands() {
+    if (menuCloseFlush) clearImmediate(menuCloseFlush);
+    menuCloseFlush = undefined;
+    pendingMotionMenuAction = undefined;
+    ++menuSerial;
+    const wasOpen = menuOpen;
+    menuOpen = false;
+    if (wasOpen && !win.isDestroyed()) contents.send(videoIPC.menuState, false);
+  }
+  function flushMotionMenuAction() {
+    if (!pendingMotionMenuAction || menuCloseFlush || schedule.protectsPlay || menuOpen) return;
+    const run = pendingMotionMenuAction;
+    pendingMotionMenuAction = undefined;
+    if (!win.isDestroyed() && win.isVisible() && frameReady) run();
   }
   let loop: ReturnType<typeof setInterval> | undefined;
   function stopMotionLoop() { clearInterval(loop); loop = undefined; }
@@ -163,6 +180,7 @@ export function createVideoWindow(options: {
         action('idle');
       }
     }
+    flushMotionMenuAction();
   }
   const ipcCleanup: (() => void)[] = [];
   win.once('closed', () => { for (const cleanup of ipcCleanup.splice(0)) cleanup(); });
@@ -199,8 +217,28 @@ export function createVideoWindow(options: {
   listen(videoIPC.quotaClose, (...args) => { if (!args.length) quota.close(); });
   win.once('closed', () => quota.close(false));
   const task = new WorkPoseSchedule();
-  let presentationTimer: ReturnType<typeof setInterval> | undefined;
-  function stopPresentationTimer() { clearInterval(presentationTimer); presentationTimer = undefined; }
+  let presentationTimer: ReturnType<typeof setTimeout> | undefined;
+  let presentationAt: number | undefined; // Set only for a one-shot idle wake-up.
+  function stopPresentationTimer() {
+    if (presentationTimer === undefined) return;
+    if (presentationAt === undefined) clearInterval(presentationTimer);
+    else clearTimeout(presentationTimer);
+    presentationTimer = presentationAt = undefined;
+  }
+  function watchPresentation(now: number, poll: boolean, deadline?: number) {
+    if (poll) {
+      if (presentationAt !== undefined) stopPresentationTimer();
+      presentationTimer ??= setInterval(tickPresentation, 100);
+    } else if (deadline === undefined) stopPresentationTimer();
+    else if (presentationAt !== deadline) {
+      stopPresentationTimer();
+      presentationAt = deadline;
+      presentationTimer = setTimeout(() => {
+        presentationTimer = presentationAt = undefined;
+        tickPresentation();
+      }, Math.max(1, Math.ceil(deadline - now)));
+    }
+  }
   function queueSingleClick() {
     // Match the native single/double-click split. The quota handler cancels this before querying.
     cancelClick();
@@ -255,7 +293,8 @@ export function createVideoWindow(options: {
       action(next, next === 'idle' ? 'base' : 'task');
       if (next !== 'idle' && options.lines) cueForFrame = { generation, kind: 'task', text: workCaptions[next] };
     }
-    if (activity.due(now) || options.lines && activity.enabled && greetings.due(now)) {
+    const activityDue = (!companionRole || !reduced) && activity.due(now);
+    if (activityDue || options.lines && activity.enabled && greetings.due(now)) {
       const origin = position(), cursor = screen.getCursorScreenPoint();
       const pointerNearby = cursor.x >= origin.x - 32 && cursor.x < origin.x + size.width + 32 &&
         cursor.y >= origin.y - 32 && cursor.y < origin.y + size.height + 32;
@@ -271,8 +310,12 @@ export function createVideoWindow(options: {
         if (text) cueForFrame = { generation, kind: 'interaction', text };
       }
     }
-    if (gate.visible && (gate.task || poseOwner === 'task' || poseOwner === 'manual' || automatic || activity.enabled || captions.kind)) presentationTimer ??= setInterval(tickPresentation, 100);
-    else stopPresentationTimer();
+    if (!gate.visible) stopPresentationTimer();
+    else {
+      const poll = !!(gate.task || poseOwner === 'task' || poseOwner === 'manual' || automatic || captions.kind ||
+        (!companionRole && activity.enabled));
+      watchPresentation(now, poll, companionRole && !reduced ? activity.deadline : undefined);
+    }
   }
   listen(videoIPC.travelFrame, (...args) => {
     const [request, mediaMs] = args, run = automatic;
@@ -287,7 +330,7 @@ export function createVideoWindow(options: {
     run.lastMs = mediaMs;
   });
   function applyTaskAnimation(value: TaskAnimation) {
-    if (idleOnly || !preferences || !frameReady || win.isDestroyed()) return false;
+    if (companionRole || !preferences || !frameReady || win.isDestroyed()) return false;
     task.receive(value, Date.now(), performance.now(), reduced);
     tickPresentation();
     return true;
@@ -307,7 +350,7 @@ export function createVideoWindow(options: {
     const now = performance.now();
     if (!canPreviewPetMotion({ ...activityGate(now), interaction: schedule.protectsPlay || menuOpen }, true)) return;
     const origin = position();
-    const plan = planTravel(moveId, { origin, size, area: areaForPet(origin) });
+    const plan = activity.plan(moveId, { origin, size, area: areaForPet(origin) });
     if (!plan || !schedule.yieldSettledPose()) return;
     userActivity(now);
     captions.clear();
@@ -340,11 +383,18 @@ export function createVideoWindow(options: {
     contents.send(videoIPC.menuState, true);
     let pending: (() => void) | undefined;
     let consumed = false;
-    const afterMenu = (run: () => void) => () => {
+    const afterMenu = (run: () => void, waitForMotion = false) => () => {
       if (consumed || serial !== menuSerial || win.isDestroyed() || !win.isVisible() || !frameReady) return;
       consumed = true;
-      if (menuOpen) pending = run;
-      else run();
+      pendingMotionMenuAction = undefined; // A newer explicit selection replaces the old one.
+      const execute = () => {
+        if (waitForMotion && schedule.isAirborne) {
+          pendingMotionMenuAction = run;
+          startMotionLoop();
+        } else run();
+      };
+      if (menuOpen) pending = execute;
+      else execute();
     };
     const dismissed = () => {
       if (!menuOpen || serial !== menuSerial) return;
@@ -358,20 +408,30 @@ export function createVideoWindow(options: {
       const run = pending;
       pending = undefined;
       if (win.isVisible()) run?.();
+      // Some native backends dismiss before delivering the selected item's click.
+      // Give that click the current turn to replace a choice from an earlier popup.
+      if (!run && pendingMotionMenuAction) menuCloseFlush ??= setImmediate(() => {
+        menuCloseFlush = undefined;
+        flushMotionMenuAction();
+      });
     };
     try {
       const menu = previewMenu ?? Menu.buildFromTemplate(workspacePetMenu({
         size: size.width, hideInFullscreen, ...behavior, reduced, task: task.active(now),
-        protectedPose: schedule.protectsPlay, quota: quotaEnabled, idleOnly, companionClips: [...availableCompanionClips],
+        protectedPose: schedule.protectsPlay, settling: schedule.isAirborne, quota: quotaEnabled, companionRole, companionClips: [...availableCompanionClips],
       }, {
         intent: intent => afterMenu(() => {
           if (intent.kind !== 'size' || !schedule.protectsPlay) options.onMenu?.(intent);
-        })(),
-        pose: next => afterMenu(() => previewPose(next))(),
-        travel: movement => afterMenu(() => previewTravel(movement))(),
-        perform: afterMenu(() => previewPose(activityVariants[Math.floor(Math.random() * activityVariants.length)]!)),
-        idle: afterMenu(() => previewPose('idle')),
-        quota: afterMenu(() => { if (canQuery()) quota.request(); }),
+        }, intent.kind === 'size')(),
+        pose: next => afterMenu(() => previewPose(next), true)(),
+        travel: movement => afterMenu(() => previewTravel(movement), true)(),
+        perform: afterMenu(() => {
+          const pool = companionRole ? activity.companionPoses : activityVariants;
+          const next = pool[Math.floor(Math.random() * pool.length)];
+          if (next) previewPose(next);
+        }, true),
+        idle: afterMenu(() => previewPose('idle'), true),
+        quota: afterMenu(() => { if (canQuery()) quota.request(); }, true),
         stop: afterMenu(stop),
       }));
       menu.popup({ window: win, callback: dismissed });
@@ -383,6 +443,7 @@ export function createVideoWindow(options: {
   });
   listen(videoIPC.reducedMotion, (...args) => {
     if (args.length !== 1 || typeof args[0] !== 'boolean') return;
+    if (companionRole && reduced && !args[0]) activity.defer(performance.now());
     reduced = args[0];
     tickPresentation();
   }, true);
@@ -396,6 +457,7 @@ export function createVideoWindow(options: {
     if (args[0] !== 'begin' || schedule.pressed) return;
     const mouse = cursorInside(win.getBounds());
     if (ignored || menuOpen || !mouse || !win.isVisible()) { contents.send(videoIPC.resetDrag); return; }
+    invalidateMenuCommands();
     quota.close();
     const now = performance.now();
     userActivity(now);
@@ -459,6 +521,7 @@ export function createVideoWindow(options: {
     const safe = clampPosition(current, size, screen.getDisplayNearestPoint(center).workArea);
     if (safe.x === current.x && safe.y === current.y) return;
     // A disappearing work area is not a real release and must not save a position or create velocity.
+    invalidateMenuCommands();
     finishDrag(false);
     schedule.cancel(performance.now());
     win.setPosition(safe.x - padding, safe.y - padding);
@@ -477,6 +540,7 @@ export function createVideoWindow(options: {
   });
   win.on('blur', () => finishDrag(false));
   win.on('hide', () => {
+    invalidateMenuCommands();
     stopPresentationTimer();
     cancelClick();
     captions.clear();
@@ -488,7 +552,7 @@ export function createVideoWindow(options: {
     if (poseOwner === 'manual') action('idle');
     ignoreMouse(true);
   });
-  win.once('closed', stopMotionLoop);
+  win.once('closed', () => { invalidateMenuCommands(); stopMotionLoop(); });
   const offFullscreen = options.observeFullscreen?.(active => {
     fullscreen = active;
     try { if (!syncVisibility()) failWindow(); } catch { failWindow(); }
@@ -530,11 +594,11 @@ export function createVideoWindow(options: {
     return false;
   }
   function applyBehavior(value: BehaviorPreferences) {
-    if (!frameReady || win.isDestroyed() || idleOnly && (value.scheduledActivity || value.movement)) return false;
+    if (!frameReady || win.isDestroyed()) return false;
     if (activity.setPreferences(performance.now(), value)) {
       behavior = { ...value };
       if (!value.scheduledActivity && captions.kind === 'greeting') captions.clear();
-      schedule.setMovement(value.movement);
+      if (!companionRole) schedule.setMovement(value.movement);
       tickPresentation();
     }
     return true;

@@ -10,6 +10,7 @@ import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { pathToFileURL } from 'node:url';
 import { buildPreview, companionCheckMessages } from './run-pet-video-preview.mjs';
+import companionMedia from '../config/local-companion-media.json' with { type: 'json' };
 
 test('鲸鱼妹 stages only approved private clips and preserves existing local artwork', { skip: process.platform === 'win32' }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'pet-local-assets-test-'));
@@ -54,7 +55,7 @@ test('鲸鱼妹 stages only approved private clips and preserves existing local 
   assert.deepEqual(stagedWithoutActions.availableActions, []);
   assert.deepEqual(stagedWithoutActions.missingActions, ['companion-hover', 'companion-jump']);
   assert.deepEqual(companionCheckMessages(stagedWithoutActions), [
-    '鲸鱼妹：固定待机 WebM 与封面已通过校验；动作 0/11 段可用。',
+    '鲸鱼妹：固定待机 WebM 与封面已通过校验；动作 0/113 段可用。',
     '鲸鱼妹缺少或校验失败的可选动作：拖拽悬空、开心跃动',
   ]);
   assert.deepEqual(companionCheckMessages({ ready: false, availableActions: [], missingActions: [] }), [
@@ -86,7 +87,7 @@ test('鲸鱼妹 stages only approved private clips and preserves existing local 
   assert.deepEqual(stagedWithMissingJump.availableActions, ['companion-hover']);
   assert.deepEqual(stagedWithMissingJump.missingActions, ['companion-jump']);
   assert.deepEqual(companionCheckMessages(stagedWithMissingJump), [
-    '鲸鱼妹：固定待机 WebM 与封面已通过校验；动作 1/11 段可用。',
+    '鲸鱼妹：固定待机 WebM 与封面已通过校验；动作 1/113 段可用。',
     '鲸鱼妹缺少或校验失败的可选动作：开心跃动',
   ]);
   assert.deepEqual(await readFile(join(session2x, 'companion', 'cover.png')), cover2x);
@@ -192,7 +193,7 @@ test('bundled renderer gates name, menu and quota on current alpha and drag stat
   let action, reset, menuState, quotaState, captured, menuRequests = 0;
   const quotaRequests = [], quotaElements = new Map(), quotaEvents = new Map();
   const quotaCard = { hidden: true, getBoundingClientRect: () => ({ left: 30, top: 2, right: 70, bottom: 20 }) };
-  const frames = [], hits = [], gestures = [];
+  const frames = [], travelFrames = [], hits = [], gestures = [];
   let readbacks = 0;
   const output = {};
   const label = { hidden: true, offsetWidth: 26, offsetHeight: 18, style: {} };
@@ -214,7 +215,7 @@ test('bundled renderer gates name, menu and quota on current alpha and drag stat
       onMenuState(fn) { menuState = fn; }, onFace() {}, reducedMotion() {}, openMenu() { menuRequests++; },
       onQuota(fn) { quotaState = fn; }, requestQuota() { quotaRequests.push('open'); },
       refreshQuota() { quotaRequests.push('refresh'); }, closeQuota() { quotaRequests.push('close'); },
-      frame(...args) { frames.push(args); }, hit(value) { hits.push(value); }, gesture(value) { gestures.push(value); } },
+      frame(...args) { frames.push(args); }, travelFrame(...args) { travelFrames.push(args); }, hit(value) { hits.push(value); }, gesture(value) { gestures.push(value); } },
     addEventListener(name, fn) { events.set(name, fn); }, matchMedia: () => ({ matches: false, addEventListener() {} }), setTimeout, setInterval: () => 1 };
   const document = { querySelectorAll: () => [idle, work], querySelector(selector) {
       if (selector === '#pet-name') return label;
@@ -471,6 +472,81 @@ test('bundled renderer gates name, menu and quota on current alpha and drag stat
     assert.deepEqual(frames.at(-1), ['shown', 'once-idle', 23]);
   });
 
+  await t.test('whale travel seeks its range, mirrors right, and emits only current movement frames', async () => {
+    const layers = [video(), video()];
+    for (const layer of layers) layer.classList.toggle = (name, value) => { layer[name] = value; };
+    document.querySelectorAll = () => layers;
+    output.setAttribute = () => {};
+    boot('companion');
+    const [first, next] = layers;
+    const right = 'companion-travel-move02', left = 'companion-travel-move02left';
+    action(right, 1);
+    assert.equal(first.src, './companion-77bd0761591e.webm');
+    first.dispatch('loadedmetadata');
+    assert.equal(first.currentTime, .75);
+    assert.deepEqual(travelFrames, []);
+    first.callback(0, { mediaTime: .75 });
+    await Promise.resolve();
+    assert.deepEqual(frames.at(-1), ['shown', right, 1]);
+    assert.equal(first.mirrored, true);
+    first.callback(0, { mediaTime: 1 });
+    first.callback(0, { mediaTime: 65 / 24 });
+    assert.deepEqual(travelFrames, [[1, 1000], [1, 2750]]);
+    assert.deepEqual(frames.at(-1), ['ended', right, 1]);
+    assert.equal(first.paused, true);
+
+    action(left, 2);
+    next.dispatch('loadedmetadata');
+    next.callback(0, { mediaTime: .75 });
+    await Promise.resolve();
+    assert.deepEqual(frames.at(-1), ['shown', left, 2]);
+    assert.equal(next.mirrored, false);
+    const full = 'companion-77bd0761591e';
+    action(full, 3);
+    next.callback(0, { mediaTime: 1 }); // Outgoing decoder may still be playing.
+    assert.deepEqual(travelFrames, [[1, 1000], [1, 2750]]);
+    assert.equal(first.src, './companion-77bd0761591e.webm');
+    first.callback(0, { mediaTime: 0 });
+    await Promise.resolve();
+    assert.deepEqual(frames.at(-1), ['shown', full, 3]);
+    assert.equal(first.callback, undefined, 'full preview does not track travel frames');
+    first.ended = true;
+    first.dispatch('ended');
+    assert.deepEqual(frames.at(-1), ['ended', full, 3]);
+  });
+
+  await t.test('reselecting the same whale direction while idle prepares seeks a fresh head', async () => {
+    const layers = [video(), video()];
+    for (const layer of layers) layer.classList.toggle = () => {};
+    document.querySelectorAll = () => layers;
+    output.setAttribute = () => {};
+    boot('companion');
+    const [old, fresh] = layers;
+    const direction = 'companion-travel-move02';
+    action(direction, 1);
+    old.dispatch('loadedmetadata');
+    old.callback(0, { mediaTime: .75 });
+    await Promise.resolve();
+    old.callback(0, { mediaTime: 1.75 });
+    action('idle', 2); // Opening the menu interrupts movement, but replacement idle isn't ready.
+    const stale = fresh.callback;
+    action(direction, 3);
+    assert.deepEqual(frames.at(-1), ['shown', direction, 1], 'must not adopt the previous decoded mid-run frame');
+    assert.equal(fresh.src, './companion-77bd0761591e.webm');
+    const count = travelFrames.length;
+    old.callback(0, { mediaTime: 2 });
+    stale(0, { mediaTime: 0 });
+    assert.equal(travelFrames.length, count, 'outgoing frame cannot move the new trajectory');
+    fresh.dispatch('loadedmetadata');
+    assert.equal(fresh.currentTime, .75);
+    fresh.callback(0, { mediaTime: .75 });
+    await Promise.resolve();
+    assert.deepEqual(frames.at(-1), ['shown', direction, 3]);
+    fresh.callback(0, { mediaTime: 1 });
+    assert.deepEqual(travelFrames.at(-1), [3, 1000]);
+    fresh.callback(0, { mediaTime: 65 / 24 });
+  });
+
   await t.test('a finished companion rebound retires its decoder and reports the current generation', async () => {
     const layers = [video(), video()];
     for (const layer of layers) layer.classList.toggle = () => {};
@@ -683,13 +759,47 @@ test('owned preview advances a real release while decode is pending and keeps it
   electron.screen.emit('display-removed');
   assert.deepEqual(sent.filter(message => message[0] === 'pet-video:action').at(-1), ['pet-video:action', 'idle', release[2] + 1]);
   assert.equal(win.bounds.x, -850); // rightmost nominal x=-780, with 70px visual padding
+
+  popups[0].options.callback(); // Dismiss the earlier native menu before beginning another drag.
+  await t.test('native upper-left release recognizes pointer travel when the window starts at the corner', () => {
+    area.x = area.y = -1000; area.width = area.height = 1000;
+    win.setPosition(-1058, -1058); // Nominal pet starts 12px from each edge; visual padding is 70px.
+    cursor = { x: -880, y: -880 }; now = 200;
+    emit('hit', true); emit('gesture', 'begin');
+    now = 230; cursor = { x: -892, y: -892 }; emit('gesture', 'move');
+    now = 260; cursor = { x: -916, y: -916 }; emit('gesture', 'release');
+    const pose = sent.filter(message => message[0] === 'pet-video:action').at(-1);
+    assert.match(pose[1], /^release-.*left$/);
+    assert.equal(win.bounds.x, -1070); assert.equal(win.bounds.y, -1070);
+    now = 292; loop();
+    assert.ok(win.bounds.x > -1070, 'spring rebounds into the screen while the new decoder is pending');
+    assert.ok(win.bounds.y >= -1070);
+  });
+
+  await t.test('native slow upper-left drag does not repeatedly request idle or re-seek the walking clip', () => {
+    cursor = { x: win.bounds.x + 180, y: win.bounds.y + 180 }; now = 400;
+    const begin = { ...cursor };
+    emit('hit', true); emit('gesture', 'begin'); // Only this new left press interrupts the earlier spring.
+    const mark = sent.length;
+    for (let step = 1; step <= 8; step++) {
+      const at = 400 + step * 100;
+      now = at; cursor = { x: begin.x - step * 12, y: begin.y - step * 3 };
+      emit('gesture', 'move');
+      for (now = at + 16; now < at + 100; now += 16) loop();
+    }
+    assert.deepEqual(sent.slice(mark).filter(message => message[0] === 'pet-video:action').map(message => message[1]), ['move01left']);
+    now = 1300; emit('gesture', 'release');
+    assert.equal(sent.filter(message => message[0] === 'pet-video:action').at(-1)[1], 'idle');
+    const releaseCount = sent.filter(message => message[0] === 'pet-video:action' && message[1].startsWith('release-')).length;
+    assert.equal(releaseCount, 2, 'the slow native release does not create a third flick');
+  });
   win.close();
   assert.equal(electron.screen.listenerCount('display-removed'), 0);
   assert.equal(loop, undefined);
   assert.equal(ipcMain.listenerCount('pet-video:gesture'), 0);
 });
 
-test('owned workspace windows reveal only after their current idle frame and clean up independently', async () => {
+test('owned workspace windows reveal only after their current idle frame and clean up independently', async t => {
   const { build } = await import('esbuild');
   const compiled = await build({ entryPoints: ['apps/desktop/src/video-preview/video-window.ts'], bundle: true,
     write: false, platform: 'node', format: 'cjs', external: ['electron'] });
@@ -720,11 +830,19 @@ test('owned workspace windows reveal only after their current idle frame and cle
   const electron = { BrowserWindow, ipcMain, screen, Menu: { buildFromTemplate(items) { return { popup(options) { menus.push({ items, options }); } }; } } };
   const module = { exports: {} };
   const nodeRequire = createRequire(import.meta.url);
-  const timers = new Set();
+  const timers = new Set(), timeouts = new Map();
   let now = 100, wall = 1_000_000;
+  const advanceClock = ms => {
+    now += ms;
+    for (const timer of [...timers]) timer();
+    for (const [token, timer] of [...timeouts]) {
+      if (timer.at <= now && timeouts.delete(token)) timer.fn();
+    }
+  };
   runInNewContext(compiled.outputFiles[0].text, { module, Buffer, performance: { now: () => now }, Date: { now: () => wall },
     setInterval: fn => { timers.add(fn); return fn; }, clearInterval: fn => timers.delete(fn),
-    setTimeout, clearTimeout,
+    setTimeout: (fn, delay) => { const token = Symbol(); timeouts.set(token, { at: now + delay, fn }); return token; },
+    clearTimeout: token => timeouts.delete(token), setImmediate, clearImmediate,
     Math: Object.assign(Object.create(Math), { random: () => 0 }),
     require: id => id === 'electron' ? electron : nodeRequire(id) });
   const { createVideoWindow } = module.exports;
@@ -968,7 +1086,7 @@ test('owned workspace windows reveal only after their current idle frame and cle
   assert.equal(manual.messages.filter(([channel, clip]) => channel === 'pet-video:action' && clip === 'full-move02').length, 1);
   assert.equal(fifth.stop(), true);
 
-  const companion = open({ x: 190, y: 400 }, { idleOnly: true, companionClips: ['companion-wave', 'companion-stretch', 'companion-juggle', 'companion-hover', 'companion-jump'], quotaEnabled: undefined });
+  const companion = open({ x: 190, y: 400, movement: false }, { companionRole: true, companionClips: ['companion-wave', 'companion-stretch', 'companion-juggle', 'companion-hover', 'companion-jump'], quotaEnabled: undefined });
   const whale = windows[5];
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(whale.webContents.mainFrame.url, 'pet-video://companion/index.html');
@@ -981,9 +1099,9 @@ test('owned workspace windows reveal only after their current idle frame and cle
   assert.equal(whale.visible, true);
   ipcMain.emit('pet-video:reduced-motion', owner(whale), false);
   assert.equal(companion.applyTaskAnimation(task(2)), false);
-  assert.equal(companion.applyBehavior({ scheduledActivity: true, movement: true }), false);
+  assert.equal(companion.applyBehavior({ scheduledActivity: false, movement: false }), true);
   const companionMenu = openMenu(whale);
-  assert.deepEqual(Array.from(companionMenu.items, item => item.label).filter(Boolean), ['隐藏桌宠', '全屏时自动隐藏', '桌宠大小', '动作预览', '回到待机', '停止该桌宠']);
+  assert.deepEqual(Array.from(companionMenu.items, item => item.label).filter(Boolean), ['隐藏桌宠', '全屏时自动隐藏', '桌宠大小', '自主活动', '动作预览', '回到待机', '停止该桌宠']);
   const actions = item(companionMenu.items, '动作预览');
   assert.deepEqual(Array.from(actions.submenu, group => group.label), ['互动', '日常', '玩耍', '拖拽反馈']);
   assert.deepEqual(Array.from(item(actions.submenu, '互动').submenu, entry => entry.label), ['元气挥手', '开心跃动']);
@@ -1031,11 +1149,11 @@ test('owned workspace windows reveal only after their current idle frame and cle
   assert.equal(companion.stop(), true);
   assert.equal(ipcMain.listenerCount('pet-video:frame'), 0);
 
-  const idleOnly = open({ x: 190, y: 400 }, { idleOnly: true, companionClips: ['companion-hover'], quotaEnabled: false });
+  const companionRole = open({ x: 190, y: 400 }, { companionRole: true, companionClips: ['companion-hover'], quotaEnabled: false });
   const noJump = windows[6];
   await new Promise(resolve => setImmediate(resolve));
   frame(noJump, 'idle', 1);
-  assert.equal(await idleOnly.ready, true);
+  assert.equal(await companionRole.ready, true);
   for (const update of fullscreen) update(false);
   const limitedMenu = openMenu(noJump);
   assert.deepEqual(Array.from(item(limitedMenu.items, '动作预览').submenu, group => group.label), ['拖拽反馈']);
@@ -1050,6 +1168,287 @@ test('owned workspace windows reveal only after their current idle frame and cle
   ipcMain.emit('pet-video:gesture', owner(noJump), 'release');
   assert.deepEqual(noJump.messages.filter(([channel]) => channel === 'pet-video:action').at(-1).slice(1), ['idle', 3]);
   for (let steps = 0; steps < 1000 && noJump.bounds.x > 0; steps++) { now += 16; for (const timer of [...timers]) timer(); }
-  assert.equal(idleOnly.stop(), true);
+  assert.equal(companionRole.stop(), true);
+
+  await t.test('whale idle schedule and movement use only confirmed owned media frames', async t => {
+    const intents = [];
+    const full = open({ scheduledActivity: false, movement: true, x: 190, y: 400 }, { companionRole: true,
+      companionClips: ['companion-stretch', 'companion-77bd0761591e', 'companion-hover', 'companion-jump'], onMenu: value => intents.push(value) });
+    t.after(() => full.stop());
+    const pet = windows.at(-1);
+    await new Promise(resolve => setImmediate(resolve));
+    for (const update of fullscreen) update(false);
+    ipcMain.emit('pet-video:reduced-motion', owner(pet), false);
+    frame(pet, 'idle', 1);
+    assert.equal(await full.ready, true);
+    const current = () => pet.messages.filter(([channel]) => channel === 'pet-video:action').at(-1).slice(1);
+    const bounds = () => ({ ...pet.bounds });
+    const initial = bounds(), dropCount = drops.length;
+    const advance = advanceClock;
+    cursor = { x: 1100, y: 900 };
+    advance(56_100);
+    assert.deepEqual(current(), ['idle', 1], 'movement alone does not turn on scheduling');
+    assert.deepEqual(bounds(), initial);
+    assert.equal(full.applyBehavior({ scheduledActivity: true, movement: false }), true);
+    advance(20_100);
+    assert.deepEqual(current(), ['companion-stretch', 2]);
+    frame(pet, 'companion-stretch', 2, owner(pet), 'ended');
+    assert.deepEqual(bounds(), initial);
+    frame(pet, 'idle', 3);
+    const menu = openMenu(pet);
+    const activity = item(menu.items, '自主活动').submenu;
+    assert.equal(item(activity, '定时播放动作').checked, true);
+    const movement = item(activity, '允许蹦跳移动');
+    assert.equal(movement.checked, false);
+    const directions = item(activity, '走路 / 跑步 / 漂浮').submenu;
+    assert.deepEqual(Array.from(directions, item => item.label), ['侧身急躁跑（向右）', '侧身急躁跑（向左）']);
+    movement.click(); menu.options.callback();
+    assert.deepEqual(JSON.parse(JSON.stringify(intents)), [{ kind: 'movement', value: true }]);
+    assert.equal(full.applyBehavior({ scheduledActivity: true, movement: true }), true);
+    cursor = { x: 1100, y: 900 };
+    advance(56_100);
+    assert.deepEqual(current(), ['companion-travel-move02', 4]);
+    travelFrame(4, 2000, owner(pet));
+    assert.deepEqual(bounds(), initial, 'no movement before the current decoded frame');
+    frame(pet, 'companion-travel-move02', 4);
+    travelFrame(3, 2000, owner(pet));
+    travelFrame(4, 2000, owner(whale));
+    assert.deepEqual(bounds(), initial);
+    travelFrame(4, 2000, owner(pet));
+    assert.ok(pet.bounds.x > initial.x);
+    assert.equal(drops.length, dropCount, 'daily movement never saves drag position');
+    const opened = openMenu(pet);
+    assert.deepEqual(current(), ['idle', 5], 'opening a menu stops autonomous movement');
+    const stopped = bounds();
+    travelFrame(4, 2750, owner(pet));
+    advance(56_100);
+    assert.deepEqual(bounds(), stopped);
+    assert.deepEqual(current(), ['idle', 5]);
+    opened.options.callback();
+    assert.equal(full.stop(), true);
+  });
+
+  await t.test('whale waits on one deadline and does not poll under reduced motion or missing assets', async t => {
+    const clock = () => [timers.size, [...timeouts.values()].map(timer => timer.at - now)];
+    const start = async clips => {
+      const pet = open({ scheduledActivity: true, movement: false, x: 190, y: 400 }, { companionRole: true, companionClips: clips });
+      t.after(() => pet.stop());
+      const win = windows.at(-1);
+      await new Promise(resolve => setImmediate(resolve));
+      for (const update of fullscreen) update(false);
+      frame(win, 'idle', 1);
+      assert.equal(await pet.ready, true);
+      return { pet, win };
+    };
+    assert.deepEqual(clock(), [0, []]);
+    const { pet, win } = await start(['companion-stretch']);
+    const reduced = value => ipcMain.emit('pet-video:reduced-motion', owner(win), value);
+    assert.deepEqual(clock(), [0, []], 'wait for the accessibility setting before arming activity');
+    reduced(false);
+    assert.deepEqual(clock(), [0, [20_000]], 'one deadline rather than a 100ms polling loop');
+    cursor = { x: 1100, y: 900 };
+    advanceClock(19_999);
+    assert.deepEqual(clock(), [0, [1]]);
+    assert.deepEqual(win.messages.at(-1), ['pet-video:action', 'idle', 1]);
+    advanceClock(1);
+    assert.deepEqual(win.messages.at(-1), ['pet-video:action', 'companion-stretch', 2]);
+    assert.deepEqual(clock(), [1, []], 'watch for a stalled clip only while active');
+    frame(win, 'companion-stretch', 2, owner(win), 'failed');
+    frame(win, 'idle', 3);
+    advanceClock(100);
+    assert.deepEqual(clock(), [0, [19_900]]);
+    assert.equal(pet.setVisible(false), true);
+    assert.deepEqual(clock(), [0, []]);
+    assert.equal(pet.setVisible(true), true);
+    assert.deepEqual(clock(), [0, [20_000]]);
+    reduced(true);
+    assert.deepEqual(clock(), [0, []]);
+    advanceClock(30_000);
+    reduced(false);
+    assert.deepEqual(clock(), [0, [20_000]], 'do not catch up after reduced motion is turned back off');
+    assert.equal(pet.stop(), true);
+    assert.deepEqual(clock(), [0, []]);
+
+    const optional = await start(['companion-77bd0761591e', 'companion-hover']);
+    ipcMain.emit('pet-video:reduced-motion', owner(optional.win), false);
+    assert.deepEqual(clock(), [0, []], 'opted out of travel, no daily poses available');
+    assert.equal(optional.pet.applyBehavior({ scheduledActivity: true, movement: true }), true);
+    assert.deepEqual(clock(), [0, [20_000]], 'the staged direction can now be scheduled');
+    assert.equal(optional.pet.stop(), true);
+    assert.deepEqual(clock(), [0, []]);
+  });
+
+  await t.test('whale rebound menu choices wait safely for the spring', async t => {
+    const start = async t => {
+      const intents = [];
+      const full = open({ x: 190, y: 400 }, { companionRole: true, companionClips: Object.keys(companionMedia.actions),
+        quotaEnabled: false, onMenu: value => intents.push(value) });
+      t.after(() => full.stop());
+      const pet = windows.at(-1);
+      await new Promise(resolve => setImmediate(resolve));
+      for (const update of fullscreen) update(false);
+      frame(pet, 'idle', 1);
+      assert.equal(await full.ready, true);
+      ipcMain.emit('pet-video:reduced-motion', owner(pet), false);
+      const current = () => pet.messages.filter(([channel]) => channel === 'pet-video:action').at(-1).slice(1);
+      cursor = { x: pet.bounds.x + 100, y: pet.bounds.y + 100 };
+      ipcMain.emit('pet-video:hit', owner(pet), true);
+      ipcMain.emit('pet-video:gesture', owner(pet), 'begin');
+      now += 70; cursor = { x: cursor.x + 100, y: cursor.y + 45 };
+      ipcMain.emit('pet-video:gesture', owner(pet), 'move');
+      ipcMain.emit('pet-video:gesture', owner(pet), 'release');
+      const rebound = current();
+      assert.equal(rebound[0], 'companion-rebound');
+      return { full, pet, intents, current, rebound };
+    };
+    const entry = (menu, clip = 'companion-wave') => {
+      const pin = companionMedia.actions[clip];
+      return item(item(item(menu.items, '动作预览').submenu, pin.group).submenu, pin.label);
+    };
+    const advance = (until = () => false) => {
+      for (let steps = 0; steps < 1000 && !until(); steps++) { now += 16; for (const timer of [...timers]) timer(); }
+    };
+    await t.test('changing whale autonomous movement during rebound does not affect the spring', async t => {
+      const { full, pet, current, rebound } = await start(t);
+      const position = () => [pet.bounds.x, pet.bounds.y];
+      const before = position(), saves = drops.length;
+      assert.equal(full.applyBehavior({ scheduledActivity: true, movement: false }), true);
+      assert.deepEqual(current(), rebound);
+      now += 16; for (const timer of [...timers]) timer();
+      assert.notDeepEqual(position(), before);
+      const moving = position();
+      assert.equal(full.applyBehavior({ scheduledActivity: true, movement: true }), true);
+      now += 16; for (const timer of [...timers]) timer();
+      assert.notDeepEqual(position(), moving);
+      frame(pet, rebound[0], rebound[1], owner(pet), 'ended');
+      advance(() => current()[0] === 'idle');
+      assert.equal(current()[0], 'idle');
+      assert.equal(drops.length, saves);
+      assert.equal(full.stop(), true);
+    });
+    for (const dismissFirst of [false, true]) for (const choice of ['preview', 'idle', 'size']) {
+      await t.test(`${choice}, dismissal ${dismissFirst ? 'before' : 'after'} click`, async t => {
+        const { full, pet, current, intents, rebound } = await start(t);
+        const menu = openMenu(pet);
+        for (const label of ['桌宠大小', '动作预览', '回到待机']) assert.equal(item(menu.items, label).enabled, true, label);
+        assert.equal(item(menu.items, '回弹中，动作和尺寸稍后执行').enabled, false);
+        const selected = choice === 'preview' ? entry(menu) : choice === 'idle' ? item(menu.items, '回到待机')
+          : item(item(menu.items, '桌宠大小').submenu, '75%（192 × 192）');
+        if (dismissFirst) menu.options.callback();
+        selected.click();
+        if (!dismissFirst) menu.options.callback();
+        assert.deepEqual(current(), rebound, 'selection must not cancel or replace the rebound');
+        assert.deepEqual(intents, [], 'size is not applied to a moving window');
+        frame(pet, rebound[0], rebound[1], owner(pet), 'ended');
+        const before = { ...pet.bounds };
+        now += 16; for (const timer of [...timers]) timer();
+        assert.notDeepEqual(pet.bounds, before, 'the original spring still advances');
+        const complete = () => choice === 'size' ? intents.length > 0 : current()[0] === (choice === 'preview' ? 'companion-wave' : 'idle');
+        advance(complete);
+        assert.equal(complete(), true, choice);
+        if (choice === 'size') assert.deepEqual(JSON.parse(JSON.stringify(intents)), [{ kind: 'size', value: 192 }]);
+        const fired = pet.messages.filter(([channel]) => channel === 'pet-video:action').length;
+        for (let steps = 0; steps < 10; steps++) { now += 16; for (const timer of [...timers]) timer(); }
+        assert.equal(pet.messages.filter(([channel]) => channel === 'pet-video:action').length, fired, 'execute once');
+        assert.equal(full.stop(), true);
+      });
+    }
+    for (const cancellation of ['hide-show', 'stop', 'new-drag', 'reduced-motion']) await t.test(`cancel on ${cancellation}`, async t => {
+      const { full, pet, current } = await start(t);
+      const menu = openMenu(pet);
+      entry(menu).click();
+      menu.options.callback();
+      if (cancellation === 'hide-show') { assert.equal(full.setVisible(false), true); assert.equal(full.setVisible(true), true); }
+      else if (cancellation === 'stop') assert.equal(full.stop(), true);
+      else if (cancellation === 'reduced-motion') ipcMain.emit('pet-video:reduced-motion', owner(pet), true);
+      else {
+        cursor = { x: pet.bounds.x + 100, y: pet.bounds.y + 100 };
+        ipcMain.emit('pet-video:hit', owner(pet), true);
+        ipcMain.emit('pet-video:gesture', owner(pet), 'begin');
+        ipcMain.emit('pet-video:gesture', owner(pet), 'cancel');
+      }
+      advance();
+      assert.equal(pet.messages.some(([channel, clip]) => channel === 'pet-video:action' && clip === 'companion-wave'), false);
+      if (cancellation !== 'stop') assert.equal(current()[0], 'idle');
+    });
+    await t.test('the last explicit selection replaces the waiting action', async t => {
+      const { pet, current, rebound } = await start(t);
+      const first = openMenu(pet); entry(first).click(); first.options.callback();
+      const latest = openMenu(pet); entry(latest, 'companion-jump').click(); latest.options.callback();
+      frame(pet, rebound[0], rebound[1], owner(pet), 'ended');
+      advance(() => current()[0] === 'companion-jump');
+      assert.equal(current()[0], 'companion-jump');
+      assert.equal(pet.messages.some(([channel, clip]) => channel === 'pet-video:action' && clip === 'companion-wave'), false);
+    });
+    for (const choice of ['replace', 'stop', 'dismiss']) await t.test(`reopened menu settles before close-first ${choice}`, async t => {
+      const { pet, current, rebound } = await start(t);
+      const first = openMenu(pet); entry(first).click(); first.options.callback();
+      const latest = openMenu(pet);
+      frame(pet, rebound[0], rebound[1], owner(pet), 'ended');
+      advance(() => current()[0] === 'idle');
+      assert.equal(current()[0], 'idle');
+      latest.options.callback();
+      now += 16; for (const timer of [...timers]) timer();
+      assert.equal(current()[0], 'idle', 'the old choice must not fire ahead of the close-first click');
+      if (choice === 'replace') entry(latest, 'companion-jump').click();
+      else if (choice === 'stop') item(latest.items, '停止该桌宠').click();
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(current()[0], choice === 'replace' ? 'companion-jump' : choice === 'dismiss' ? 'companion-wave' : 'idle');
+      assert.equal(pet.closed === true, choice === 'stop');
+      assert.equal(pet.messages.filter(([channel, clip]) => channel === 'pet-video:action' && clip === 'companion-wave').length, choice === 'dismiss' ? 1 : 0);
+    });
+    await t.test('a spring settling under an open menu still waits for dismissal', async t => {
+      const { pet, current, rebound } = await start(t);
+      const menu = openMenu(pet); entry(menu).click();
+      frame(pet, rebound[0], rebound[1], owner(pet), 'ended');
+      advance(() => current()[0] === 'idle');
+      assert.equal(current()[0], 'idle');
+      menu.options.callback();
+      assert.equal(current()[0], 'companion-wave');
+    });
+    await t.test('hide invalidates an undismissed popup before showing the same window again', async t => {
+      const { full, pet, current } = await start(t);
+      const stale = openMenu(pet); entry(stale).click();
+      assert.equal(full.setVisible(false), true);
+      assert.equal(full.setVisible(true), true);
+      stale.options.callback();
+      advance();
+      assert.equal(current()[0], 'idle');
+      assert.equal(pet.messages.some(([channel, clip]) => channel === 'pet-video:action' && clip === 'companion-wave'), false);
+      const fresh = openMenu(pet); fresh.options.callback();
+    });
+  });
+
+  await t.test('all synced whale menu actions reach the current owned player and return safely', async () => {
+    const approved = Object.keys(companionMedia.actions);
+    assert.equal(approved.length, 113);
+    const full = open({ x: 190, y: 400 }, { companionRole: true, companionClips: approved, quotaEnabled: false });
+    const pet = windows.at(-1);
+    await new Promise(resolve => setImmediate(resolve));
+    for (const update of fullscreen) update(false);
+    frame(pet, 'idle', 1);
+    assert.equal(await full.ready, true);
+    ipcMain.emit('pet-video:reduced-motion', owner(pet), false);
+    const current = () => pet.messages.filter(([channel]) => channel === 'pet-video:action').at(-1).slice(1);
+    for (const [clip, pin] of Object.entries(companionMedia.actions)) {
+      const menu = openMenu(pet);
+      const groups = item(menu.items, '动作预览').submenu;
+      const entry = item(item(groups, pin.group).submenu, pin.label);
+      entry.click();
+      menu.options.callback();
+      assert.equal(current()[0], clip);
+      const generation = current()[1];
+      frame(pet, clip, generation - 1, owner(pet), 'ended');
+      assert.deepEqual(current(), [clip, generation], 'a stale frame cannot cancel the selected action');
+      if (clip === 'companion-hover') {
+        const reset = openMenu(pet);
+        item(reset.items, '回到待机').click();
+        reset.options.callback();
+      } else frame(pet, clip, generation, owner(pet), 'ended');
+      assert.equal(current()[0], 'idle', clip);
+    }
+    assert.equal(full.stop(), true);
+    assert.equal(ipcMain.listenerCount('pet-video:frame'), 0);
+  });
 
 });

@@ -10,7 +10,7 @@ export function PetSettings({ state, controller, onClose }: {state: PetWorkspace
   const workspace = state.workspace;
   const usesVideo = workspace?.playerMode === 'video';
   const pet = workspace?.instances.find(item => item.id === state.selectedId);
-  const idleOnly = !!pet && isDafeiyu(pet.package);
+  const companionRole = !!pet && isDafeiyu(pet.package);
   const draft = state.selectedId ? state.drafts[state.selectedId] : undefined;
   const dirty = !!state.selectedId && isDraftDirty(state, state.selectedId);
   const busy = !!state.operation;
@@ -22,14 +22,14 @@ export function PetSettings({ state, controller, onClose }: {state: PetWorkspace
     if (draft) edit({preferences:{...draft.preferences,[key]:value}});
   };
   const displayApplied = !!pet?.applied && pet.applied.size === pet.preferences.size && pet.applied.hideInFullscreen === pet.preferences.hideInFullscreen;
-  const behaviorApplied = idleOnly || pet?.behavior?.status === 'applied' && pet.behavior.scheduledActivity === pet.preferences.scheduledActivity && pet.behavior.movement === pet.preferences.movement;
+  const behaviorApplied = pet?.behavior?.status === 'applied' && pet.behavior.scheduledActivity === pet.preferences.scheduledActivity && pet.behavior.movement === pet.preferences.movement;
   const phaseLabel = pet?.phase === 'running' ? '运行中' : pet?.phase === 'starting' ? '启动中' : pet?.phase === 'stopping' ? '停止中' : pet?.phase === 'failed' ? '运行失败' : '未运行';
   return <SettingsDialog title="桌宠设置" subtitle={`${pet ? petDisplayName(pet, workspace) : '当前实例'} · ${phaseLabel}`} returnFocusId={pet ? `pet-settings-${pet.id}` : undefined} busy={busy} onClose={onClose}>
     <form className="settings-form" onSubmit={event=>{event.preventDefault();if(canSave && dirty && !blocked)void controller?.save();}}>
       <div className="settings-body">
         {!pet && <p className="error" role="alert">这个实例已不在最新清单中。草稿仍保留，请刷新配置。</p>}
         {state.error && <p className="error" role="alert">{petErrorMessages[state.error]}</p>}
-        {usesVideo && <p className="muted">{idleOnly ? '鲸鱼妹支持动作预览和拖拽反馈，暂不支持自主活动。' : '可应用显示和行为偏好。'}手动显示仍遵守全屏隐藏策略。</p>}
+        {usesVideo && <p className="muted">{companionRole ? '可应用鲸鱼妹的显示和行为偏好。' : '可应用显示和行为偏好。'}手动显示仍遵守全屏隐藏策略。</p>}
         {draft && <>
           <section className="preference-group" aria-labelledby={`${prefix}-basic`}>
             <h3 id={`${prefix}-basic`}>基本</h3>
@@ -47,19 +47,17 @@ export function PetSettings({ state, controller, onClose }: {state: PetWorkspace
             </fieldset>
             {pet?.phase==='running' && !displayApplied && <div className="preference-application"><span role="status">显示偏好待应用</span><button type="button" className="button secondary compact" disabled={runtimeBlocked || dirty} onClick={()=>{void controller?.applyDisplayPreferences();}}>应用显示偏好</button></div>}
           </section>
-          {!idleOnly && <section className="preference-group" aria-labelledby={`${prefix}-activity`}>
+          <section className="preference-group" aria-labelledby={`${prefix}-activity`}>
             <h3 id={`${prefix}-activity`}>行为</h3>
-            <fieldset className="settings-group" disabled={busy || !controller}><legend className="sr-only">活动偏好</legend><Preference id={`${prefix}-scheduled`} label="自主活动" detail="空闲时可自行切换动作。" checked={draft.preferences.scheduledActivity} onChange={value=>preference('scheduledActivity',value)}/><Preference id={`${prefix}-movement`} label="桌面移动" detail="允许空闲时自主移动，以及快速松手后延续滑动。" checked={draft.preferences.movement} onChange={value=>preference('movement',value)}/></fieldset>
+            <fieldset className="settings-group" disabled={busy || !controller}><legend className="sr-only">活动偏好</legend><Preference id={`${prefix}-scheduled`} label="自主活动" detail="空闲时可自行切换动作。" checked={draft.preferences.scheduledActivity} onChange={value=>preference('scheduledActivity',value)}/><Preference id={`${prefix}-movement`} label="桌面移动" detail={companionRole ? "和自主活动同时开启时会偶尔走、跑或漂浮；不影响拖拽回弹。" : "允许空闲时自主移动，以及快速松手后延续滑动。"} checked={draft.preferences.movement} onChange={value=>preference('movement',value)}/></fieldset>
             {pet?.phase==='running' && !behaviorApplied && <div className="preference-application"><span role={pet.behavior?.status==='failed'?'alert':'status'}>{pet.behavior?.status==='failed'?'行为应用失败':!pet.behavior?'行为尚未确认':'行为偏好待应用'}</span><button type="button" className="button secondary compact" disabled={runtimeBlocked || dirty} onClick={()=>{void controller?.applyBehaviorPreferences();}}>应用行为偏好</button></div>}
-          </section>}
+          </section>
         </>}
         {pet && <details className="runtime-details"><summary>运行详情</summary>
           <p><strong>已保存</strong>：{pet.preferences.size} px · 全屏隐藏{pet.preferences.hideInFullscreen?'已开启':'已关闭'}</p>
           <p><strong>运行时已应用</strong>：{pet.applied?`${pet.applied.size} px · 全屏隐藏${pet.applied.hideInFullscreen?'已开启':'已关闭'}`:'尚无可靠确认'}</p>
-          {!idleOnly && <>
           <p><strong>已保存行为</strong>：自主活动{pet.preferences.scheduledActivity?'已开启':'已关闭'} · 桌面移动{pet.preferences.movement?'已开启':'已关闭'}</p>
           <p><strong>运行时行为</strong>：{pet.behavior?.status==='applied'?`自主活动${pet.behavior.scheduledActivity?'已开启':'已关闭'} · 桌面移动${pet.behavior.movement?'已开启':'已关闭'}`:pet.behavior?.status==='failed'?'应用失败；尚无可靠确认':'尚无可靠确认'}</p>
-          </>}
           <p><strong>已保存位置</strong>：{pet.preferences.x!==undefined && pet.preferences.y!==undefined?`${pet.preferences.x}, ${pet.preferences.y}`:'尚无位置记录'}</p>
           {pet.positionFeedback && <p><strong>运行时位置</strong>：{pet.positionFeedback.x}, {pet.positionFeedback.y} · {pet.positionFeedback.status==='failed'?'保存失败；保留上次成功位置':pet.positionFeedback.status==='saving'?'正在保存':'已保存'}</p>}
           {pet.phase==='running' && <button type="button" className="button secondary compact" disabled={runtimeBlocked} onClick={()=>{void controller?.setVisible(!pet.applied?.visible);}}>{pet.applied?.visible===false?'显示实例':'隐藏实例'}</button>}

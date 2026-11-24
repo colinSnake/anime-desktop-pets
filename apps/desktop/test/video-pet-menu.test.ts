@@ -46,3 +46,19 @@ test('native menu reflects applied values, dispatches fixed intents, and groups 
     assert.equal(find(children(find(next, '自主活动')), '走路 / 跑步 / 飞行').enabled, false);
   }
 });
+
+
+test('settling menus allow explicit controls without weakening drag or reduced-motion gates', () => {
+  const actions = { intent() {}, pose() {}, travel() {}, perform() {}, idle() {}, quota() {}, stop() {} };
+  const state = { size: 256, hideInFullscreen: true, scheduledActivity: false, movement: false,
+    protectedPose: true, settling: true, reduced: false, task: false, quota: false, companionRole: true,
+    companionClips: ['companion-wave'] as const };
+  const menu = workspacePetMenu(state, actions);
+  for (const label of ['桌宠大小', '动作预览', '回到待机']) assert.equal(find(menu, label).enabled, true, label);
+  const dragging = workspacePetMenu({ ...state, settling: false }, actions);
+  for (const label of ['桌宠大小', '动作预览', '回到待机']) assert.equal(find(dragging, label).enabled, false, label);
+  const reduced = workspacePetMenu({ ...state, reduced: true }, actions);
+  assert.equal(find(reduced, '动作预览').enabled, false);
+  assert.equal(find(reduced, '桌宠大小').enabled, true);
+  assert.equal(find(reduced, '回到待机').enabled, true);
+});

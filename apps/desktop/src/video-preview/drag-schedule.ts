@@ -18,7 +18,7 @@ interface DragPort {
 export interface DragScheduleOptions { releaseMode?: 'animation' | 'idle-bounce' | 'companion'; companionHover?: boolean; companionRebound?: boolean }
 
 type Press = { cursor: Point; origin: Point; lastCursor: Point; active: boolean; velocityTrail: Sample[]; maxDistance: number;
-  pose?: DragPose; profileAt: number; started: number };
+  pose?: DragPose; profileAt: number; idleSince?: number; started: number };
 
 function heldVelocity(now: number, trail: readonly Sample[]): Point {
   const samples = trail.filter(p => now - p.time >= 0 && now - p.time <= 200);
@@ -119,7 +119,8 @@ export class DragSchedule {
     this.port.move(position);
     press.velocityTrail.push({ ...pointerPosition, time: now });
     if (press.velocityTrail.length > 64) press.velocityTrail.shift();
-    press.maxDistance = Math.max(press.maxDistance, Math.hypot(position.x - press.origin.x, position.y - press.origin.y));
+    // Recognition follows the pointer, even when the owned window is already clamped.
+    press.maxDistance = Math.max(press.maxDistance, Math.hypot(dx, dy));
     return true;
   }
 
@@ -137,6 +138,12 @@ export class DragSchedule {
       if (Math.abs(x) >= 35) this.facing = x < 0 ? 'left' : 'right';
       pose = movements.find(move => move.startsWith(kind) && moveFacing(move) === this.facing) ?? 'idle';
     }
+    // Pointer events can be sparse during a slow drag. Confirm a stop before
+    // seeking back to idle; release momentum still uses its independent 80ms gate.
+    if (pose === 'idle' && previous.startsWith('move') && !this.port.reducedMotion()) {
+      press.idleSince ??= Math.min(now, press.velocityTrail.at(-1)!.time + 80);
+      if (now - press.idleSince < 120) return;
+    } else press.idleSince = undefined;
     if (press.pose !== pose) { press.pose = pose; this.port.show(pose); }
   }
 
