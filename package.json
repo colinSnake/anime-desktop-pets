@@ -19,7 +19,7 @@
     "check:cross-platform": "pnpm run test:workspace && pnpm run test:tooling && pnpm run typecheck && pnpm run test:cross-platform && pnpm run test:bridge && pnpm run build:cross-platform && pnpm run test:build",
     "test:build": "node --test apps/desktop/test/build-smoke.test.mjs",
     "test:workspace": "node --test scripts/test-workspace-config.test.mjs",
-    "test:tooling": "node --test scripts/test-build-output.test.mjs scripts/test-pet-agent-sdk-probe.test.mjs scripts/test-pet-agent-harness-provider.test.mjs scripts/test-pet-agent-runtime-stage.test.mjs scripts/test-pet-electron-macos-stage.test.mjs scripts/test-pet-video-preview.test.mjs scripts/test-workspace-ui-build.test.mjs scripts/test-workspace-ui-dev.test.mjs"
+    "test:tooling": "node --test scripts/test-build-output.test.mjs scripts/test-pet-video-preview.test.mjs scripts/test-workspace-ui-build.test.mjs scripts/test-workspace-ui-dev.test.mjs"
   },
   "devDependencies": {
     "@types/node": "24.10.0",

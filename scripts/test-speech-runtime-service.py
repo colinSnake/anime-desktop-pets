@@ -55,38 +55,54 @@ class ProtocolTests(unittest.TestCase):
         self.assertIsNone(player.write(b"\x10\x00"))
         self.assertIsNone(player.close())
 
-    def test_speaker_output_stays_warm_between_turns_and_closes_on_shutdown(self):
+    def test_speaker_output_drains_each_device_tail_without_reopening_the_stream(self):
         calls = []
-        written = threading.Event()
+        written, entering_drain, tail = threading.Event(), threading.Event(), threading.Event()
 
         class Stream:
             def start(self): calls.append("start")
             def write(self, chunk):
                 calls.append(("write", chunk))
                 written.set()
-            def stop(self): calls.append("stop")
+            def stop(self, *, ignore_errors):
+                self_test.assertFalse(ignore_errors, "an unconfirmed drain must fail closed")
+                entering_drain.set()
+                if not tail.wait(1): raise RuntimeError("test device tail still buffered")
+                calls.append("drained")
             def close(self): calls.append("close")
 
+        self_test = self
         fake_sounddevice = type("SoundDevice", (), {
             "check_output_settings": staticmethod(lambda **kwargs: calls.append(("check", kwargs))),
             "RawOutputStream": staticmethod(lambda **kwargs: Stream()),
         })
         with patch.dict(sys.modules, {"sounddevice": fake_sounddevice}):
             player = SoundDevicePlayer(24000)
+            self.addCleanup(player.close)
             self.assertEqual(calls, [])
+            player.finish_turn()  # A silent turn must not open output.
             player.write(b"\x10\x00\x20\x00")
-            player.finish_turn()
+            self.assertTrue(written.wait(1))
+            confirmed = threading.Event()
+            finish = threading.Thread(target=lambda: (player.finish_turn(), confirmed.set()), daemon=True)
+            finish.start()
+            try:
+                self.assertTrue(entering_drain.wait(1), "the output worker must wait for the device tail")
+                self.assertFalse(confirmed.is_set(), "write consumed is not device playback confirmed")
+            finally:
+                tail.set()
+                finish.join(1)
+            self.assertTrue(confirmed.is_set())
+            player.finish_turn()  # No audio after the last drain.
             player.write(b"\x30\x00\x40\x00")
             player.finish_turn()
-            self.assertEqual([call for call in calls if call == "start"], ["start"])
-            self.assertEqual([call for call in calls if call == "stop"], [])
-            self.assertEqual([call for call in calls if call == "close"], [])
+            self.assertEqual([call for call in calls if call in ("start", "drained", "close")],
+                             ["start", "drained", "start", "drained"])
+            self.assertEqual(sum(isinstance(call, tuple) and call[0] == "check" for call in calls), 1)
             player.close()
             player.close()
 
-        self.assertTrue(written.wait(1))
-        self.assertEqual([call for call in calls if call in ("start", "stop", "close")],
-                         ["start", "stop", "close"])
+        self.assertEqual(calls[-1], "close")
         self.assertIn(("write", b"\x10\x00\x20\x00"), calls)
         self.assertIn(("write", b"\x30\x00\x40\x00"), calls)
 
@@ -133,7 +149,7 @@ class ProtocolTests(unittest.TestCase):
             self.assertIsInstance(self._bounded_call(player.finish_turn), RuntimeError)
             self.assertIsNone(self._bounded_call(player.close))
             self.assertEqual(player._chunks.unfinished_tasks, 0)
-        self.assertEqual(calls, ["stop", "close"])
+        self.assertEqual(calls, ["close"])
 
     def test_stalled_output_has_a_drain_deadline_and_abortable_close(self):
         entered, aborted = threading.Event(), threading.Event()
@@ -158,7 +174,48 @@ class ProtocolTests(unittest.TestCase):
             self.assertIn("timed out", str(error))
             self.assertIsNone(self._bounded_call(player.close))
             self.assertEqual(player._chunks.unfinished_tasks, 0)
-        self.assertEqual(calls, ["abort", "stop", "close"])
+        self.assertEqual(calls, ["abort", "close"])
+
+    def test_device_tail_drain_failure_is_not_reported_as_idle(self):
+        class Stream:
+            def start(self): pass
+            def write(self, _chunk): pass
+            def stop(self, *, ignore_errors): raise OSError("synthetic drain failure")
+            def close(self): pass
+        fake = type("SoundDevice", (), {
+            "check_output_settings": staticmethod(lambda **kwargs: None),
+            "RawOutputStream": staticmethod(lambda **kwargs: Stream()),
+        })
+        with patch.dict(sys.modules, {"sounddevice": fake}):
+            player = SoundDevicePlayer(24000)
+            self.addCleanup(player.close)
+            player.write(b"\x10\x00")
+            with self.assertRaisesRegex(RuntimeError, "audio output failed"):
+                player.finish_turn()
+
+    def test_stalled_device_tail_uses_the_same_drain_deadline(self):
+        entered, aborted = threading.Event(), threading.Event()
+        class Stream:
+            def start(self): pass
+            def write(self, _chunk): pass
+            def stop(self, *, ignore_errors): entered.set(); aborted.wait(2)
+            def abort(self): aborted.set()
+            def close(self): pass
+        fake = type("SoundDevice", (), {
+            "check_output_settings": staticmethod(lambda **kwargs: None),
+            "RawOutputStream": staticmethod(lambda **kwargs: Stream()),
+        })
+        with patch.dict(sys.modules, {"sounddevice": fake}):
+            player = SoundDevicePlayer(24000)
+            self.addCleanup(player.close)
+            player._DRAIN_TIMEOUT = 0.05
+            player.write(b"\x10\x00")
+            error = self._bounded_call(player.finish_turn)
+            self.assertTrue(entered.is_set())
+            self.assertIsInstance(error, RuntimeError)
+            self.assertIn("timed out", str(error))
+            self.assertIsNone(self._bounded_call(player.close))
+            self.assertTrue(aborted.is_set())
 
     def test_output_start_failure_closes_stream_and_chunk_size_is_bounded(self):
         calls = []

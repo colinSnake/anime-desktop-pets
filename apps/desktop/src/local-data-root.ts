@@ -4,6 +4,7 @@ import { lstat, mkdtemp, open, opendir, rename, rm, type FileHandle } from 'node
 import { dirname, join } from 'node:path';
 import { PrivateDirectory, absent } from '../../app-service/src/models/private-directory.ts';
 import { decodeModelConfiguration, MODEL_CONFIGURATION_LIMIT } from '../../app-service/src/models/configuration-store.ts';
+import { decodeModelProbeRecords, MODEL_PROBE_FILE, MODEL_PROBE_LIMIT } from '../../app-service/src/models/probe-store.ts';
 import { decodeCharacterState } from '../../app-service/src/characters/repository.ts';
 import { CHARACTER_LIMIT } from '../../app-service/src/characters/records.ts';
 import { validateWorkspaceState, WORKSPACE_STATE_LIMIT } from '../../app-service/src/workspace-store.ts';
@@ -97,7 +98,13 @@ export class LocalDataRoot {
     const configs = await models.read(modelFile, MODEL_CONFIGURATION_LIMIT);
     if (!ws || !configs) throw invalid();
     validateWorkspace(ws.bytes); decodeModelConfiguration(configs.bytes);
+    // Probe receipts are optional diagnostics. Validate them when copying the
+    // legacy source, not when reopening a published root; the model service
+    // guards receipt reads and writes independently of the configuration.
     await new PrivateDirectory(join(root, 'live'), false).ready();
+    // Older selected roots gain reserved local Agent/Skill directories, never imported content.
+    for (const name of ['agents', 'skills']) await new PrivateDirectory(join(root, name)).sync();
+    await new PrivateDirectory(root, false).sync();
     await new PrivateDirectory(join(root, 'workspace', 'characters'), false).ready();
   }
 
@@ -129,6 +136,10 @@ export class LocalDataRoot {
       const configs = (migrate ? (await oldModels.read(modelFile, MODEL_CONFIGURATION_LIMIT))?.bytes : undefined) ?? emptyModels;
       validateWorkspace(ws); decodeModelConfiguration(configs);
       await write(workspace, workspaceFile, ws); await write(models, modelFile, configs);
+      if (migrate) {
+        const probes = await oldModels.read(MODEL_PROBE_FILE, MODEL_PROBE_LIMIT);
+        if (probes) { decodeModelProbeRecords(probes.bytes); await write(models, MODEL_PROBE_FILE, probes.bytes); }
+      }
       if (migrate) await this.copyCharacters(new PrivateDirectory(join(oldWorkspace.root, 'characters'), false), characters);
       for (const dir of [live, characters, models, workspace]) await dir.sync();
       const token = Buffer.from(`${randomUUID()}\n`);

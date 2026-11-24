@@ -19,9 +19,13 @@ function ConnectionStatus({ connection, state, controller }: {
     active.input.expectedRevision === revision && active.input.entryID === defaultModelEntryID;
   const previous = state.probeResults?.get(probeResultKey(id, defaultModelEntryID));
   const result = previous?.input.expectedRevision === revision ? previous : undefined;
-  const status = !result || (!result.result.ok && result.result.error === 'cancelled') ? 'untested' : result.result.ok ? 'ok' : 'failed';
-  const label = testing ? '测试中' : status === 'ok' ? '测试成功' : status === 'failed' ? '测试失败' : '未测试';
-  const detail = !testing && result ? probeResultText(result) : undefined;
+  const recent = active?.kind === 'result' && !state.drafts.has(id) && active.input.connectionID === id &&
+    active.input.expectedRevision === revision && active.input.entryID === defaultModelEntryID ? active : undefined;
+  const status = state.probeStorageUnavailable ? 'unavailable' : !result ? 'untested' : result.result.ok ? 'ok' : 'failed';
+  const label = testing ? '测试中' : status === 'unavailable' ? '状态不可用'
+    : status === 'ok' ? '测试成功' : status === 'failed' ? '测试失败' : '未测试';
+  const displayed = recent ?? result;
+  const detail = !testing && displayed ? probeResultText(displayed) : undefined;
   const reason = controller.savedDefaultTestBlockedReason(id, revision);
   const action = status === 'failed' ? '点击重新测试连接，可能产生费用。' : '点击发送一次短测试，可能产生费用。';
   const title = [label, detail, testing ? undefined : reason ?? action].filter(Boolean).join(' · ');
@@ -31,7 +35,7 @@ function ConnectionStatus({ connection, state, controller }: {
       title={title} onClick={() => { if (!reason) void controller.testSavedDefault(id, revision); }}>
       <span className="model-status-dot" aria-hidden="true" />
     </button>
-    <span className="sr-only" role="status">{testing || result ? `${displayName}：${detail ?? label}` : ''}</span>
+    <span className="sr-only" role="status">{testing || recent || result ? `${displayName}：${detail ?? label}` : ''}</span>
   </>;
 }
 
@@ -83,11 +87,16 @@ export function ModelPage({ controller, appearance }: { controller?: ModelWorksp
   const addButton = <button type="button" className="button primary model-add-config" disabled={blocked || !config || config.connections.length >= 32}
     onClick={event => { event.currentTarget.focus(); add(); }}><PetNookIcon name="plus" />添加配置</button>;
   return <article className="model-page">
-    <header className="model-page-header"><div><p className="model-page-crumb" aria-hidden="true">工作区 › 设置</p><h1 tabIndex={-1}>模型管理</h1></div><div className="model-actions">{appearance}</div></header>
+    <header className="model-page-header">
+      <div><h1 tabIndex={-1}>模型管理</h1><p className="model-page-subtitle">配置服务商和模型，设置聊天默认使用的模型。</p></div>
+      <div className="model-actions">{appearance}</div>
+    </header>
     {!controller?.available ? <p className="model-empty">本机模型管理当前不可用。</p> : <section aria-label="已配置的服务商" className="model-models">
       <div className="model-list-header"><h2>已配置的服务商</h2>{addButton}</div>
       {state.feedback && !action && <p className={state.feedback.error ? 'model-alert' : 'model-note'} role={state.feedback.error ? 'alert' : 'status'}>{state.feedback.text}</p>}
       {state.requiresRestart && <p className="model-alert" role="status">重启前只读。请重新读取，核对磁盘版本。</p>}
+      {state.probeStorageUnavailable && <><p className="model-alert" role="status">连接测试记录暂不可读取，已保存的模型配置仍可使用。请保留原文件。</p>
+        <button type="button" className="button secondary" disabled={busy} onClick={() => { void controller.load(); }}>重新读取测试记录</button></>}
       {!config && !state.feedback && <p className="model-empty" role="status">正在读取服务商配置…</p>}
       {config && (rows.length === 0 ? <div className="model-empty-state">
         <div className="model-empty-art" aria-hidden="true">

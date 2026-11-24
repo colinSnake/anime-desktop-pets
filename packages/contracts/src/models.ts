@@ -35,7 +35,7 @@ export const MODEL_MANAGEMENT_ERRORS = ['invalid_configuration', 'configuration_
 export type ModelManagementFailure = typeof MODEL_MANAGEMENT_ERRORS[number];
 export type ModelCleanup = 'not_needed' | 'removed' | 'pending' | 'retained_uncertain';
 export type ModelManagementReply = { version: 1 } & (
-  { ok: true; configuration: SavedModelConfiguration; durability?: 'confirmed' | 'unconfirmed'; retainedCredentialVersions?: boolean; writesBlocked?: true } |
+  { ok: true; configuration: SavedModelConfiguration; durability?: 'confirmed' | 'unconfirmed'; retainedCredentialVersions?: boolean; writesBlocked?: true; probeStorageUnavailable?: true; probeResults?: import('./model-probe.ts').ModelProbeRecord[] } |
   { ok: false; error: ModelManagementFailure; credentialCleanup?: ModelCleanup }
 );
 export type ModelWorkspaceError = 'write_outcome_unknown';

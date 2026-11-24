@@ -91,7 +91,7 @@ test('never writes cancelled, local command, or credential-like content and boun
   const history = new ChatHistory(root), session = start();
   t.after(() => history.close());
   await assert.rejects(history.append('pet-a', session, turn(), true, AbortSignal.abort()));
-  await assert.rejects(history.append('pet-a', session, { ...turn(), user: '你是谁' }, true));
+  await assert.rejects(history.append('pet-a', session, { ...turn(), user: '查看本机身份' }, true));
   await assert.rejects(history.append('pet-a', session, { ...turn(), user: '记住：合成资料' }, true));
   await assert.rejects(history.append('pet-a', session, { ...turn(), assistant: `Bearer ${'x'.repeat(45)}` }, true));
   assert.equal((await history.list('pet-a')).rows.length, 0);
@@ -146,4 +146,43 @@ test('detail walks bounded older pages without overlap, even after an append', u
   assert.equal((await history.replay('pet-a', resume(session)))?.length, 5);
   await history.clear('pet-a');
   assert.equal(await history.detail('pet-a', session.id, before), undefined);
+});
+
+test('project chats are scoped to their pet and project, with existing sessions left unassigned', use, async t => {
+  const { root } = await fixture(t);
+  const history = new ChatHistory(root);
+  t.after(() => history.close());
+  const old = start(), projectID = randomUUID();
+  await history.append('pet-a', old, turn(), true);
+  await history.createProject('pet-a', { id: projectID, name: '合成项目' });
+  const chat = { ...start(), projectID };
+  assert.equal(await history.replay('pet-b', chat), undefined);
+  assert.equal(await history.replay('pet-a', { ...chat, projectID: randomUUID() }), undefined);
+  assert.deepEqual(await history.replay('pet-a', chat), []);
+  await history.append('pet-a', chat, turn(), false);
+  assert.equal(await history.replay('pet-a', resume(chat)), undefined);
+  assert.deepEqual((await history.list('pet-a', undefined, projectID)).rows.map(row => row.id), [chat.id]);
+  assert.deepEqual((await history.list('pet-a', undefined, 'unassigned')).rows.map(row => row.id), [old.id]);
+  assert.deepEqual(await history.listProjects('pet-b'), []);
+  assert.equal((await history.detail('pet-a', chat.id))?.session.projectID, projectID);
+  await history.clear('pet-a');
+  assert.equal((await history.listProjects('pet-a')).length, 1);
+});
+
+test('recognized version-two databases upgrade without rewriting any completed conversation', use, async t => {
+ const { root, path } = await fixture(t);
+ const prior = new ChatHistory(root), conversation = start(), first = turn();
+ await prior.append('pet-a', conversation, first, true);
+ await prior.close();
+ const db = new DatabaseSync(path);
+ db.exec('DROP TABLE session_projects; DROP TABLE projects; PRAGMA user_version=2');
+ db.close();
+ const current = new ChatHistory(root);
+ t.after(() => current.close());
+ assert.deepEqual((await current.detail('pet-a', conversation.id))?.turns, [first]);
+ assert.deepEqual(await current.listProjects('pet-a'), []);
+ assert.equal((await current.list('pet-a', undefined, 'unassigned')).rows[0]?.id, conversation.id);
+ const project = { id: randomUUID(), name: '新项目' };
+ assert.deepEqual(await current.createProject('pet-a', project), project);
+ assert.deepEqual((await current.list('pet-a', undefined, project.id)).rows, []);
 });

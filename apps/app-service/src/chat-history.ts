@@ -1,6 +1,6 @@
 import type { Stats } from 'node:fs';
 import type { DatabaseSync } from 'node:sqlite';
-import { chatHistoryDetailSize, chatHistoryPageSize, isHistoryDetail, isHistoryInput, isHistoryPage, isHistoryTurn, type ChatHistoryDetail, type ChatHistoryPage, type ChatHistoryTurn } from '../../../packages/contracts/src/chat-history.ts';
+import { chatHistoryDetailSize, chatHistoryPageSize, isHistoryDetail, isHistoryInput, isHistoryPage, isHistoryTurn, isChatProject, maxChatProjects, type ChatProject, type ChatHistoryDetail, type ChatHistoryPage, type ChatHistoryTurn } from '../../../packages/contracts/src/chat-history.ts';
 import { isChatConversation, type ChatConversation, type ChatExchange } from '../../../packages/contracts/src/online-chat.ts';
 import { petId } from '../../../packages/contracts/src/pets.ts';
 import { PrivateDirectory, sameFile } from './models/private-directory.ts';
@@ -39,7 +39,19 @@ const sessionsIndex = 'CREATE INDEX sessions_pet_seq ON sessions(pet_id, last_se
 const turnsIndex = 'CREATE INDEX turns_session_seq ON turns(session_id, seq DESC)';
 const replayIndex = 'CREATE INDEX turns_session_replay ON turns(session_id, seq DESC) WHERE replayable = 1';
 const nextSchema = [sessions, turns, sessionsIndex, turnsIndex, replayIndex];
-const summaryFields = 'id, number, completed_at AS completedAt';
+const projectSchema = [`CREATE TABLE projects (
+  id TEXT PRIMARY KEY,
+  pet_id TEXT NOT NULL,
+  name TEXT NOT NULL
+) STRICT`, `CREATE TABLE session_projects (
+  session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES projects(id)
+) STRICT`, 'CREATE INDEX projects_pet_id ON projects(pet_id)'];
+const projectColumn = '(SELECT project_id FROM session_projects WHERE session_id = s.id)';
+const projectOwner = (db: DatabaseSync, petID: string, projectID?: string) =>
+  projectID === undefined || !!db.prepare('SELECT id FROM projects WHERE pet_id = ? AND id = ?').get(petID, projectID);
+const sessionOwner = (db: DatabaseSync, id: string) =>
+  db.prepare(`SELECT pet_id, ${projectColumn} AS projectID FROM sessions s WHERE id = ?`).get(id);
 const fields = 'request_id AS requestID, user_text AS user, assistant_text AS assistant, completed_at AS completedAt';
 const invalid = () => new Error('chat_history_unavailable');
 
@@ -77,9 +89,11 @@ export class ChatHistory {
       };
       if ((version === 0 && id === 0 && matches([])) || (version === 1 && id === applicationID && matches([oldTable, oldIndex]))) {
         const reset = version === 1 ? 'DROP TABLE turns;' : '';
-        db.exec(`BEGIN IMMEDIATE; ${reset} ${nextSchema.join('; ')}; PRAGMA application_id=${applicationID}; PRAGMA user_version=2; COMMIT`);
-      } else if (version !== 2 || id !== applicationID) throw invalid();
-      if (!matches(nextSchema)) throw invalid();
+        db.exec(`BEGIN IMMEDIATE; ${reset} ${nextSchema.join('; ')}; PRAGMA application_id=${applicationID}; ${projectSchema.join('; ')}; PRAGMA user_version=3; COMMIT`);
+      } else if (version === 2 && id === applicationID && matches(nextSchema)) {
+        db.exec(`BEGIN IMMEDIATE; ${projectSchema.join('; ')}; PRAGMA user_version=3; COMMIT`);
+      } else if (version !== 3 || id !== applicationID) throw invalid();
+      if (!matches([...nextSchema, ...projectSchema])) throw invalid();
       db.exec('PRAGMA max_page_count=65536');
       this.identity = file;
       this.db = db;
@@ -98,17 +112,18 @@ export class ChatHistory {
     signal?.throwIfAborted();
     return this.run(db => {
       signal?.throwIfAborted();
-      const { id, mode } = conversation, { requestID, user, assistant, completedAt } = turn;
+      const { id, mode, projectID } = conversation, { requestID, user, assistant, completedAt } = turn;
       db.exec('BEGIN IMMEDIATE');
       try {
-        const owner = db.prepare('SELECT pet_id FROM sessions WHERE id = ?').get(id);
-        if (owner ? owner.pet_id !== petID : mode !== 'new') throw invalid();
+        const owner = sessionOwner(db, id);
+        if (!projectOwner(db, petID, projectID) || (owner ? owner.pet_id !== petID || (owner.projectID ?? undefined) !== projectID : mode !== 'new')) throw invalid();
         const previous = db.prepare(`SELECT session_id, replayable, ${fields} FROM turns WHERE request_id = ?`).get(requestID);
         if (previous) {
           if (previous.session_id !== id || previous.user !== user || previous.assistant !== assistant || previous.replayable !== Number(replayable)) throw invalid();
         } else {
           if (!owner) db.prepare(`INSERT INTO sessions(id, pet_id, number, last_seq, completed_at)
             SELECT ?, ?, COALESCE(MAX(number), 0) + 1, 0, ? FROM sessions WHERE pet_id = ?`).run(id, petID, completedAt, petID);
+          if (!owner && projectID) db.prepare('INSERT INTO session_projects(session_id, project_id) VALUES (?, ?)').run(id, projectID);
           const { lastInsertRowid } = db.prepare(`INSERT INTO turns(session_id, request_id, user_text, assistant_text, completed_at, replayable)
             VALUES (?, ?, ?, ?, ?, ?)`).run(id, requestID, user, assistant, completedAt, Number(replayable));
           db.prepare('UPDATE sessions SET last_seq = ?, completed_at = ? WHERE id = ?').run(lastInsertRowid, completedAt, id);
@@ -117,20 +132,38 @@ export class ChatHistory {
       } catch (error) { db.exec('ROLLBACK'); throw error; }
     });
   }
-  async list(petID: string, before?: string): Promise<ChatHistoryPage> {
-    if (!isHistoryInput('list', { petID, before })) throw invalid();
+  async createProject(petID: string, project: ChatProject) {
+    if (!petId(petID) || !isChatProject(project)) throw invalid();
+    return this.run(db => {
+      const { changes } = db.prepare(`INSERT INTO projects(id, pet_id, name)
+        SELECT ?, ?, ? WHERE (SELECT COUNT(*) FROM projects WHERE pet_id = ?) < ?`).run(project.id, petID, project.name, petID, maxChatProjects);
+      if (!changes) throw invalid();
+      return project;
+    });
+  }
+  async listProjects(petID: string): Promise<ChatProject[]> {
+    if (!petId(petID)) throw invalid();
+    return this.run(db => db.prepare('SELECT id, name FROM projects WHERE pet_id = ? ORDER BY rowid DESC LIMIT ?').all(petID, maxChatProjects).map(row => {
+      if (!isChatProject(row)) throw invalid();
+      return { id: row.id, name: row.name };
+    }));
+  }
+  async list(petID: string, before?: string, projectID?: string): Promise<ChatHistoryPage> {
+    if (!isHistoryInput('list', { petID, before, projectID })) throw invalid();
     return this.run(db => {
       const limit = chatHistoryPageSize + 1;
+      const filter = projectID === undefined ? '' : projectID === 'unassigned' ? ` AND ${projectColumn} IS NULL` : ` AND ${projectColumn} = ?`;
+      const scope = projectID && projectID !== 'unassigned' ? [petID, projectID] : [petID];
       const anchor = before === undefined ? undefined : db.prepare(`SELECT t.seq FROM turns t
-        JOIN sessions s ON s.id = t.session_id WHERE t.request_id = ? AND s.pet_id = ?`).get(before, petID)?.seq;
+        JOIN sessions s ON s.id = t.session_id WHERE t.request_id = ? AND s.pet_id = ?${filter}`).get(before, ...scope)?.seq;
       if (before !== undefined && typeof anchor !== 'number') throw invalid();
       // The boundary turn never moves when its session receives a new reply.
-      const select = `SELECT s.id, s.number, s.completed_at AS completedAt, t.request_id AS cursor
-        FROM sessions s JOIN turns t ON t.seq = s.last_seq AND t.session_id = s.id WHERE s.pet_id = ?`;
+      const select = `SELECT s.id, s.number, s.completed_at AS completedAt, t.request_id AS cursor, ${projectColumn} AS projectID
+        FROM sessions s JOIN turns t ON t.seq = s.last_seq AND t.session_id = s.id WHERE s.pet_id = ?${filter}`;
       const results = typeof anchor === 'number'
-        ? db.prepare(`${select} AND s.last_seq < ? ORDER BY s.last_seq DESC LIMIT ?`).all(petID, anchor, limit)
-        : db.prepare(`${select} ORDER BY s.last_seq DESC LIMIT ?`).all(petID, limit);
-      const rows = results.slice(0, chatHistoryPageSize).map(({ id, number, completedAt }) => ({ id, number, completedAt }));
+        ? db.prepare(`${select} AND s.last_seq < ? ORDER BY s.last_seq DESC LIMIT ?`).all(...scope, anchor, limit)
+        : db.prepare(`${select} ORDER BY s.last_seq DESC LIMIT ?`).all(...scope, limit);
+      const rows = results.slice(0, chatHistoryPageSize).map(({ id, number, completedAt, projectID }) => ({ id, number, completedAt, ...(projectID !== null && { projectID }) }));
       const page = { rows, nextBefore: results.length === limit ? results[chatHistoryPageSize - 1]?.cursor : null };
       if (!isHistoryPage(page)) throw invalid();
       return page;
@@ -139,7 +172,7 @@ export class ChatHistory {
   async detail(petID: string, id: string, before?: string): Promise<ChatHistoryDetail | undefined> {
     if (!isHistoryInput('detail', { petID, id, before })) throw invalid();
     return this.run(db => {
-      const session = db.prepare(`SELECT ${summaryFields} FROM sessions WHERE pet_id = ? AND id = ?`).get(petID, id);
+      const session = db.prepare(`SELECT s.id, s.number, s.completed_at AS completedAt, ${projectColumn} AS projectID FROM sessions s WHERE pet_id = ? AND id = ?`).get(petID, id);
       if (!session) return undefined;
       const limit = chatHistoryDetailSize + 1;
       const anchor = before === undefined ? undefined : db.prepare('SELECT seq FROM turns WHERE session_id = ? AND request_id = ?').get(id, before)?.seq;
@@ -148,17 +181,17 @@ export class ChatHistory {
         ? db.prepare(`SELECT ${fields} FROM turns WHERE session_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?`).all(id, anchor, limit)
         : db.prepare(`SELECT ${fields} FROM turns WHERE session_id = ? ORDER BY seq DESC LIMIT ?`).all(id, limit);
       if (before !== undefined && rows.length === 0) return undefined;
-      const detail = { session: { ...session }, ...(before && { before }), turns: rows.slice(0, chatHistoryDetailSize).reverse().map(row => ({ ...row })), hasEarlier: rows.length === limit };
+      const detail = { session: { id: session.id, number: session.number, completedAt: session.completedAt, ...(session.projectID !== null && { projectID: session.projectID }) }, ...(before && { before }), turns: rows.slice(0, chatHistoryDetailSize).reverse().map(row => ({ ...row })), hasEarlier: rows.length === limit };
       if (!isHistoryDetail(detail, id, before) || !detail.turns.every(turn => safeChatFields([turn.user, turn.assistant]))) throw invalid();
       return detail;
     });
   }
   async completed(petID: string, conversation: ChatConversation, turnID: string, user: string) {
     return this.run(db => {
-      const row = db.prepare(`SELECT request_id AS requestID, user_text AS user, assistant_text AS assistant, turns.completed_at AS completedAt, session_id, pet_id, replayable
-        FROM turns JOIN sessions ON sessions.id = turns.session_id WHERE request_id = ?`).get(turnID);
+      const row = db.prepare(`SELECT request_id AS requestID, user_text AS user, assistant_text AS assistant, turns.completed_at AS completedAt, turns.session_id, pet_id, replayable, ${projectColumn} AS projectID
+        FROM turns JOIN sessions s ON s.id = turns.session_id WHERE request_id = ?`).get(turnID);
       if (!row) return undefined;
-      if (row.pet_id !== petID || row.session_id !== conversation.id || row.user !== user) return { status: 'conflict' } as const;
+      if (row.pet_id !== petID || row.session_id !== conversation.id || (row.projectID ?? undefined) !== conversation.projectID || row.user !== user) return { status: 'conflict' } as const;
       if (!isHistoryTurn({ requestID: row.requestID, user: row.user, assistant: row.assistant, completedAt: row.completedAt }) ||
         typeof row.assistant !== 'string' || !safeChatFields([user, row.assistant]) || (row.replayable !== 0 && row.replayable !== 1)) throw invalid();
       return { status: 'completed', text: row.assistant, replayable: row.replayable === 1 } as const;
@@ -167,10 +200,11 @@ export class ChatHistory {
   async replay(petID: string, conversation: ChatConversation): Promise<ChatExchange[] | undefined> {
     if (!petId(petID) || !isChatConversation(conversation)) throw invalid();
     return this.run(db => {
-      const { id, mode } = conversation;
-      const owner = db.prepare('SELECT pet_id FROM sessions WHERE id = ?').get(id);
+      const { id, mode, projectID } = conversation;
+      const owner = sessionOwner(db, id);
+      if (!projectOwner(db, petID, projectID)) return undefined;
       if (!owner) return mode === 'new' ? [] : undefined;
-      if (owner.pet_id !== petID) return undefined;
+      if (owner.pet_id !== petID || (owner.projectID ?? undefined) !== projectID) return undefined;
       const rows = db.prepare(`SELECT ${fields} FROM turns WHERE session_id = ? AND replayable = 1 ORDER BY seq DESC LIMIT 5`).all(id);
       return rows.reverse().map(row => {
         if (!isHistoryTurn(row) || !safeChatFields([row.user, row.assistant])) throw invalid();

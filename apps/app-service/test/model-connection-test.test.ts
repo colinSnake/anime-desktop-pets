@@ -50,7 +50,11 @@ for (const protocol of MODEL_PROTOCOLS) test(`${protocol}: tests only the chosen
   const reply = await f.post({ ...input, ...(protocol === 'chat-completions' ? { outputTokenField: 'max_tokens' } : {}) });
   assert.equal(reply.statusCode, 200, reply.body);
   assert.deepEqual(reply.json(), { version: 1, ok: true, connectionID: 'probe', revision: 2, entryID: 'draft-entry' });
-  assert.deepEqual(await f.models.run('list', undefined), before);
+  const after = await f.models.run('list', undefined);
+  assert.ok(after.ok && before.ok);
+  assert.deepEqual(after.configuration, before.configuration);
+  assert.deepEqual(after.probeResults?.[0]?.input, { ...input, ...(protocol === 'chat-completions' ? { outputTokenField: 'max_tokens' } : {}) });
+  assert.deepEqual(after.probeResults?.[0]?.result, reply.json());
   assert.match(call!.url, /^https:\/\/probe\.invalid\/prefix\/v1/);
   assert.equal(call!.headers.get(protocol === 'anthropic' ? 'x-api-key' : protocol === 'gemini' ? 'x-goog-api-key' : 'authorization'), `${protocol === 'anthropic' || protocol === 'gemini' ? '' : 'Bearer '}SYNTHETIC-KEY-probe`);
   assert.equal(protocol === 'gemini' ? call!.url.split('/').at(-1) : call!.body.model, protocol === 'gemini' ? 'draft-model:generateContent' : 'draft-model');

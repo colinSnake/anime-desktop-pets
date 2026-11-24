@@ -17,7 +17,7 @@ export function registerAgentTasks(app: FastifyInstance, store: AgentTaskStore, 
   for (const job of active.values()) if (job.task.petID === petID) job.stop.abort();
  });
  const registered = <T>(petID: string, action: () => Promise<T>) => workspace.withRegisteredInstance(petID, action);
- const run = async (input: AgentTaskCreate, job: Active, revision: number, verifyUnknownTools: boolean) => {
+ const run = async (input: AgentTaskCreate, job: Active, revision: number) => {
   const deadline = AbortSignal.timeout(90_000);
   const signal = AbortSignal.any([job.stop.signal, shutdown.signal, deadline]);
   const { petID } = input;
@@ -32,7 +32,7 @@ export function registerAgentTasks(app: FastifyInstance, store: AgentTaskStore, 
     return models.completeAgentTask(input.route, revision, async dispatch => {
      await registered(petID, async () => { if (signal.aborted) throw new ModelError('cancelled'); dispatch(modelInput); });
     }, signal);
-   }, async (phase, progress) => { await update({ status: 'running', phase, progress }); }, verifyUnknownTools);
+   }, async (phase, progress) => { await update({ status: 'running', phase, progress }); });
    // Order the completion commit against both pet deletion and explicit cancel.
    if (!acceptedTaskResult(result)) throw new ModelError('invalid_response');
    await registered(petID, async () => {
@@ -83,7 +83,7 @@ export function registerAgentTasks(app: FastifyInstance, store: AgentTaskStore, 
      }
      const stop = new AbortController(), job = { task, stop, done: Promise.resolve() };
      active.set(taskID, job);
-     job.done = run(admitted, job, resolved.connectionRevision, resolved.tools === 'unknown').finally(() => { active.delete(taskID); });
+     job.done = run(admitted, job, resolved.connectionRevision).finally(() => { active.delete(taskID); });
      return task;
     });
     return reply.send({ ok: true, task });

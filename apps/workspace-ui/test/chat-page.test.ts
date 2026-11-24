@@ -59,7 +59,7 @@ test('chat labels local queries and answers while keeping model selection and or
  c.edit('一般问题');
  assert.match(render(c), /<button[^>]*disabled=""[^>]*aria-label="发送消息"/);
  assert.match(render(c), /查看目标进度/);
- c.edit('你是谁？');
+ c.edit('查看本机身份');
  assert.match(render(c), /<button(?:(?!disabled)[^>])*aria-label="查询本机资料"/);
  assert.match(render(c), /<button[^>]*chat-model-toggle[^>]*disabled=""/);
  await c.send();
@@ -79,19 +79,64 @@ test('chat explains unavailable online sending without hiding an unsaved draft',
  assert.match(html, /<button[^>]*disabled=""[^>]*aria-label="发送消息"/);
 });
 
-test('online composer identifies the selected connection and discloses that sending may incur charges', async () => {
+test('composer follows the reference action order without displaying keyboard instructions', () => {
+ const c = create();
+ const footer = render(c).match(/<div class="chat-composer-footer">([\s\S]+)<\/footer>/)?.[1];
+ assert.ok(footer);
+ assert.match(footer, /aria-label="添加内容"[\s\S]+>请求批准<\/button>[\s\S]+class="chat-composer-ring" aria-hidden="true"[\s\S]+未配置模型[\s\S]+aria-label="发送消息"/);
+ assert.match(footer, /class="chat-composer-permission" aria-expanded="false"/);
+ assert.doesNotMatch(footer, /Enter|换行/);
+});
+
+test('chat keeps the permission picker without displaying the old Agent task entry', () => {
+ const c = create();
+ const html = renderToStaticMarkup(createElement(ChatPage, { state: c.getSnapshot(), controller: c, onOpenPetAgent: () => {} }));
+ assert.match(html, /chat-permission-picker/);
+ assert.doesNotMatch(html, /Agent 任务|agent-task-title/);
+});
+
+for (const persistent of [false, true]) test(`online composer names the model without the routine delivery banner (persistent=${persistent})`, async () => {
  const c = new ChatWorkspaceController(undefined, undefined, { list: async () => ({ ok: true, models: [{
   route: { connectionID: 'first', modelEntryID: 'one', fingerprint: 'a'.repeat(64) }, connectionName: '合成连接', modelName: '合成模型', ready: true, isDefault: true,
- }] }), send: async () => ({ ok: false, error: 'unavailable' }), cancel: async () => {} });
+ }], ...(persistent && { persistentConversations: true as const }) }), send: async () => ({ ok: false, error: 'unavailable' }), cancel: async () => {} });
  c.syncCharacters([{ id: 'pet-one', name: '龙妹' }]); await c.refreshModels(); c.edit('合成问题');
  const html = render(c);
- assert.match(html, /合成模型 · 合成连接/); assert.match(html, /可能产生费用/);
+ const model = html.match(/<button[^>]*class="chat-model-toggle"[^>]*>[\s\S]*?<\/button>/)?.[0];
+ assert.ok(model);
+ assert.match(model, /title="合成模型"/);
+ assert.match(model, /aria-label="切换聊天模型：合成模型"/);
+ assert.doesNotMatch(model, /合成连接/);
+ assert.match(model, /<span>合成模型<\/span>/);
+ assert.equal(model.match(/<svg\b/g)?.length, 1, 'only the dropdown arrow accompanies the visible model name');
+ assert.doesNotMatch(html, /在线文字|可能产生费用|chat-delivery/);
  assert.doesNotMatch(html, /disabled=""[^>]*aria-label="发送消息"/);
  c.edit('👨‍👩‍👧‍👦'.repeat(800));
  assert.match(render(c), /超出字节上限/);
  assert.match(render(c), /disabled=""[^>]*aria-label="发送消息"/);
 });
 
+
+test('composer hides the provider in an online snapshot retained from before Fast Refresh', () => {
+ const c = create(async () => '合成回复');
+ const snapshot = c.getSnapshot();
+ const state = { ...snapshot, online: true, models: [{ ...snapshot.models[0]!, name: '合成模型 · 推理 · 模拟服务商' }] };
+ const html = renderToStaticMarkup(createElement(ChatPage, { state, controller: c }));
+ assert.match(html, /title="合成模型 · 推理"[^>]*aria-label="切换聊天模型：合成模型 · 推理"/);
+ assert.doesNotMatch(html, /模拟服务商/);
+});
+
+test('composer does not strip ordinary model names that contain the legacy delimiter', () => {
+ const c = create(async () => '合成回复');
+ const snapshot = c.getSnapshot();
+ const model = { ...snapshot.models[0]!, name: '合成模型 · 推理' };
+ for (const state of [
+  { ...snapshot, models: [model] },
+  { ...snapshot, online: true, models: [{ ...model, modelName: model.name, name: `${model.name} · 模拟服务商` }] },
+ ]) {
+  const html = renderToStaticMarkup(createElement(ChatPage, { state, controller: c }));
+  assert.match(html, /<span>合成模型 · 推理<\/span>/);
+ }
+});
 
 test('the selected pet gets the confirmed welcome scene and only a multi-instance chat gets a picker', () => {
  const c = create();
@@ -120,11 +165,11 @@ test('welcome shortcuts are visible only with the local bridge and disappear whe
  const c = new ChatWorkspaceController(undefined, {localChatContext: async ({petID}) => ({ok:true,petID,text:'合成身份'})});
  c.syncCharacters([{ id: 'one', name: '龙妹' }]);
  const view = () => renderToStaticMarkup(createElement(ChatPage, { state: c.getSnapshot(), controller: c, reference: longmei }));
- assert.match(view(), /本机查询快捷短句[\s\S]*你是谁[\s\S]*查看目标进度[\s\S]*查角色知识[\s\S]*查个人记忆/);
+ assert.match(view(), /本机查询快捷短句[\s\S]*查看本机身份[\s\S]*查看目标进度[\s\S]*查角色知识[\s\S]*查个人记忆/);
  c.edit('查角色知识：');
  assert.match(view(), /本机查询[\s\S]*请输入查询关键词/);
  assert.doesNotMatch(view(), /可能产生费用/);
- c.edit('你是谁？'); await c.send();
+ c.edit('查看本机身份'); await c.send();
  const html = view();
  assert.match(html, /chat-message-assistant[\s\S]*chat-avatar[\s\S]*龙妹[\s\S]*本机资料[\s\S]*合成身份/);
  assert.doesNotMatch(html, /chat-portrait|本机查询快捷短句/);
@@ -190,6 +235,7 @@ test('the chat options expose retained drafts by conversation label, without sho
 test('online composer exposes bounded file selection and removal only for the current message', async () => {
  const c = new ChatWorkspaceController(undefined, undefined, {
   list: async () => ({ ok: true, models: [{ route: { connectionID: 'a', modelEntryID: 'x', fingerprint: 'a'.repeat(64) }, connectionName: '服务', modelName: '模型', ready: true, isDefault: true }] }),
+  approveMaterials: async () => ({ ok: false, error: 'unavailable' }),
   send: async () => ({ ok: false, error: 'unavailable' }), cancel: async () => {},
  });
  c.syncCharacters([{ id: 'pet-one', name: '龙妹' }]); await c.refreshModels();
@@ -199,4 +245,29 @@ test('online composer exposes bounded file selection and removal only for the cu
  assert.match(html, /移除 notes\.txt/);
  assert.match(html, /仅本轮/);
  assert.doesNotMatch(html, /5L2g5aW9/);
+});
+
+test('the identity shortcut explicitly describes a local identity lookup instead of a model question', () => {
+ const c = new ChatWorkspaceController(undefined, { localChatContext: async ({ petID }) => ({ ok: true, petID, text: '合成介绍' }) });
+ c.syncCharacters([{ id: 'one', name: '龙妹' }]);
+ const html = renderToStaticMarkup(createElement(ChatPage, { state: c.getSnapshot(), controller: c, reference: longmei }));
+ assert.match(html, /<button[^>]*>[\s\S]*?查看本机身份<[/]button>/);
+ assert.doesNotMatch(html, />你是谁？<[/]button>/);
+});
+
+test('voice-to-text is a separate local action, available only with its bridge and an empty draft', () => {
+ const c = create();
+ const voiceDraft = { select: async () => ({ ok: true, text: '合成文字' } as const), cancel: async () => {}, microphone: {
+  authorize: async () => ({ ok: true } as const), start: async () => ({ ok: true } as const),
+  stop: async () => ({ ok: true, text: '合成口述' } as const), cancel() {},
+ } };
+ const html = () => renderToStaticMarkup(createElement(ChatPage, { state: c.getSnapshot(), controller: c, voiceDraft }));
+ assert.doesNotMatch(render(c), /语音转文字/);
+ assert.match(html(), /<button type="button">语音转文字（本机）<\/button>/);
+ assert.doesNotMatch(render(c), /按住说话/);
+ assert.match(html(), /<button type="button" class="chat-add chat-microphone" data-microphone-action="start" aria-label="按住说话（本机转写）" aria-pressed="false"/);
+ assert.doesNotMatch(html(), /type="file"|授权麦克风/);
+ c.edit('用户的草稿');
+ assert.match(html(), /<button type="button" disabled=""[^>]*>语音转文字（本机）<\/button>/);
+ assert.match(html(), /<button type="button" class="chat-add chat-microphone" disabled=""/);
 });

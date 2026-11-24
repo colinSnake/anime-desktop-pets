@@ -1,14 +1,27 @@
+import type { VoiceDraftBridge, VoiceDraftError, VoiceDraftResult } from '../../../packages/contracts/src/voice-draft.ts';
+import { ChatMicrophoneButton } from './ChatMicrophoneButton.tsx';
+import { ChatPermissionPicker } from './ChatPermissionPicker.tsx';
 import { CHAT_MEMORY_LIMIT, parseChatMemoryCommand } from '../../../packages/contracts/src/character-records.ts';
-import { DialogCloseButton } from './DialogDismiss.tsx';
 import { acceptedChatText } from '../../../packages/contracts/src/online-chat.ts';
 import { attachmentModality, chatTextFileAccept } from '../../../packages/contracts/src/chat-attachments.ts';
 import { parseLocalChatCommand } from '../../../packages/contracts/src/local-chat.ts';
-import { Component, lazy, Suspense, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { Component, lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { readChatFiles } from './chat-attachments.ts';
 import { ChatDraftEditor } from './ChatDraftEditor.tsx';
 import { PetNookIcon } from './PetNookIcon.tsx';
+import { ChatModelPicker } from './ChatModelPicker.tsx';
 import { ComposerKeyboard } from './chat-input.ts';
 import { characterCount, validatedMessage, type ChatWorkspaceController, type ChatWorkspaceState } from './chat-session.ts';
+
+type VoicePhase = 'file' | 'opening' | 'recording' | 'transcribing' | 'permission';
+type VoiceOperation = { bridge: VoiceDraftBridge; kind: 'file' | 'microphone' | 'permission'; started?: boolean; stopRequested?: boolean; apply(text: string): boolean };
+const voiceNotices: Record<VoiceDraftError, string> = {
+ unavailable: '本机语音识别未配置或当前窗口不可用。', busy: '已有语音操作正在清理，请稍后重试。', cancelled: '',
+ 'invalid-file': '请选择 1–30 秒且不超过 6 MiB 的 PCM WAV 文件。', timeout: '本机读取或转写超时，请重试。',
+ 'no-speech': '没有识别到可用文字。', failed: '本机语音操作失败，没有发送内容。',
+ 'too-short': '请按住说话至少 1 秒。', 'permission-required': '首次使用需先授权麦克风，授权不会开始录音。',
+ 'permission-denied': '麦克风不可用。可在系统设置 → 隐私与安全性 → 麦克风中检查权限。',
+};
 
 const DraftPreview = lazy(() => import('./routes/chat-draft-preview.ts'));
 
@@ -17,13 +30,37 @@ export function resetComposerDragState(fileRead: { current: number }, dragDepth:
  dragDepth.current = 0;
 }
 
-export function ChatComposer({ state, controller, name, input }: { state: ChatWorkspaceState; controller?: ChatWorkspaceController; name: string; input: RefObject<HTMLDivElement | null> }) {
+export function ChatComposer({ state, controller, name, input, voiceDraft }: {
+ state: ChatWorkspaceState; controller?: ChatWorkspaceController; name: string; input: RefObject<HTMLDivElement | null>; voiceDraft?: VoiceDraftBridge;
+}) {
  const keyboard = useRef(new ComposerKeyboard());
  const [composing, setComposing] = useState(false);
  const [editorIssue, setEditorIssue] = useState<'limit' | 'broken' | ''>('');
  const [previewing, setPreviewing] = useState(false);
  const [reading, setReading] = useState(false);
  const [fileNotice, setFileNotice] = useState('');
+ const [voicePhase, setVoicePhase] = useState<VoicePhase>();
+ const voiceBusy = !!voicePhase;
+ const [voiceNotice, setVoiceNotice] = useState('');
+ const [voiceError, setVoiceError] = useState<VoiceDraftError>();
+ const voiceOperation = useRef<VoiceOperation | undefined>(undefined);
+ const cancelVoice = useCallback(() => {
+  const running = voiceOperation.current;
+  voiceOperation.current = undefined;
+  if (running?.kind === 'file') void running.bridge.cancel().catch(() => {});
+  if (running?.kind === 'microphone') running.bridge.microphone.cancel();
+ }, []);
+ useEffect(() => {
+  setVoicePhase(undefined); setVoiceNotice(''); setVoiceError(undefined);
+  const hideVoice = () => { if (document.hidden) { cancelVoice(); setVoicePhase(undefined); setVoiceNotice(''); setVoiceError(undefined); } };
+  const blur = () => {
+   if (voiceOperation.current?.kind !== 'microphone') return;
+   cancelVoice(); setVoicePhase(undefined); setVoiceNotice('窗口失焦，已取消本机语音操作。');
+  };
+  document.addEventListener('visibilitychange', hideVoice);
+  window.addEventListener('blur', blur);
+  return () => { cancelVoice(); document.removeEventListener('visibilitychange', hideVoice); window.removeEventListener('blur', blur); };
+ }, [cancelVoice, voiceDraft, state.selectedId, state.session.editorKey]);
  const fileInput = useRef<HTMLInputElement>(null);
  const fileRead = useRef(0);
  const dragDepth = useRef(0);
@@ -48,9 +85,70 @@ export function ChatComposer({ state, controller, name, input }: { state: ChatWo
  });
  const attachmentIssue = session.attachments.length && (memory || intent) ? '本机指令不能携带附件。请先移除附件。'
   : incompatible ? '当前模型不支持所选图片或 PDF。请切换模型或移除附件。' : '';
- const canSend = !!controller && !!state.selectedId && !session.pending && !composing && !previewing && editorIssue !== 'broken' && !!validatedMessage(text) &&
+ const canSend = !!controller && !!state.selectedId && !session.pending && !session.awaitingApproval && !composing && !previewing && editorIssue !== 'broken' && !!validatedMessage(text) &&
   !reading && !attachmentIssue && (memory ? !memoryInvalid && !!state.memoryAvailable : intent ? local && state.localAvailable : state.available && !!session.model && !invalidOnlineText);
- const canAddFiles = !!state.online && !!controller && state.available && !session.pending && !memory && !intent;
+ const canAddFiles = !!state.materialApproval && !!controller && state.available && !session.pending && !memory && !intent;
+ const voiceEligible = !!controller && !!state.selectedId && !session.draft && !session.attachments.length &&
+  !session.pending && !session.awaitingApproval && !reading && !previewing && !composing;
+ const beginVoice = (kind: VoiceOperation['kind'], phase: VoicePhase) => {
+  const petID = state.selectedId;
+  if (!petID || !voiceDraft || !controller || !voiceEligible || voiceOperation.current) return;
+  const running: VoiceOperation = { bridge: voiceDraft, kind,
+   apply: text => controller.importVoiceDraft(petID, session.editorKey, session.draftSnapshot, text) };
+  voiceOperation.current = running;
+  setVoicePhase(phase); setVoiceNotice(''); setVoiceError(undefined);
+  return running;
+ };
+ const clearVoice = (running: VoiceOperation) => {
+  if (voiceOperation.current !== running) return false;
+  voiceOperation.current = undefined; setVoicePhase(undefined); return true;
+ };
+ const reportVoice = (running: VoiceOperation, response: VoiceDraftResult) => {
+  if (!clearVoice(running)) return;
+  if (!response.ok) { setVoiceNotice(voiceNotices[response.error]); setVoiceError(response.error); return; }
+  if (!running.apply(response.text)) { setVoiceNotice('草稿已变化，未覆盖当前内容。'); return; }
+  setVoiceNotice('转写已填入草稿，确认后可手动发送。');
+  input.current?.focus({ preventScroll: true });
+ };
+ const failedVoice = () => ({ ok: false, error: 'failed' } as const);
+ const startVoice = async () => {
+  const running = beginVoice('file', 'file');
+  if (running) reportVoice(running, await running.bridge.select().catch(failedVoice));
+ };
+ const authorizeVoice = async () => {
+  const running = beginVoice('permission', 'permission');
+  if (!running) return;
+  const result = await running.bridge.microphone.authorize().catch(failedVoice);
+  if (!result.ok) { reportVoice(running, result); return; }
+  if (clearVoice(running)) setVoiceNotice('麦克风已授权。再次按住说话才会开始录音。');
+ };
+ const startMic = async () => {
+  const running = beginVoice('microphone', 'opening');
+  if (!running) return;
+  const result = await running.bridge.microphone.start(() => {
+   if (clearVoice(running)) setVoiceNotice('录音已中断或达到时限，没有发送内容。');
+  }).catch(failedVoice);
+  if (!result.ok) {
+   reportVoice(running, result.error === 'cancelled' && running.stopRequested ? { ok: false, error: 'too-short' } : result);
+   return;
+  }
+  running.started = true;
+  if (voiceOperation.current === running) setVoicePhase(previous => previous === 'opening' ? 'recording' : previous);
+ };
+ const stopMic = async () => {
+  const running = voiceOperation.current;
+  if (running?.kind !== 'microphone' || running.stopRequested) return;
+  running.stopRequested = true;
+  setVoicePhase('transcribing');
+  const result = await running.bridge.microphone.stop().catch(failedVoice);
+  // When released before opening completes, start reports the permission or short-press result.
+  if (result.ok || result.error !== 'cancelled' || running.started) reportVoice(running, result);
+ };
+ const cancelMic = () => {
+  if (voiceOperation.current?.kind !== 'microphone') return;
+  cancelVoice(); setVoicePhase(undefined); setVoiceNotice('已取消本机语音操作。');
+ };
+ const micActive = voicePhase === 'opening' || voicePhase === 'recording';
  const pendingRoute = session.pending && !text;
  const delivery = (pendingRoute ? session.turns.at(-1)?.localOnly : intent) ? 'local' : 'model';
  const localError = intent === 'invalid';
@@ -61,13 +159,12 @@ export function ChatComposer({ state, controller, name, input }: { state: ChatWo
  } as const : delivery === 'local' ? {
   label: '本机查询', icon: 'lock',
   description: !state.localAvailable ? '本机查询暂不可用，此命令不会转发给模型。' : localError ? '请输入查询关键词。本机指令不会发送给模型服务。' : '只查当前角色的本机资料，不发送给模型服务。',
- } as const : state.available || pendingRoute ? (state.online ? {
-  label: '在线文字', icon: 'globe', description: state.persistentConversations ? '消息、当前会话近期可回放的普通问答及本轮已授权资料会发给所选模型，可能产生费用。'
-   : '消息、同一连接和模型可用的聊天记录及已授权资料会发给所选服务，可能产生费用。',
- } as const : { label: '文字聊天', icon: 'chat', description: '为当前角色发送消息。' } as const) : {
+ } as const : state.available || pendingRoute ? (state.online ? undefined
+  : { label: '文字聊天', icon: 'chat', description: '为当前角色发送消息。' } as const) : {
   label: state.models.length ? '模型不可用' : state.online ? '未配置模型' : '模型服务未连接', icon: 'models',
   description: state.models.length ? '请选择可用模型，或在「模型管理」中检查连接。' : state.online ? (state.localAvailable ? '仍可查询本机资料；在线发送需先在「模型管理」配置模型。' : '在线发送需先在「模型管理」配置模型。') : '模型服务尚未接入，草稿会保留。',
  } as const;
+ const descriptionIDs = [route && 'chat-delivery', invalidOnlineText && 'chat-text-boundary', count > 1000 && 'chat-character-count'].filter(Boolean).join(' ');
  const resetDrag = () => { dragDepth.current = 0; setDragging(false); };
  const readSelection = async (files: readonly File[]) => {
   if (!files.length || !state.selectedId || !controller || !canAddFiles || reading) return;
@@ -81,17 +178,22 @@ export function ChatComposer({ state, controller, name, input }: { state: ChatWo
  };
  const submitCurrent = () => {
   const current = controller?.getSnapshot();
-  if (state.selectedId && current?.selectedId === state.selectedId && current.session.editorKey === session.editorKey) void controller?.send();
+  if (state.selectedId && current?.selectedId === state.selectedId && current.session.editorKey === session.editorKey) {
+   cancelVoice(); setVoicePhase(undefined); setVoiceNotice(''); setVoiceError(undefined);
+   void controller?.send();
+  }
  };
+ const sendLabel = memory ? '生成本机记忆提案' : intent && state.localAvailable ? '查询本机资料' : '发送消息';
  const send = () => {
   if (keyboard.current.action({ key: 'Enter', shiftKey: false, ctrlKey: false, metaKey: false, altKey: false, isComposing: false, keyCode: 13 }, canSend, performance.now()) === 'send') submitCurrent();
   input.current?.focus();
  };
  return <>
- <div className="chat-delivery" id="chat-delivery" role="status">
+ {route && <div className="chat-delivery" id="chat-delivery" role="status">
   <strong><PetNookIcon name={route.icon} />{route.label}</strong><span>{route.description}</span>
- </div>
+ </div>}
  <div className="chat-composer" data-dragging={dragging || undefined} aria-label="消息输入区"
+  onKeyDown={event => { if (event.key === 'Escape' && voiceOperation.current?.kind === 'microphone') { event.preventDefault(); cancelMic(); } }}
   onDragEnter={event => {
    if (!event.dataTransfer.types.includes('Files')) return;
    event.preventDefault();
@@ -106,7 +208,7 @@ export function ChatComposer({ state, controller, name, input }: { state: ChatWo
    if (canAddFiles && !reading) void readSelection(Array.from(event.dataTransfer.files));
   }}>
   <div className="chat-composer-editor" hidden={previewing}><ChatDraftEditor hidden={previewing} input={input} draft={session.draftSnapshot} editable={!!controller && !!state.selectedId} placeholder={`和${name}聊聊……`}
-   invalid={count > 1200 || invalidOnlineText || localError || memoryInvalid} describedBy={`chat-delivery${invalidOnlineText ? ' chat-text-boundary' : ''}${count > 1000 ? ' chat-character-count' : ''}`}
+   invalid={count > 1200 || invalidOnlineText || localError || memoryInvalid} describedBy={descriptionIDs || undefined}
    onDraft={value => !!state.selectedId && !!controller?.editDraft(state.selectedId, value, session.editorKey)} onTrouble={setEditorIssue}
    onCompose={active => { if (active) keyboard.current.start(); else keyboard.current.end(performance.now()); setComposing(active); }}
    onKeyDown={event => {
@@ -126,21 +228,39 @@ export function ChatComposer({ state, controller, name, input }: { state: ChatWo
    event.currentTarget.value = '';
    void readSelection(files);
   }} />}
- {session.attachments.length > 0 && <div className="chat-attachments"><span>仅本轮 · 发送给所选模型</span>
+ {session.attachments.length > 0 && <div className="chat-attachments"><span>仅本轮 · 批准后由所选模型处理</span>
   <ul aria-label="本轮附件">{session.attachments.map(file => <li key={file.name}><span title={file.name}>{file.name}</span>
    <button type="button" aria-label={`移除 ${file.name}`} disabled={reading} onClick={() => state.selectedId && controller?.removeAttachment(state.selectedId, session.editorKey, file.name)}>×</button></li>)}</ul></div>}
+ {(voiceBusy || voiceNotice) && <div className="chat-voice-progress chat-status">
+  <span role="status">{voicePhase ? {
+   file: '选择或转写语音中，仅在本机处理…', opening: '正在打开麦克风…', recording: '正在录音，松开后转写（最多 30 秒）…',
+   transcribing: '正在本机转写…', permission: '等待系统麦克风授权…',
+  }[voicePhase] : voiceNotice}</span>
+  {voiceError === 'permission-required' && voiceEligible && <button type="button" data-microphone-action="authorize" onClick={() => { void authorizeVoice(); }}>授权麦克风</button>}
+  {voiceBusy && voicePhase !== 'permission' && <button type="button" onClick={() => {
+   cancelVoice(); setVoicePhase(undefined); setVoiceNotice('已取消本机语音操作。'); input.current?.focus();
+  }}>取消语音</button>}
+ </div>}
  {(reading || fileNotice || attachmentIssue) && <p className="chat-status" role="status">{reading ? '正在检查附件…' : attachmentIssue || fileNotice}</p>}
-  <div className="chat-composer-actions chat-composer-footer">
-   <ChatContentOptions previewing={previewing} canPreview={!!text && !composing && editorIssue !== 'broken'} onFiles={canAddFiles && !reading ? () => fileInput.current?.click() : undefined} onToggle={() => {
+ {(invalidOnlineText || count > 1000) && <div className="chat-composer-limits">
+  {invalidOnlineText && <span id="chat-text-boundary" className="chat-counter error" aria-live="polite">超出字节上限或含不支持的字符</span>}
+  {count > 1000 && <span id="chat-character-count" className={count > 1200 ? 'chat-counter error' : 'chat-counter'} aria-live="polite">{count}/1200</span>}
+ </div>}
+  <div className="chat-composer-footer">
+   <ChatContentOptions onVoice={voiceDraft ? () => { void startVoice(); } : undefined}
+    canUseVoice={voiceEligible && !voiceBusy} previewing={previewing} canPreview={!!text && !composing && editorIssue !== 'broken'} onFiles={canAddFiles && !reading ? () => fileInput.current?.click() : undefined} onToggle={() => {
     setPreviewing(!previewing);
     if (previewing) requestAnimationFrame(() => input.current?.focus());
    }} />
-   <span className="chat-input-keys">{memory ? 'Enter 提议' : intent ? 'Enter 查询' : 'Enter 发送'}<span> · Shift + Enter 换行</span></span>
-   {invalidOnlineText && <span id="chat-text-boundary" className="chat-counter error" aria-live="polite">超出字节上限或含不支持的字符</span>}
-   {count > 1000 && <span id="chat-character-count" className={count > 1200 ? 'chat-counter error' : 'chat-counter'} aria-live="polite">{count}/1200</span>}
-   <ChatModelPicker state={state} controller={controller} />
-   {session.pending ? <button type="button" className="chat-send" aria-label="停止等待回复" title="停止等待当前回复" onClick={() => controller?.cancel()}><PetNookIcon name="stop" /></button> :
-    <button type="button" className="chat-send" disabled={!canSend} aria-label={memory ? '生成本机记忆提案' : intent && state.localAvailable ? '查询本机资料' : '发送消息'} title={memory ? 'Enter 生成本机记忆提案' : intent ? 'Enter 查询本机资料' : 'Enter 发送，Shift+Enter 换行'} onClick={send}><PetNookIcon name="send" /></button>}
+   {voiceDraft && <ChatMicrophoneButton enabled={voiceEligible && !voiceBusy} active={micActive}
+    start={() => { void startMic(); }} stop={() => { void stopMic(); }} cancel={cancelMic} />}
+   <ChatPermissionPicker name={name} session={session} controller={controller} />
+   <div className="chat-composer-actions">
+    <span className="chat-composer-ring" aria-hidden="true" />
+    <ChatModelPicker state={state} controller={controller} />
+    {session.pending ? <button type="button" className="chat-send chat-send-stop" aria-label="停止等待回复" title="停止等待当前回复" onClick={() => controller?.cancel()}><PetNookIcon name="stop" /></button> :
+     <button type="button" className="chat-send" disabled={!canSend} aria-label={sendLabel} title={sendLabel} onClick={send}><PetNookIcon name="send" /></button>}
+   </div>
   </div>
  </div></>;
 }
@@ -153,7 +273,7 @@ class DraftPreviewBoundary extends Component<{ children: ReactNode }, { failed: 
  }
 }
 
-function ChatContentOptions({ previewing, canPreview, onToggle, onFiles }: { previewing: boolean; canPreview: boolean; onToggle(): void; onFiles?(): void }) {
+function ChatContentOptions({ previewing, canPreview, onToggle, onFiles, onVoice, canUseVoice }: { previewing: boolean; canPreview: boolean; onToggle(): void; onFiles?(): void; onVoice?(): void; canUseVoice: boolean }) {
  const menu = useRef<HTMLDetailsElement>(null);
  const focusToggle = () => menu.current?.querySelector('summary')?.focus();
  return <details className="chat-content-options" ref={menu} onBlur={event => {
@@ -163,34 +283,12 @@ function ChatContentOptions({ previewing, canPreview, onToggle, onFiles }: { pre
    event.preventDefault(); event.currentTarget.open = false; focusToggle();
   }
  }}>
-  <summary className="chat-control" aria-label="添加内容" title="内容选项"><PetNookIcon name="plus" /></summary>
+  <summary className="chat-add" aria-label="添加内容" title="添加内容"><PetNookIcon name="plus" /></summary>
   <div className="chat-content-popover">{onFiles && <button type="button" onClick={() => { onFiles(); if (menu.current) menu.current.open = false; focusToggle(); }}>
-   选择或替换附件</button>}<button type="button" disabled={!previewing && !canPreview} onClick={() => {
+   选择或替换附件</button>}{onVoice && <button type="button" disabled={!canUseVoice} title={canUseVoice ? undefined : '请在未发送内容的空白输入框中使用'} onClick={() => { if (menu.current) menu.current.open = false; focusToggle(); onVoice(); }}>
+   语音转文字（本机）</button>}<button type="button" disabled={!previewing && !canPreview} onClick={() => {
    if (menu.current) menu.current.open = false;
    focusToggle(); onToggle();
   }}>{previewing ? '继续编辑' : '预览 Markdown'}</button></div>
  </details>;
-}
-
-function ChatModelPicker({state, controller}:{state:ChatWorkspaceState;controller?:ChatWorkspaceController}) {
- const [open, setOpen] = useState(false);
- const picker = useRef<HTMLDivElement>(null);
- const toggle = useRef<HTMLButtonElement>(null);
- const selected = state.models.find(model => model.id === state.session.model);
- const enabled = !!controller && state.models.length > 0 && !state.session.pending;
- const dismiss = () => { setOpen(false); toggle.current?.focus(); };
- useEffect(() => {
-  if (!open || !enabled) return;
-  const outside = (event: MouseEvent) => {
-   if (event.target instanceof Node && !picker.current?.contains(event.target)) setOpen(false);
-  };
-  document.addEventListener('click', outside, true);
-  return () => document.removeEventListener('click', outside, true);
- }, [open, enabled]);
- return <div className="chat-model-picker" ref={picker} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false); }} onKeyDown={event => {
-  if (event.key === 'Escape' && open) { event.preventDefault(); event.stopPropagation(); dismiss(); }
- }}>
-  <button type="button" className="chat-model-toggle" ref={toggle} disabled={!enabled} aria-haspopup="dialog" aria-expanded={open && enabled} onClick={() => setOpen(!open)} title="仅影响后续文字聊天，不更改全局默认模型"><PetNookIcon name="models" /><span>{selected?.name ?? (state.models.length ? '选择模型' : '未配置模型')}</span><PetNookIcon name="down" /></button>
-  {open && enabled && <div className="chat-model-list" role="dialog" aria-label="选择模型"><header className="dialog-title-row"><h2>选择模型</h2><DialogCloseButton label="关闭模型选择" onClose={dismiss} /></header><div role="group" aria-label="已保存模型">{state.online && state.models.some(model => model.isDefault) && <button type="button" onClick={() => { controller?.selectModel(''); dismiss(); }}>使用全局默认</button>}{state.models.map(model => <button type="button" key={model.id} disabled={model.ready === false} aria-pressed={model.id === state.session.model} onClick={() => { controller?.selectModel(model.id); dismiss(); }}>{model.name}{model.id === state.session.model && <span aria-hidden="true">✓</span>}</button>)}</div></div>}
- </div>;
 }

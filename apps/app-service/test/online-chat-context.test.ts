@@ -38,7 +38,8 @@ test('only current, authorized and relevant records contribute minimal online ch
   assert.deepEqual(buildOnlineChatContext(stateOf({ identity: { ...record, ...identity } }), '纸船', now), {});
   assert.deepEqual(buildOnlineChatContext(stateOf({ identity: { ...record, ...identity, boundaries: '勿透露 API key', chatShare: true } }), '纸船', now), {});
   assert.deepEqual(buildOnlineChatContext(state, '磁悬浮列车', now), { identity: { name: identity.name, role: identity.role, personality: identity.personality, speakingStyle: identity.speakingStyle, boundaries: identity.boundaries } });
-  for (const text of ['你是谁？', '查看目标进度', '查个人记忆：', '查角色知识：纸船', '纸船密码']) assert.deepEqual(buildOnlineChatContext(state, text, now), {});
+  assert.deepEqual(buildOnlineChatContext(state, '你是谁？', now), { identity: { name: identity.name, role: identity.role, personality: identity.personality, speakingStyle: identity.speakingStyle, boundaries: identity.boundaries } });
+  for (const text of ['查看本机身份', '查看目标进度', '查个人记忆：', '查角色知识：纸船', '纸船密码']) assert.deepEqual(buildOnlineChatContext(state, text, now), {});
 });
 
 test('knowledge conflicts include unshared records, while unshared and oversized matches cannot take the available slots', () => {

@@ -14,7 +14,7 @@ export interface LocalChatBridge { localChatContext(input: LocalChatInput): Prom
 /** Recognized commands never fall through to the online adapter, even if invalid. */
 export function parseLocalChatCommand(raw: string): LocalChatIntent | 'invalid' | undefined {
   const text = raw.trim();
-  if (/^你是谁[?？]?$/.test(text)) return { intent: 'identity' };
+  if (/^查看本机身份[?？]?$/.test(text)) return { intent: 'identity' };
   if (/^查看目标进度[?？]?$/.test(text)) return { intent: 'goals' };
   const prefix = /^(查角色知识|查个人记忆)\s*[:：]/.exec(text);
   if (!prefix) return;

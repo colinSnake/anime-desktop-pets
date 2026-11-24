@@ -69,5 +69,9 @@ export async function requestModelProbe(
     const value = await readBoundedJSON(response, modelProbeBytes);
     if (signal.aborted || timeout.aborted || !isProbeReply(value, snapshot) || response.status !== (value.ok ? 200 : modelProbeStatus[value.error])) throw Error();
     return value;
-  } catch { return probeError(signal.aborted ? 'cancelled' : timeout.aborted ? 'timed_out' : 'unavailable'); }
+  } catch {
+    // Only a validated service reply can report a persisted provider timeout.
+    // A loopback timeout or disconnect leaves the receipt outcome unknown.
+    return probeError(signal.aborted ? 'cancelled' : 'unavailable');
+  }
 }

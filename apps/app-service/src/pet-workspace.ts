@@ -101,15 +101,16 @@ export class PetWorkspace {
     return () => { this.retirementListeners.delete(listener); };
   }
   /** Trusted service operations share ordering with instance creation and deletion. */
-  withRegisteredInstance<T>(id: unknown, operation: (id: string) => Promise<T>): Promise<T> {
+  withRegisteredInstance<T>(id: unknown, operation: (id: string, instance: PetDefinition) => Promise<T>): Promise<T> {
     if (!petId(id)) return Promise.reject(new WorkspaceError('invalid'));
     if (this.closing) return Promise.reject(new WorkspaceError('unavailable'));
     const result = this.queue.then(async () => {
       if (this.closing) throw new WorkspaceError('unavailable');
       const state = await this.store.read();
-      if (!state.registry.instances.some(row => row.id === id)) throw new WorkspaceError('not-found');
+      const instance = state.registry.instances.find(row => row.id === id);
+      if (!instance) throw new WorkspaceError('not-found');
       if (this.closing) throw new WorkspaceError('unavailable');
-      return operation(id);
+      return operation(id, instance);
     });
     this.queue = result.catch(() => {});
     return result;

@@ -1,4 +1,6 @@
 export const WORKSPACE_URL = "pet-app://workspace/index.html";
+export const MICROPHONE_WORKLET_ASSET = 'assets/microphone-worklet.js';
+export const MICROPHONE_WORKLET_URL = `pet-app://workspace/${MICROPHONE_WORKLET_ASSET}`;
 export const WINDOW_SECURITY = Object.freeze({
   nodeIntegration: false,
   contextIsolation: true,

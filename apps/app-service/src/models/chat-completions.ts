@@ -15,6 +15,7 @@ export const chatCompletions: ProtocolAdapter = {
       }
     }
     return { path: '/chat/completions', headers: {}, body: { model: route.modelID, messages, [route.compatibility.outputTokenField ?? 'max_completion_tokens']: route.tokenBudget,
+      ...(route.reasoningEffort ? { reasoning_effort: route.reasoningEffort } : {}),
       ...(input.tools ? { tools: input.tools.map(t => ({ type: 'function', function: t })) } : {}) } };
   },
   decode(route, raw) {

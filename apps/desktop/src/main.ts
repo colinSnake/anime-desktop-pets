@@ -1,4 +1,13 @@
-import { agentTaskChannel, agentTaskMethods } from '../../../packages/contracts/src/agent-tasks.ts';
+import { ChatReplySpeech } from './chat-reply-speech.ts';
+import { isSpeechEnableInput, replySpeechIPC } from '../../../packages/contracts/src/speech.ts';
+import { validChatRequestID } from '../../../packages/contracts/src/online-chat.ts';
+import { MicrophoneGate, isMicrophonePermission } from './microphone-gate.ts';
+import { validMicWav } from './microphone-capture.ts';
+import { VoiceDraftPicker, runVoiceTranscription } from './voice-draft.ts';
+import { microphoneIPC, voiceDraftIPC } from '../../../packages/contracts/src/voice-draft.ts';
+import { chatProjectIPC, isHistoryInput, isProjectListResult } from '../../../packages/contracts/src/chat-history.ts';
+import { createChatProject } from './chat-project-directory.ts';
+import { agentTaskChannel } from '../../../packages/contracts/src/agent-tasks.ts';
 import { AgentTaskIPC } from './agent-task-ipc.ts';
 import { passwordPasteMenu } from './password-paste-menu.ts';
 import { dafeiyu, longmei } from '../../../packages/contracts/src/built-in-pets.ts';
@@ -20,6 +29,7 @@ import {
   protocol,
   screen,
   session,
+  systemPreferences,
   shell,
   utilityProcess,
 } from "electron";
@@ -29,6 +39,7 @@ import { access, readFile, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import {
   assetPath,
+  MICROPHONE_WORKLET_ASSET,
   CONTENT_SECURITY_POLICY,
   trustedCaller,
   trustedFrame,
@@ -55,7 +66,6 @@ import { LocalDataRoot, type DataSelection } from './local-data-root.ts';
 import { WorkspaceDataFolder, workspaceProfilePath } from './workspace-data-folder.ts';
 import { fitWorkspace, sameWorkspaceBounds, validWorkspaceBounds, WorkspacePlacement, workspaceDefault, workspaceMinimum, type WorkspaceBounds } from './workspace-placement.ts';
 import { adjustWorkspacePlacement, watchWorkspaceDisplayChanges, type PlacementTrigger } from './workspace-display-recovery.ts';
-import { resolveHarnessExecutable } from './harness-node.ts';
 
 import { workspaceDevConfig, workspaceDevResponse } from './workspace-ui-hmr.ts';
 
@@ -99,7 +109,15 @@ let service: ServiceProcess | undefined;
 let covers: PetCoverProvider | undefined;
 let models: ModelIPC | undefined;
 let chat: ChatIPC | undefined;
+let replySpeech: ChatReplySpeech | undefined;
 let taskIPC: AgentTaskIPC | undefined;
+let voiceDraft: VoiceDraftPicker | undefined;
+let microphone: MicrophoneGate | undefined;
+let micSystemPrompt = false;
+const visibleMicrophoneOwner = (owner = workspace) => !!owner && owner === workspace && !exiting &&
+  !owner.isDestroyed() && isWorkspaceVisible() && owner.isFocused() && !owner.isMinimized();
+const micPermissionOwner = (contents: Electron.WebContents | null) => visibleMicrophoneOwner() && !!contents &&
+  contents === workspace!.webContents && microphone?.canOpen() === true;
 let workspaceStatus: ReturnType<typeof installWorkspaceTray>;
 let startupLaunch: StartupLaunch | undefined;
 let exiting = false;
@@ -115,6 +133,19 @@ async function configuredSpeech() {
     await access(python, constants.X_OK);
     if ((await stat(model)).isDirectory() && (await stat(worker)).isFile()) return { python, model, worker };
   } catch { /* Missing local runtime is a visible unavailable state. */ }
+}
+
+async function configuredVoiceDraft(): Promise<VoiceDraftPicker | undefined> {
+  if (process.platform !== 'darwin' || process.arch !== 'arm64') return;
+  const local = join(__dirname, '..', '..', '..', '.local', 'voice-runtime');
+  const python = join(local, 'venv', 'bin', 'python');
+  const model = join(local, 'models', 'Qwen3-ASR-0.6B-8bit');
+  const worker = join(__dirname, 'runtime', 'speech', 'voice_draft_worker.py');
+  try {
+    await access(python, constants.X_OK);
+    if (!(await stat(worker)).isFile() || !(await stat(join(model, 'config.json'))).isFile() || !(await stat(join(model, 'model.safetensors'))).isFile()) return;
+    return new VoiceDraftPicker((audio, signal) => runVoiceTranscription(python, ['-I', '-B', '-X', 'utf8', worker, model], audio, signal));
+  } catch { /* No implicit install or network fallback. */ }
 }
 
 function isWorkspaceVisible(): boolean {
@@ -196,15 +227,17 @@ async function start() {
     quit: () => app.quit(),
   });
   session.defaultSession.setPermissionRequestHandler(
-    (_contents, _permission, callback) => callback(false),
+    (contents, permission, callback, details) => callback(micPermissionOwner(contents) &&
+      isMicrophonePermission(permission, details, 'request') && microphone?.takeRequest() === true),
   );
-  session.defaultSession.setPermissionCheckHandler(() => false);
+  session.defaultSession.setPermissionCheckHandler((contents, permission, origin, details) => micPermissionOwner(contents) &&
+    isMicrophonePermission(permission, details, 'check', origin));
   covers = new PetCoverProvider(join(__dirname, 'branding', 'pet-cover.png'), video?.companionCover);
   protocol.handle("pet-app", async (request) => {
     const cover = await covers?.response(request.url, request.method);
     if (cover) return cover;
     const relative = assetPath(request.url);
-    if (workspaceHmr && relative !== "assets/app-icon.svg") return workspaceDevResponse(workspaceHmr, request);
+    if (workspaceHmr && relative !== "assets/app-icon.svg" && relative !== MICROPHONE_WORKLET_ASSET) return workspaceDevResponse(workspaceHmr, request);
     if (request.method !== "GET" || !relative)
       return new Response("", { status: 404 });
     try {
@@ -226,14 +259,9 @@ async function start() {
       return new Response("", { status: 404 });
     }
   });
-  const speech = await configuredSpeech();
+  const [speech, transcription] = await Promise.all([configuredSpeech(), configuredVoiceDraft()]);
+  voiceDraft = transcription;
   if (exiting) return;
-  const harnessExecutable = resolveHarnessExecutable({
-    platform: process.platform,
-    packaged: app.isPackaged,
-    resourcesPath: process.resourcesPath,
-    environment: process.env,
-  });
   service = new ServiceProcess(
     () => {
       const child = utilityProcess.fork(createRequire(__filename).resolve("@pet/app-service"), [], {
@@ -249,8 +277,6 @@ async function start() {
       videoHost: video?.host,
       taskFollowingHome,
       onTaskFollowingState: state => { taskState = state; workspaceStatus?.render(); },
-      // DSH rc.5 does not support this Electron build's native fingerprint.
-      harnessExecutable,
       modelsRoot: process.platform === "darwin" ? join(data.root, "models") : undefined,
       businessRoot: data.kind === 'adpets' ? data.root : undefined,
       workspace: {
@@ -332,11 +358,12 @@ async function start() {
       { role: 'windowMenu' },
     ]));
     models = new ModelIPC(service);
-    chat = new ChatIPC(service);
+    if (process.arch === 'arm64') replySpeech = new ChatReplySpeech(async command => (await service!.speechRequest('chat-reply', command)).ok);
+    chat = new ChatIPC(service, replySpeech);
     const tasks = taskIPC = new AgentTaskIPC(service.agentTask.bind(service));
-    const cancelWorkspaceRequests = () => { models?.cancel(); chat?.cancel(); tasks.invalidateCreate(); };
-    workspace.on('hide', () => tasks.invalidateCreate());
-    workspace.on('minimize', () => tasks.invalidateCreate());
+    const cancelWorkspaceRequests = () => { microphone?.revoke(); models?.cancel(); chat?.cancel(); void voiceDraft?.cancel(); };
+    workspace.on('hide', cancelWorkspaceRequests);
+    workspace.on('minimize', cancelWorkspaceRequests);
     workspace.webContents.on('did-start-navigation', cancelWorkspaceRequests);
     workspace.webContents.on('render-process-gone', cancelWorkspaceRequests);
     workspace.on('closed', cancelWorkspaceRequests);
@@ -344,9 +371,78 @@ async function start() {
         senderId: event.sender.id, ownerId: workspace.webContents.id, senderFrame: event.senderFrame,
         mainFrame: workspace.webContents.mainFrame, url: event.senderFrame?.url ?? '', args,
       });
-    for (const method of agentTaskMethods) ipcMain.handle(agentTaskChannel(method), (event, ...args: unknown[]) =>
+    // Legacy records remain readable/cancellable, but only Chat can start new material work.
+    for (const method of ['list', 'read', 'cancel'] as const) ipcMain.handle(agentTaskChannel(method), (event, ...args: unknown[]) =>
       tasks.invoke(method, () => trustedModelFrame(event, args) && isWorkspaceVisible() && !workspace!.isMinimized(), args));
     const owner = workspace;
+    if (process.arch === 'arm64') {
+      const mic = microphone = new MicrophoneGate(id => {
+        if (!owner.isDestroyed() && !owner.webContents.isDestroyed()) {
+          try { owner.webContents.send(microphoneIPC.revoked, id); } catch { /* Frame may already be gone. */ }
+        }
+      });
+      owner.on('blur', () => { mic.revoke(); void replySpeech?.stop(); });
+      ipcMain.handle(replySpeechIPC.displayed, (event, ...args: unknown[]) => {
+        if (args.length !== 1 || !validChatRequestID(args[0])) return;
+        replySpeech?.displayed(args[0], () => currentMic(event, args) && !mic.busy && !micSystemPrompt);
+      });
+      ipcMain.handle(replySpeechIPC.stop, (event, ...args: unknown[]) => {
+        if (!args.length && trustedModelFrame(event, args)) void replySpeech?.stop();
+      });
+      const currentMic = (event: Electron.IpcMainInvokeEvent, args: unknown[]) =>
+        visibleMicrophoneOwner(owner) && trustedModelFrame(event, args);
+      ipcMain.handle(microphoneIPC.authorize, async (event, ...args: unknown[]) => {
+        if (args.length || !voiceDraft || !currentMic(event, args)) return { ok: false, error: 'unavailable' };
+        if (mic.busy || micSystemPrompt || voiceDraft.busy) return { ok: false, error: 'busy' };
+        switch (systemPreferences.getMediaAccessStatus('microphone')) {
+          case 'granted': return { ok: true };
+          case 'not-determined': break;
+          default: return { ok: false, error: 'permission-denied' };
+        }
+        micSystemPrompt = true;
+        try {
+          // Only this explicit button can display the OS prompt. Never arm here.
+          const granted = await systemPreferences.askForMediaAccess('microphone');
+          return granted ? { ok: true } : { ok: false, error: 'permission-denied' };
+        } catch { return { ok: false, error: 'failed' }; }
+        finally { micSystemPrompt = false; }
+      });
+      ipcMain.handle(microphoneIPC.arm, async (event, ...args: unknown[]) => {
+        if (args.length || !voiceDraft || !currentMic(event, args)) return { ok: false, error: 'unavailable' };
+        if (mic.busy || micSystemPrompt || voiceDraft.busy) return { ok: false, error: 'busy' };
+        const status = systemPreferences.getMediaAccessStatus('microphone');
+        if (status !== 'granted') return { ok: false, error: status === 'not-determined' ? 'permission-required' : 'permission-denied' };
+        const id = await mic.armAfter(() => replySpeech?.stop() ?? Promise.resolve(true),
+          () => currentMic(event, args) && !voiceDraft?.busy && !micSystemPrompt);
+        return id ? { ok: true, id } : { ok: false, error: 'unavailable' };
+      });
+      ipcMain.handle(microphoneIPC.started, (event, ...args: unknown[]) => args.length === 1 && currentMic(event, args) && mic.started(args[0]));
+      ipcMain.handle(microphoneIPC.finish, async (event, ...args: unknown[]) => {
+        const [id, audio] = args;
+        if (args.length !== 2 || !voiceDraft || !currentMic(event, args) || typeof id !== 'string' || id.length !== 36 || !validMicWav(audio)) {
+          return { ok: false, error: 'cancelled' };
+        }
+        const signal = mic.finish(id);
+        if (!signal) return { ok: false, error: 'cancelled' };
+        try { return await voiceDraft.record(Buffer.from(audio), signal, () => currentMic(event, args)); }
+        finally { mic.release(id); }
+      });
+      ipcMain.handle(microphoneIPC.cancel, (event, ...args: unknown[]) => {
+        if (args.length === 1 && owner === workspace && trustedModelFrame(event, args) && typeof args[0] === 'string') mic.revoke(args[0]);
+      });
+      ipcMain.handle(voiceDraftIPC.select, (event, ...args: unknown[]) => {
+        const current = () => owner === workspace && trustedModelFrame(event, args) && isWorkspaceVisible() && !owner.isMinimized();
+        if (args.length || !voiceDraft || !current()) return { ok: false, error: 'unavailable' };
+        if (mic.busy || micSystemPrompt) return { ok: false, error: 'busy' };
+        return voiceDraft.select(() => dialog.showOpenDialog(owner, {
+          title: '选择语音 WAV（仅本机转写）', properties: ['openFile', 'noResolveAliases', 'dontAddToRecent'],
+          filters: [{ name: 'PCM WAV', extensions: ['wav'] }],
+        }), current);
+      });
+      ipcMain.handle(voiceDraftIPC.cancel, (event, ...args: unknown[]) => {
+        if (!args.length && owner === workspace && trustedModelFrame(event, args)) void voiceDraft?.cancel();
+      });
+    }
     owner.webContents.on('context-menu', (_event, params) => {
       const eligible = owner === workspace && isWorkspaceVisible() && owner.isFocused() && trustedFrame({
         ownerId: owner.webContents.id, senderId: owner.webContents.id, senderFrame: params.frame,
@@ -355,8 +451,39 @@ async function start() {
       const menu = passwordPasteMenu(eligible, params);
       if (menu) Menu.buildFromTemplate(menu).popup({ window: owner, x: params.x, y: params.y });
     });
+    // A modal selection does not survive a hidden window, reload or host replacement.
+    let projectSelection = false;
+    let projectEpoch = 0;
+    const invalidateProject = () => { projectEpoch++; };
+    owner.on('hide', invalidateProject);
+    owner.on('minimize', invalidateProject);
+    owner.on('closed', invalidateProject);
+    owner.webContents.on('did-start-navigation', invalidateProject);
+    owner.webContents.on('render-process-gone', invalidateProject);
+    ipcMain.handle(chatProjectIPC.list, async (event, ...args: unknown[]) => {
+      const epoch = projectEpoch;
+      const eligible = () => projectEpoch === epoch && trustedModelFrame(event, args) && isWorkspaceVisible() && !owner.isMinimized();
+      if (!eligible() || args.length !== 1 || !isHistoryInput('projects', args[0])) return { ok: false, error: 'invalid_request' };
+      const result = await service!.chatHistory('projects', args[0]);
+      return eligible() && isProjectListResult(result) ? result : { ok: false, error: 'unavailable' };
+    });
+    ipcMain.handle(chatProjectIPC.create, async (event, ...args: unknown[]) => {
+      const epoch = projectEpoch;
+      const eligible = () => projectEpoch === epoch && trustedModelFrame(event, args) && isWorkspaceVisible() && !owner.isMinimized();
+      if (!eligible() || args.length !== 1) return { ok: false, error: 'invalid_request' };
+      if (projectSelection) return { ok: false, error: 'busy' };
+      projectSelection = true;
+      try {
+        return await createChatProject(args[0], {
+          eligible,
+          select: () => dialog.showOpenDialog(owner, { title: '选择新项目文件夹的保存位置', properties: ['openDirectory', 'noResolveAliases', 'dontAddToRecent'] }),
+          list: input => service!.chatHistory('projects', input),
+          register: input => service!.chatHistory('createProject', input),
+        });
+      } finally { projectSelection = false; }
+    });
     registerWorkspaceModelIPC((channel, listener) => ipcMain.handle(channel, listener), {
-      chat, history: chat, models, trusted: trustedModelFrame, visible: isWorkspaceVisible,
+      chat, history: chat, material: chat, models, trusted: trustedModelFrame, visible: () => isWorkspaceVisible() && !owner.isMinimized(),
     });
   }
 
@@ -444,6 +571,9 @@ async function start() {
         senderFrame: event.senderFrame, mainFrame: workspace.webContents.mainFrame,
         url: event.senderFrame?.url ?? "", args,
       }) || !validPetArgs(method, args)) throw new Error("forbidden");
+      if (method === "pause" || method === "delete") void replySpeech?.stop();
+      // Reopening the service gate must not admit an offer issued before pause.
+      if (method === "resume" && await replySpeech?.stop() === false) return { ok: false, error: 'apply-failed' };
       const result = await service!.petRequest(method, args[0]);
       if (method !== "list") void workspaceStatus?.refresh();
       return result;
@@ -499,13 +629,29 @@ async function start() {
     });
   }
   let selectingReference = false;
+  let speechChanging = false;
   if (process.platform === 'darwin' && process.arch === 'arm64') {
     for (const method of speechMethods) ipcMain.handle(`pet:speech-${method}`, async (event, ...args: unknown[]) => {
       const owner = workspace;
       if (!owner || owner.isDestroyed() || !trustedFrame({ senderId: event.sender.id, ownerId: owner.webContents.id,
         senderFrame: event.senderFrame, mainFrame: owner.webContents.mainFrame, url: event.senderFrame?.url ?? '', args,
       }) || !validSpeechArgs(method, args)) throw new Error('forbidden');
-      if (method === 'status' || method === 'enable' || method === 'disable') return service!.speechRequest(method, args[0]);
+      if (method === 'status') return service!.speechRequest(method);
+      if (method === 'enable' || method === 'disable') {
+        if (speechChanging) return { ok: false, error: 'busy' };
+        if (method === 'enable' && (!isSpeechEnableInput(args[0]) || !isWorkspaceVisible() || !owner.isFocused())) return { ok: false, error: 'unavailable' };
+        speechChanging = true;
+        try {
+          if (method === 'disable') replySpeech?.setEnabled(false);
+          // Even if disable has returned, a previous offer may still be on another
+          // connection. Confirm its higher stop revision before re-enabling speech.
+          if (method === 'enable' && (await replySpeech?.stop() === false || !isWorkspaceVisible() || !owner.isFocused()))
+            return { ok: false, error: 'unavailable' };
+          const result = await service!.speechRequest(method, args[0]);
+          if (method === 'enable' && result.ok) replySpeech?.setEnabled(result.speech.speakChatReplies === true);
+          return result;
+        } finally { speechChanging = false; }
+      }
       if (method === 'clearReference') return service!.speechRequest('clear-reference');
       if (selectingReference) return { ok: false, error: 'busy' };
       selectingReference = true;
@@ -553,11 +699,13 @@ app.on("before-quit", (event) => {
   models?.cancel();
   chat?.cancel();
   taskIPC?.invalidateCreate();
+  microphone?.revoke();
+  const voiceCleanup = voiceDraft?.cancel();
   void (async () => {
     try {
       // Keep the service's workspace ownership until window placement has settled.
       await placementSave;
-      const results = await Promise.allSettled([trayCleanup, launchCleanup, service?.close()]);
+      const results = await Promise.allSettled([trayCleanup, launchCleanup, voiceCleanup, service?.close()]);
       if (results.some(result => result.status === 'rejected')) dialog.showErrorBox(
         "本地服务清理失败",
         "未确认本应用子进程已完全退出，没有开始迁移。",
@@ -581,7 +729,8 @@ else start().catch(async error => {
   const trayCleanup = workspaceStatus?.dispose();
   const launchCleanup = startupLaunch?.dispose();
   if (exiting) return;
-  await Promise.allSettled([trayCleanup, launchCleanup, service?.close()]);
+  microphone?.revoke();
+  await Promise.allSettled([trayCleanup, launchCleanup, voiceDraft?.cancel(), service?.close()]);
   dialog.showErrorBox(
     "桌边小崽启动失败",
     error instanceof Error && error.message === 'local_data_unavailable'

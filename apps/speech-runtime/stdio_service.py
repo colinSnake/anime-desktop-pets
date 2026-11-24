@@ -23,8 +23,8 @@ class SoundDevicePlayer:
     TTS generation and PortAudio writes run at different cadences.  Keeping
     the blocking device call on one worker prevents model scheduling from
     turning each streamed chunk into a separate real-time deadline. The
-    device stays open between turns so the next sentence does not pay the
-    CoreAudio/PortAudio startup cost again.
+    device stays open between turns, but each turn drains the hardware
+    buffer before it can be reported as idle.
     """
 
     _QUEUE_CAPACITY = 24
@@ -38,6 +38,7 @@ class SoundDevicePlayer:
         self._worker = None
         self._error = None
         self._state_lock = threading.Lock()
+        self._enqueue_lock = threading.Lock()
         self._closed = False
 
     def _ensure_stream(self):
@@ -66,7 +67,6 @@ class SoundDevicePlayer:
                 # Publish and start together: close must never join an unstarted worker.
                 worker.start()
         if discard:
-            stream.stop()
             stream.close()
             with self._state_lock:
                 if self._closed:
@@ -79,43 +79,52 @@ class SoundDevicePlayer:
             raise RuntimeError("audio output failed") from error
 
     def _run(self, stream):
-        try:
-            while True:
-                with self._state_lock:
-                    if self._closed:
-                        return
-                try:
-                    chunk = self._chunks.get(timeout=0.1)
-                except thread_queue.Empty:
-                    continue
-                try:
-                    stream.write(chunk)
-                finally:
-                    self._chunks.task_done()
-        except BaseException as error:
+        active = True  # _ensure_stream starts the device before launching its worker.
+        while True:
             with self._state_lock:
-                self._error = error
-            # Queue.join cannot detect a dead consumer. Wake the bounded drain
-            # so a disconnected device reports failure instead of hanging forever.
-            with self._chunks.all_tasks_done:
-                self._chunks.all_tasks_done.notify_all()
+                if self._closed:
+                    return
+            try:
+                chunk = self._chunks.get(timeout=0.1)
+            except thread_queue.Empty:
+                continue
+            try:
+                if chunk is None:
+                    if active:
+                        # PortAudio write completion only confirms consumption of
+                        # our buffer; stop waits for device-side pending audio.
+                        stream.stop(ignore_errors=False)
+                        active = False
+                else:
+                    if not active:
+                        stream.start()
+                        active = True
+                    stream.write(chunk)
+            except BaseException as error:
+                # Publish the failure before a drain can observe zero unfinished work.
+                with self._state_lock:
+                    self._error = error
+                with self._chunks.all_tasks_done:
+                    self._chunks.all_tasks_done.notify_all()
+                return
+            finally:
+                self._chunks.task_done()
 
     def write(self, pcm16):
         if len(pcm16) % 2 or len(pcm16) > self._sample_rate * 2 * 5:
             raise ValueError("PCM16 chunk must contain whole samples and at most five seconds")
         if not pcm16:
             return
-        self._ensure_stream()
-        self._raise_if_failed()
-        try:
-            self._chunks.put(pcm16, timeout=2.0)
-        except thread_queue.Full as error:
-            raise RuntimeError("audio output buffer stalled") from error
-        self._raise_if_failed()
+        with self._enqueue_lock:
+            self._ensure_stream()
+            self._raise_if_failed()
+            try:
+                self._chunks.put(pcm16, timeout=2.0)
+            except thread_queue.Full as error:
+                raise RuntimeError("audio output buffer stalled") from error
+            self._raise_if_failed()
 
-    def finish_turn(self):
-        """Drain this turn with a deadline, also noticing a failed consumer."""
-        deadline = time.monotonic() + self._DRAIN_TIMEOUT
+    def _wait_for_output(self, deadline):
         with self._chunks.all_tasks_done:
             while self._chunks.unfinished_tasks:
                 self._raise_if_failed()
@@ -124,6 +133,17 @@ class SoundDevicePlayer:
                     raise RuntimeError("audio output drain timed out")
                 self._chunks.all_tasks_done.wait(timeout=min(0.1, remaining))
         self._raise_if_failed()
+
+    def finish_turn(self):
+        """Confirm queue and device drain within a single deadline."""
+        deadline = time.monotonic() + self._DRAIN_TIMEOUT
+        with self._enqueue_lock:
+            with self._state_lock:
+                if self._stream is None:
+                    return
+            self._wait_for_output(deadline)
+            self._chunks.put_nowait(None)
+            self._wait_for_output(deadline)
 
     def close(self):
         with self._state_lock:
@@ -144,8 +164,8 @@ class SoundDevicePlayer:
                 worker.join(timeout=self._CLOSE_TIMEOUT)
             if worker.is_alive():
                 raise RuntimeError("audio output worker did not stop")
-            stream.stop()
         finally:
+            # Active buffers are discarded on close; do not drain on cancellation.
             stream.close()
             while True:
                 try:

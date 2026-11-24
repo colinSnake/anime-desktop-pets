@@ -16,11 +16,22 @@ const reasoningRules: Readonly<Record<string, readonly ReasoningEffort[]>> = Obj
   'gpt-6.2-sol': ['low', 'medium', 'high', 'xhigh', 'max'],
   'gpt-6.1-sol': ['low', 'medium', 'high', 'xhigh', 'max'],
 });
-const reasoningEndpoint = 'https://api.openai.com/v1';
+export const reasoningLabels: Record<ReasoningEffort, string> = {
+  none: '关闭', minimal: '最低', low: '低', medium: '中', high: '高', xhigh: '极高', max: '最高',
+};
+export const defaultReasoningEffort = (levels: readonly ReasoningEffort[]): ReasoningEffort | undefined =>
+  levels.includes('high') ? 'high' : levels[0];
+const deepseekModels = ['deepseek-flash', 'deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-v4-flash-vision-exp'];
+const deepseekLevels: readonly ReasoningEffort[] = ['none', 'low', 'high', 'max'];
+const timiccLevels: readonly ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh'];
+
 
 export function modelReasoningLevels(identity: ModelIdentity): readonly ReasoningEffort[] {
   const endpoint = identity.baseURL.trim().replace(/\/+$/, '');
-  if (identity.protocol !== 'responses' || endpoint !== reasoningEndpoint) return [];
+  // Match the reference application's explicitly scoped compatibility route, not arbitrary gateways.
+  if (identity.protocol === 'responses' && endpoint === 'https://timicc.com/v1' && identity.modelID === 'gpt-6.2-sol') return timiccLevels;
+  if (['responses', 'chat-completions'].includes(identity.protocol) && ['https://api.deepseek.com', 'https://api.deepseek.com/v1'].includes(endpoint) && deepseekModels.includes(identity.modelID)) return deepseekLevels;
+  if (identity.protocol !== 'responses' || endpoint !== 'https://api.openai.com/v1') return [];
   return Object.hasOwn(reasoningRules, identity.modelID) ? reasoningRules[identity.modelID]! : [];
 }
 

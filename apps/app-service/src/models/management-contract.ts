@@ -1,4 +1,5 @@
 /** Private main ↔ utility process contract. Not exported by packages/contracts. */
+import { MAX_MODEL_PROBE_RECORDS, validProbeRecord } from '../../../../packages/contracts/src/model-probe.ts';
 import { validateConfiguration } from './config.ts';
 import type { CredentialChange } from './repository.ts';
 import { MODEL_MANAGEMENT_ERRORS, validModelAPIKey, type ModelCleanup, type ModelDefault, type ModelEdit, type ModelManagementFailure, type ModelManagementReply, type ModelRemove } from '../../../../packages/contracts/src/models.ts';
@@ -7,7 +8,8 @@ export type { ModelManagementReply, SavedModelConfiguration } from '../../../../
 export const MODEL_MANAGEMENT_VERSION = 1;
 export const MODEL_MANAGEMENT_PATHS = { list: '/v1/models', save: '/v1/models/save', default: '/v1/models/default', remove: '/v1/models/remove' } as const;
 export const MODEL_BODY_LIMIT = 64 * 1024;
-export const MODEL_RESPONSE_LIMIT = 1_048_576 + 64 * 1024;
+// Bounded configuration plus the separately bounded, sanitized probe records.
+export const MODEL_RESPONSE_LIMIT = 2 * 1_048_576 + 64 * 1024;
 export type ModelAction = keyof typeof MODEL_MANAGEMENT_PATHS;
 export type ModelInputs = {
   list: undefined;
@@ -44,10 +46,12 @@ export function isManagementReply(method: ModelAction, value: unknown): value is
   if (!record(value) || value.version !== MODEL_MANAGEMENT_VERSION) return false;
   if (value.ok === false) return only(value, ['version', 'ok', 'error', 'credentialCleanup']) && MODEL_MANAGEMENT_ERRORS.some(code => code === value.error) &&
     (value.credentialCleanup === undefined || method === 'save' && ['not_needed', 'removed', 'pending', 'retained_uncertain'].some(state => state === value.credentialCleanup));
-  if (value.ok !== true || !only(value, ['version', 'ok', 'configuration', 'durability', 'retainedCredentialVersions', 'writesBlocked'])) return false;
+  if (value.ok !== true || !only(value, ['version', 'ok', 'configuration', 'durability', 'retainedCredentialVersions', 'writesBlocked', 'probeResults', 'probeStorageUnavailable'])) return false;
   if (method === 'list' ? value.durability !== undefined || value.retainedCredentialVersions !== undefined ||
     (value.writesBlocked !== undefined && value.writesBlocked !== true) : value.writesBlocked !== undefined ||
     (value.durability !== 'confirmed' && value.durability !== 'unconfirmed') || typeof value.retainedCredentialVersions !== 'boolean') return false;
+  if (value.probeStorageUnavailable !== undefined && (method !== 'list' || value.probeStorageUnavailable !== true || value.probeResults !== undefined)) return false;
+  if (value.probeResults !== undefined && (method !== 'list' || !Array.isArray(value.probeResults) || value.probeResults.length > MAX_MODEL_PROBE_RECORDS || !value.probeResults.every(validProbeRecord))) return false;
   const configuration = value.configuration;
   if (!record(configuration) || !only(configuration, ['revision', 'defaultConnectionID', 'connections']) || !revision(configuration.revision) ||
       !Array.isArray(configuration.connections) || configuration.connections.length > 32) return false;

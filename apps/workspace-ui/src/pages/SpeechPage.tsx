@@ -1,4 +1,4 @@
-import { useRef, type ReactNode } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 import { isSpeechEnableInput, type SpeechBridge, type SpeechStatus } from '../../../../packages/contracts/src/speech.ts';
 import { PetNookIcon } from '../PetNookIcon.tsx';
 import { InteractionCardHeading, InteractionDisclosure, InteractionHero, InteractionLayout } from './InteractionLayout.tsx';
@@ -25,19 +25,23 @@ export function SpeechPage({ draft, bridge, appearance }: { draft: Draft<SpeechD
   const needsStop = unconfirmed || (!!speech && speech.state !== 'disabled' && speech.state !== 'unavailable');
   const editable = !!bridge && speech?.state === 'disabled' && !unconfirmed && !busy;
   const selected = speech?.hasReference === true;
-  const input = { referenceTranscript: draft.value.referenceTranscript };
+  const [speakChatReplies, setSpeakChatReplies] = useState(false);
+  const input = { referenceTranscript: draft.value.referenceTranscript, ...(speakChatReplies && { speakChatReplies: true }) };
   const bytes = encoder.encode(input.referenceTranscript).length;
   const valid = isSpeechEnableInput(input);
   const invalid = bytes > transcriptLimit || (!!input.referenceTranscript.trim() && !valid);
-  const [stateLabel, tone, detail] = unconfirmed ? ['播报状态未确认', 'warn', '请先停止播报，再继续编辑参考音色。']
+  const [bubbleStateLabel, tone, bubbleDetail] = unconfirmed ? ['播报状态未确认', 'warn', '请先停止播报，再继续编辑参考音色。']
     : speech ? states[speech.state] : [bridge ? '正在查询播报状态' : '未连接语音桥', '', waitingForBubble];
+  const stateLabel = !unconfirmed && speech?.speakChatReplies && speech.state === 'enabled' ? '已启用 · 等待播报' : bubbleStateLabel;
+  const detail = !unconfirmed && speech?.speakChatReplies && speech.state !== 'failed'
+    ? '可朗读桌宠互动气泡和当前聊天的新回复，不会主动播放逐字稿。' : bubbleDetail;
   const issue = error || (speech?.state === 'failed' ? '播报未完成。请先停止本次播报。'
     : bytes > transcriptLimit ? '逐字稿超过 4096 字节，请缩短后再启用。' : invalid ? '逐字稿包含不支持的字符，请修改后再启用。' : '');
-  const next = needsStop ? '停止会丢弃正在处理和等待的气泡。'
+  const next = needsStop ? '停止会取消正在处理和等待的气泡及聊天回复。'
     : speech?.state !== 'disabled' ? '本机运行时可用后才能启用。'
     : !selected ? '先选择一段参考音频。' : !valid ? '再填写与音频一致的逐字稿。' : '准备好了。启用后，本次会话生效。';
 
-  return <InteractionLayout page="speech" title="语音互动" description="让桌宠在本机读出互动气泡。" appearance={appearance}>
+  return <InteractionLayout page="speech" title="语音互动" description="在本机朗读桌宠互动气泡，可另外开启聊天回复播报。" appearance={appearance}>
     <InteractionHero page="speech" eyebrow="本机语音" title="气泡播报" description={detail}>
       <span className="interaction-pill dot" role="status" data-tone={busy ? 'warn' : tone}>{busy ? '正在处理' : stateLabel}</span>
     </InteractionHero>
@@ -72,16 +76,20 @@ export function SpeechPage({ draft, bridge, appearance }: { draft: Draft<SpeechD
           <p className="interaction-field-hint" id="speech-transcript-hint">填写音频原话，不是要播报的内容。</p>
         </section>
       </div>
+      <label className="interaction-field-hint">
+        <input type="checkbox" disabled={!editable} checked={needsStop ? speech?.speakChatReplies === true : speakChatReplies}
+          onChange={event => setSpeakChatReplies(event.currentTarget.checked)} /> 同时播报当前聊天的新回复（仅本次会话）
+      </label>
       {issue && <p className="interaction-error" role="alert">{issue}</p>}
       <div className="interaction-card-footer"><span>{next}</span>
         <button type="button" className={`interaction-button ${needsStop ? 'secondary' : 'primary'}`} disabled={needsStop ? !bridge || busy : !editable || !selected || !valid}
-          onClick={() => { void run(actions => needsStop ? actions.disable() : actions.enable(input)); }}>
-          <PetNookIcon name="audio" /><span>{needsStop ? '停止气泡播报' : '启用气泡播报'}</span>
+          onClick={() => { void run(actions => needsStop ? actions.disable() : actions.enable(input)); if (needsStop) setSpeakChatReplies(false); }}>
+          <PetNookIcon name="audio" /><span>{needsStop ? '停止播报' : '启用气泡播报'}</span>
         </button>
       </div>
     </section>
     <InteractionDisclosure title="隐私与功能范围" icon="lock">
-      <p>音频与逐字稿只用于本次本机播报，不会发送到线上。请使用你有权使用的音频。麦克风、语音对话和在线生成气泡尚未接入。</p>
+      <p>音频与逐字稿只用于本次本机播报，不会发送到线上。请使用你有权使用的音频。勾选后，当前聊天刚生成的普通文字回复会在本机朗读前 120 字以内的片段；历史、附件和参考资料回合不会播报。请留意周围环境。</p>
     </InteractionDisclosure>
   </InteractionLayout>;
 }

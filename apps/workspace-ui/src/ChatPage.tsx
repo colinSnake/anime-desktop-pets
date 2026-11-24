@@ -1,6 +1,5 @@
-import type { AgentTaskBridge } from '../../../packages/contracts/src/agent-tasks.ts';
+import type { VoiceDraftBridge } from '../../../packages/contracts/src/voice-draft.ts';
 import { DialogCloseButton, useDialogDismiss } from './DialogDismiss.tsx';
-import { AgentTaskPanel } from './AgentTaskPanel.tsx';
 import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { PackageReference } from '../../../packages/contracts/src/pets.ts';
 import type { ChatHistoryBridge, ChatHistoryDetail as SavedChatDetail } from '../../../packages/contracts/src/chat-history.ts';
@@ -15,7 +14,7 @@ import type { ChatWorkspaceState, ChatWorkspaceController, LocalChatShortcut } f
 
 const dateLabel = new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric' });
 const shortcuts = [
- { text: '你是谁', label: '你是谁？', icon: 'identity' },
+ { text: '查看本机身份', label: '查看本机身份', icon: 'identity' },
  { text: '查看目标进度', label: '查看目标进度', icon: 'goals' },
  { text: '查角色知识：', label: '查角色知识', icon: 'memory' },
  { text: '查个人记忆：', label: '查个人记忆', icon: 'search' },
@@ -25,23 +24,22 @@ type ChatPageProps = {
  state: ChatWorkspaceState;
  controller?: ChatWorkspaceController;
  history?: ChatHistoryBridge;
- agentTasks?: AgentTaskBridge;
+ voiceDraft?: VoiceDraftBridge;
  reference?: PackageReference;
  appearance?: ReactNode;
  onOpenPets?: () => void;
  onOpenPetAgent?: (opener: HTMLElement) => void;
 };
 
-export function ChatPage({ state, controller, history, agentTasks, reference, appearance, onOpenPets, onOpenPetAgent }: ChatPageProps) {
+export function ChatPage({ state, controller, history, voiceDraft, reference, appearance, onOpenPets, onOpenPetAgent }: ChatPageProps) {
  useEffect(() => { void controller?.refreshModels(); }, [controller]);
  const { session } = state;
  const character = state.characters.find(item => item.id === state.selectedId);
  const scrollport = useRef<HTMLDivElement>(null);
  const input = useRef<HTMLDivElement>(null);
  const options = useRef<HTMLDetailsElement>(null);
- const [taskView, setTaskView] = useState<{ petID: string; opener?: HTMLElement }>();
- const activeTaskView = agentTasks && taskView && taskView.petID === character?.id ? taskView : undefined;
- useEffect(() => { if (taskView && !activeTaskView) setTaskView(undefined); }, [taskView, activeTaskView]);
+ const approval = useRef<HTMLDivElement>(null);
+ useEffect(() => { if (session.awaitingApproval) approval.current?.focus(); }, [session.awaitingApproval]);
  const [openHistory, setOpenHistory] = useState<{ petID: string; opener?: HTMLElement; entry?: SavedChatDetail; notice?: string }>();
  const historyView = history && openHistory?.petID === character?.id ? openHistory : undefined;
  const entry = historyView?.entry;
@@ -55,7 +53,7 @@ export function ChatPage({ state, controller, history, agentTasks, reference, ap
   setOpenHistory(undefined);
   requestAnimationFrame(() => input.current?.focus({ preventScroll: true }));
  };
- useEffect(() => { setOpenHistory(undefined); }, [character?.id]);
+ useEffect(() => { setOpenHistory(undefined); }, [character?.id, session.editorKey]);
  const lastId = session.turns.at(-1)?.id;
  useEffect(() => {
   const view = scrollport.current; if (view) view.scrollTop = view.scrollHeight;
@@ -81,7 +79,7 @@ export function ChatPage({ state, controller, history, agentTasks, reference, ap
    onBack={backToHistory} pending={session.pending} notice={historyView?.notice} onContinue={controller && continueChat} />}
   <div className="chat-live" hidden={!!entry}>
   <header className="chat-toolbar">
-   <div><h1>{session.title ?? '聊天'}</h1><p>{session.title ? '继续与桌边的伙伴聊天。' : '和桌边的伙伴说说话。'}</p></div>
+   <div><h1>{session.title ?? '聊天'}</h1><p className={session.projectID ? 'chat-project-current' : undefined}>{session.projectID ? `项目 · ${session.projectName ?? '项目会话'}` : session.title === '新会话' ? '从一句话开始。' : session.title ? '继续与桌边的伙伴聊天。' : '和桌边的伙伴说说话。'}</p></div>
    <div className="chat-toolbar-actions">
     {character && <div className="chat-role chat-control">
      <ChatAvatar reference={reference} />
@@ -105,10 +103,7 @@ export function ChatPage({ state, controller, history, agentTasks, reference, ap
       const opener = options.current?.querySelector('summary');
       if (opener) { opener.focus(); onOpenPetAgent(opener); }
      }}>桌宠 Agent</button>}
-     {agentTasks && <button type="button" aria-haspopup="dialog" onClick={() => {
-      if (options.current) options.current.open = false;
-      setTaskView({ petID: character.id, opener: options.current?.querySelector('summary') ?? undefined });
-     }}>Agent 任务</button>}
+
      {history && <button type="button" aria-haspopup="dialog" onClick={() => {
       if (options.current) options.current.open = false;
       setOpenHistory({ petID: character.id, opener: options.current?.querySelector('summary') ?? undefined });
@@ -176,12 +171,17 @@ export function ChatPage({ state, controller, history, agentTasks, reference, ap
     <button type="button" disabled={!controller || state.canRetry === false} onClick={() => { void controller?.retry(); }}>重试</button>
     <button type="button" disabled={!controller || !!session.draft} onClick={() => { controller?.restoreDraft(); input.current?.focus(); }}>恢复输入</button>
    </div> : <p className="chat-status" role="status">{session.status}</p>}
-   <ChatComposer key={session.editorKey ?? character.id} state={state} controller={controller} name={character.name} input={input} />
+   {session.awaitingApproval && <div className="chat-approval-card" ref={approval} tabIndex={-1} role="group" aria-label="批准本轮附件">
+    <strong>允许{character.name}处理本轮附件？</strong>
+    <p>批准后，所选模型可处理这些文件。跳过时不会发送附件。</p>
+    <ul>{session.attachments.map(file => <li key={file.name}>{file.name}</li>)}</ul>
+    <div><button type="button" className="chat-control" onClick={() => void controller?.resolveMaterialApproval(false)}>跳过附件</button>
+     <button type="button" className="button primary" onClick={() => void controller?.resolveMaterialApproval(true)}>批准并发送</button></div>
+   </div>}
+   <ChatComposer key={session.editorKey ?? character.id} state={state} controller={controller} name={character.name} input={input} voiceDraft={entry ? undefined : voiceDraft} />
   </footer>}
   {!entry && session.confirmingClear && <ClearChat onCancel={() => controller?.cancelClear()} onConfirm={() => controller?.confirmClear()} />}
   </div>
-  {activeTaskView && character && agentTasks && <AgentTaskPanel key={character.id} petID={character.id} name={character.name}
-   bridge={agentTasks} models={state.models} opener={activeTaskView.opener} onClose={() => setTaskView(undefined)} />}
   {history && historyView && character && <ChatHistoryDialog key={character.id} petID={character.id} name={character.name}
     pending={session.pending} bridge={history} opener={historyView.opener} reading={!!entry}
     onCleared={() => { controller?.historyCleared(character.id); }}

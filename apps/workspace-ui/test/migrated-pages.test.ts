@@ -46,7 +46,9 @@ test('speech matches the reference setup flow without enabling playback on rende
   for (const action of ['选择参考音频', '启用气泡播报'])
     assert.ok([...page.matchAll(/<button[^>]*disabled=""[^>]*>([\s\S]*?)<\/button>/g)].some(([, body]) => body!.replace(/<[^>]*>/g, '') === action), action);
   assert.match(page, /<details[^>]*><summary>[\s\S]*?隐私与功能范围[\s\S]*?<\/summary>/);
-  assert.doesNotMatch(page, /type="file"|选择麦克风|试听|预览状态/);
+  assert.match(page, /type="checkbox"[^>]*disabled=""[^>]*\/> 同时播报当前聊天的新回复（仅本次会话）/);
+  assert.doesNotMatch(page, /type="checkbox"[^>]*checked|type="file"|选择麦克风|试听|预览状态/);
+  assert.match(page, /历史、附件和参考资料回合不会播报/);
 });
 
 test('live exposes the two local drafts and only informational platform capabilities', async () => {

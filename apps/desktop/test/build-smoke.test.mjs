@@ -460,19 +460,53 @@ test('compiled sandbox preload exposes only fixed model management, discovery an
 });
 
 
-test('compiled speech bridge only exposes reference and session controls on Apple silicon macOS', async () => {
+test('compiled speech and voice draft bridges expose fixed controls only on Apple silicon macOS', async () => {
   const { runInNewContext } = await import('node:vm');
   const preload = await readFile(`${out}/preload.cjs`, 'utf8');
   assert.equal(await readFile(`${out}/runtime/speech/bubble_speech_worker.py`, 'utf8'), await readFile('apps/runtime-bridge/bubble_speech_worker.py', 'utf8'));
   assert.equal(await readFile(`${out}/runtime/speech/stdio_service.py`, 'utf8'), await readFile('apps/speech-runtime/stdio_service.py', 'utf8'));
+  assert.equal(await readFile(`${out}/runtime/speech/voice_draft_worker.py`, 'utf8'), await readFile('apps/speech-runtime/voice_draft_worker.py', 'utf8'));
+  assert.equal(await readFile(`${out}/ui/assets/microphone-worklet.js`, 'utf8'), await readFile('apps/desktop/src/microphone-worklet.js', 'utf8'));
   for (const [platform, arch] of [['darwin','arm64'], ['darwin','x64'], ['linux','arm64'], ['win32','x64']]) {
     let bridge;
     const calls = [];
-    runInNewContext(preload, { process: { platform, arch }, require: () => ({
+    const channels = [], listeners = new Map();
+    class Button { constructor(action) { this.dataset = { microphoneAction: action }; } }
+    runInNewContext(preload, { AbortController, HTMLButtonElement: Button,
+      window: { addEventListener(type, listener, capture) { assert.equal(capture, true); listeners.set(type, listener); } }, process: { platform, arch, isMainFrame: true }, require: () => ({
       contextBridge: { exposeInMainWorld: (_name, value) => { bridge = value; } },
-      ipcRenderer: { invoke(...args) { calls.push(args); return Promise.resolve({ ok: false }); } },
+      ipcRenderer: { on(channel) { channels.push(channel); }, invoke(...args) { calls.push(args); return Promise.resolve({ ok: false }); } },
     }) });
-    if (platform !== 'darwin' || arch !== 'arm64') { assert.equal(bridge.speech, undefined); continue; }
+    if (platform !== 'darwin' || arch !== 'arm64') { assert.equal(bridge.speech, undefined); assert.equal(bridge.voiceDraft, undefined); assert.equal(bridge.replySpeech, undefined); continue; }
+    assert.deepEqual(Object.keys(bridge.voiceDraft), ['select', 'cancel', 'microphone']);
+    assert.deepEqual(Object.keys(bridge.voiceDraft.microphone), ['authorize', 'start', 'stop', 'cancel']);
+    assert.deepEqual(channels, ['pet:microphone-revoked']);
+    const gesture = (action, type = 'click', overrides) => {
+      const event = { type, isTrusted: true, eventPhase: 3, detail: 0, composedPath: () => [new Button(action)], ...overrides };
+      listeners.get(type)(event);
+      return event;
+    };
+    await bridge.voiceDraft.microphone.authorize({ isTrusted: true });
+    gesture('start', 'click', { isTrusted: false });
+    await bridge.voiceDraft.microphone.start({ isTrusted: true });
+    const expired = gesture('start'); expired.eventPhase = 0;
+    await bridge.voiceDraft.microphone.start(() => {});
+    assert.deepEqual(calls, []);
+    gesture('authorize');
+    await bridge.voiceDraft.microphone.authorize({ path: '/not-forwarded' });
+    await bridge.voiceDraft.microphone.authorize(); // consumed
+    gesture('start', 'pointerdown', { isPrimary: true, button: 0 });
+    await bridge.voiceDraft.microphone.start({ audio: 'not-forwarded' });
+    await bridge.voiceDraft.microphone.stop({ audio: 'not-forwarded' });
+    bridge.voiceDraft.microphone.cancel('not-forwarded');
+    assert.deepEqual(calls.splice(0), [['pet:microphone-authorize'], ['pet:microphone-arm']]);
+    await bridge.voiceDraft.select('/must-not-forward.wav'); await bridge.voiceDraft.cancel('/ignored');
+    assert.deepEqual(calls.splice(0), [['pet:voice-draft-select'], ['pet:voice-draft-cancel']]);
+    const requestID = '0f000000-0000-4000-8000-000000000001';
+    assert.deepEqual(Object.keys(bridge.replySpeech), ['displayed', 'stop']);
+    await bridge.replySpeech.displayed(requestID, 'not forwarded');
+    await bridge.replySpeech.stop('not forwarded');
+    assert.deepEqual(calls.splice(0), [['pet:chat-reply-displayed', requestID], ['pet:chat-reply-speech-stop']]);
     const methods = ['status', 'selectReference', 'clearReference', 'enable', 'disable'];
     assert.deepEqual(Object.keys(bridge.speech), methods);
     for (const method of methods) {
@@ -535,17 +569,20 @@ test('compiled preload exposes only fixed online chat methods on macOS', async (
       ipcRenderer: { invoke: async (...args) => calls.push(args) },
     }) });
     if (platform !== 'darwin') { assert.equal(bridge.onlineChat, undefined); continue; }
-    assert.deepEqual(Object.keys(bridge.onlineChat), ['list', 'send', 'cancel']);
-    await bridge.onlineChat.list('ignored'); await bridge.onlineChat.send({}); await bridge.onlineChat.cancel('synthetic');
-    assert.deepEqual(calls, [['pet:chat-models'], ['pet:chat-send', {}], ['pet:chat-cancel', 'synthetic']]);
+    assert.deepEqual(Object.keys(bridge.onlineChat), ['list', 'send', 'approveMaterials', 'cancel']);
+    assert.deepEqual(Object.keys(bridge.chatProjects), ['list', 'create']);
+    await bridge.onlineChat.list('ignored'); await bridge.onlineChat.send({}); await bridge.onlineChat.approveMaterials({}); await bridge.onlineChat.cancel('synthetic');
+    await bridge.chatProjects.list({ petID: 'synthetic' }); await bridge.chatProjects.create({ petID: 'synthetic', name: '合成目录' });
+    assert.deepEqual(calls, [['pet:chat-models'], ['pet:chat-send', {}], ['pet:chat-approve-materials', {}], ['pet:chat-cancel', 'synthetic'],
+      ['pet:chat-project-list', { petID: 'synthetic' }], ['pet:chat-project-create', { petID: 'synthetic', name: '合成目录' }]]);
   }
   assert.doesNotMatch(preload, /\/v1\/chat|127\.0\.0\.1|mcred-v1/);
 });
 
-test('compiled macOS preload exposes only the four fixed pet Agent task methods', async () => {
+test('compiled macOS preload keeps legacy Agent records accessible without a task creation channel', async () => {
   const { runInNewContext } = await import('node:vm');
   const preload = await readFile(`${out}/preload.cjs`, 'utf8');
-  const methods = ['create', 'list', 'read', 'cancel'];
+  const methods = ['list', 'read', 'cancel'];
   for (const platform of ['darwin', 'win32', 'linux']) {
     let bridge; const calls = [];
     runInNewContext(preload, { process: { platform }, require: () => ({
@@ -558,7 +595,7 @@ test('compiled macOS preload exposes only the four fixed pet Agent task methods'
     for (const method of methods) await bridge.agentTasks[method](input, 'pet:ignored');
     assert.deepEqual(calls, methods.map(method => [`pet:agent-tasks-${method}`, input]));
   }
-  assert.doesNotMatch(preload, /\/v1\/agent-tasks|clipboard|agent-tasks\.sqlite/);
+  assert.doesNotMatch(preload, /\/v1\/agent-tasks|clipboard|agent-tasks\.sqlite|pet:agent-tasks-create/);
 });
 
 test('workspace video stages its fixed surface without media or workspace preload access', async () => {
@@ -586,19 +623,92 @@ test('workspace video stages its fixed surface without media or workspace preloa
 });
 
 
-test('the macOS service build carries the pinned SDK worker only on the trusted side', async () => {
+test('the built service embeds Pi without shipping a DSH worker or provider bridge', async () => {
   const service = resolve('apps/app-service/dist');
-  const worker = resolve(service, 'harness-worker.mjs');
-  for (const name of ['main.cjs', 'preload.cjs']) assert.doesNotMatch(await readFile(resolve(out, name), 'utf8'), /dsh-sdk-client|PET_HARNESS_TURN_TOKEN/);
-  assert.match(await readFile(resolve(service, 'entry.cjs'), 'utf8'), /createHarnessRuntime[\s\S]*harness-worker\.mjs/);
-  if (process.platform !== 'darwin') {
-    await assert.rejects(access(worker), { code: 'ENOENT' });
-    return;
+  const retired = /dsh-sdk-client|harness-worker\.mjs|PET_HARNESS|pet-harness-node/;
+  for (const name of ['main.cjs', 'preload.cjs']) assert.doesNotMatch(await readFile(resolve(out, name), 'utf8'), /@earendil-works|createPiTextRuntime|PET_HARNESS/);
+  const entry = await readFile(resolve(service, 'entry.cjs'), 'utf8');
+  assert.match(entry, /pi-agent-core.*agent-loop/);
+  assert.match(entry, /chatRuntime: models && createPiTextRuntime/);
+  assert.doesNotMatch(entry, retired);
+  for (const name of ['pi-mit.txt', 'pi-schema-typebox.txt']) {
+    assert.deepEqual(await readFile(resolve(service, 'licenses', name)), await readFile(resolve('licenses', name)));
   }
-  assert.deepEqual(await readFile(worker), await readFile('apps/app-service/src/agent/harness-worker.mjs'));
-  // Direct invocation without its owning IPC channel cannot start the SDK.
-  const rejected = spawnSync(process.execPath, [worker], { timeout: 2000, maxBuffer: 1024 });
-  assert.ifError(rejected.error);
-  assert.equal(rejected.status, 1);
-  assert.equal(rejected.stdout.length + rejected.stderr.length, 0);
+  await assert.rejects(access(resolve(service, 'harness-worker.mjs')), { code: 'ENOENT' });
+});
+
+test('compiled macOS service sends one Pi turn and persists only run metadata under an isolated business root', { skip: process.platform !== 'darwin', timeout: 10_000 }, async () => {
+  const { mkdtemp, mkdir, rm, stat, writeFile } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { once } = await import('node:events');
+  const { createServer } = await import('node:http');
+  const { randomUUID } = await import('node:crypto');
+  const { DatabaseSync } = await import('node:sqlite');
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'pet-compiled-agent-'));
+  const workspace = join(root, 'workspace'), modelsRoot = join(root, 'models');
+  const outbound = [];
+  const provider = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    outbound.push({ path: request.url, authorization: request.headers.authorization, body: JSON.parse(Buffer.concat(chunks)) });
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: '我是合成伙伴。' } }] }));
+  });
+  let child, exit;
+  try {
+    await Promise.all([mkdir(workspace, { mode: 0o700 }), mkdir(modelsRoot, { mode: 0o700 }), writeFile(join(root, 'chats.sqlite'), '', { mode: 0o600 })]);
+    await writeFile(join(workspace, 'workspace-state.json'), JSON.stringify({ schemaVersion: 1, revision: 0, theme: 'system', registry: { schemaVersion: 1, instances: [] } }), { mode: 0o600 });
+    provider.listen(0, '127.0.0.1');
+    await once(provider, 'listening');
+    const signal = AbortSignal.timeout(8000), token = randomBytes(32).toString('hex');
+    child = fork(createRequire(resolve('apps/desktop/package.json')).resolve('@pet/app-service'), [], { execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+    exit = once(child, 'exit');
+    const ready = once(child, 'message', { signal });
+    const pkg = { id: 'local.pet', version: '1.0.0' };
+    child.send({ type: 'bootstrap', version: 1, token, workerPath: `${out}/runtime/worker.py`, guardianPath: `${out}/runtime/guardian.py`,
+      businessRoot: root, modelsRoot, workspace: { root: workspace, catalog: [{ ...pkg, name: '合成伙伴' }] } });
+    const [message] = await ready;
+    assert.equal(message.type, 'ready');
+    const request = async (path, payload) => {
+      const response = await fetch(`http://127.0.0.1:${message.port}${path}`, {
+        signal, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        ...(payload && { method: 'POST', body: JSON.stringify(payload) }),
+      });
+      return [response.status, await response.json()];
+    };
+    const [added, result] = await request('/v1/pets/add', { expectedRevision: 0, package: pkg });
+    assert.equal(added, 200, JSON.stringify(result));
+    const { id: petID } = result.workspace.instances[0];
+    const connection = { id: 'synthetic', preset: 'custom', displayName: '合成连接', apiProtocol: 'chat-completions',
+      baseURL: `http://127.0.0.1:${provider.address().port}/v1`, authMode: 'apiKey', compatibility: {}, defaultModelEntryID: 'entry',
+      models: [{ entryID: 'entry', modelID: 'fake', displayName: '合成模型', capabilities: { tools: { status: 'unknown', source: 'user' } }, compatibility: {} }] };
+    assert.equal((await request('/v1/models/save', { connection, expectedRevision: 0, credential: { kind: 'keep' } }))[0], 200);
+    const [, listing] = await request('/v1/chat/models');
+    const requestID = randomUUID(), conversation = { id: randomUUID(), mode: 'new' };
+    const turn = { petID, requestID, route: listing.models[0].route, text: '你是谁？', history: [], conversation };
+    const [status, reply] = await request('/v1/chat/send', turn);
+    assert.equal(status, 200, JSON.stringify(reply));
+    assert.deepEqual(reply, { ok: true, requestID, text: '我是合成伙伴。', replayable: true });
+    assert.equal((await request('/v1/chat/send', turn))[0], 400);
+    assert.equal(outbound.length, 1);
+    assert.equal(outbound[0].path, '/v1/chat/completions');
+    assert.equal(outbound[0].authorization, undefined);
+    assert.deepEqual(outbound[0].body.messages, [{ role: 'user', content: '你是谁？' }]);
+    child.send({ type: 'shutdown' });
+    assert.deepEqual(await exit, [0, null]);
+    const ledger = join(root, 'agent-state.sqlite');
+    assert.equal((await stat(ledger)).mode & 0o777, 0o600);
+    const db = new DatabaseSync(ledger, { readOnly: true });
+    try { assert.deepEqual({ ...db.prepare('SELECT request_id, pet_id, source, status FROM runs').get() }, { request_id: requestID, pet_id: petID, source: 'chat', status: 'completed' }); }
+    finally { db.close(); }
+    assert.doesNotMatch((await readFile(ledger)).toString(), /你是谁|我是合成伙伴/);
+    assert.deepEqual(JSON.parse(await readFile(join(root, 'agents', petID, 'agent.json'), 'utf8')), { schemaVersion: 1, id: petID, runtime: 'pi', enabled: true, skills: [] });
+  } finally {
+    if (child?.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await exit;
+    provider.closeAllConnections();
+    await new Promise(resolve => provider.close(resolve));
+    await rm(root, { recursive: true, force: true });
+  }
 });

@@ -32,8 +32,11 @@ export interface DesktopBridge {
   legacyCharacterHandoff?: import("./legacy-character-snapshot.ts").LegacyHandoffBridge;
   characters?: import("./characters.ts").CharactersBridge;
   speech?: import("./speech.ts").SpeechBridge;
+  replySpeech?: import("./speech.ts").ReplySpeechBridge;
+  voiceDraft?: import("./voice-draft.ts").VoiceDraftBridge;
+  chatProjects?: import("./chat-history.ts").ChatProjectBridge;
   chatHistory?: import("./chat-history.ts").ChatHistoryBridge;
-  agentTasks?: import("./agent-tasks.ts").AgentTaskBridge;
+  agentTasks?: Omit<import("./agent-tasks.ts").AgentTaskBridge, "create">;
   onlineChat?: import("./online-chat.ts").OnlineChatBridge;
   models?: import("./models.ts").ModelsBridge;
   pets?: import("./pets.ts").PetsBridge;

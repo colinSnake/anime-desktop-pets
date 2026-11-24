@@ -1,3 +1,4 @@
+import type { AgentStateStore } from './agent/agent-state.ts';
 import { registerAgentTasks } from './agent/task-routes.ts';
 import type { AgentTaskStore } from './agent/task-store.ts';
 import Fastify from "fastify";
@@ -30,6 +31,7 @@ export function createService({
   chatRuntime,
   chatHistory,
   agentTasks,
+  agentState,
 }: {
   token: string;
   runtime: RuntimeController;
@@ -40,6 +42,7 @@ export function createService({
   chatRuntime?: TextChatRuntime;
   chatHistory?: ChatHistory;
   agentTasks?: AgentTaskStore;
+  agentState?: AgentStateStore;
 }) {
   if (!/^[a-f0-9]{64}$/.test(token))
     throw new Error("Invalid session credential");
@@ -109,18 +112,19 @@ export function createService({
   );
   registerPetRoutes(app, workspace);
   registerModelManagement(app, models);
-  const chat = registerOnlineChat(app, models, workspace, characters, chatRuntime, chatHistory);
+  const chat = registerOnlineChat(app, models, workspace, characters, chatRuntime, chatHistory, agentState);
   const tasks = agentTasks && workspace && models ? registerAgentTasks(app, agentTasks, workspace, models) : undefined;
-  registerSpeechRoutes(app, speech);
+  registerSpeechRoutes(app, speech, () => workspace?.canStartOwnedPlayer() === true);
   registerCharacterRoutes(app, workspace, characters);
   app.addHook("preClose", async () => {
     const chatCleanup = await Promise.allSettled([chat?.close(), tasks?.close()]);
+    const ledgerCleanup = await Promise.allSettled([agentState?.close()]);
     // Schedule each closer independently: a synchronous throw or rejection must not
     // interrupt another owner draining writes / releasing its lease before process.exit.
     const results = await Promise.allSettled([
       () => runtime.close(), () => workspace?.close(), () => models?.close(), () => speech?.close(), () => characters?.close(),
     ].map(close => Promise.resolve().then(close)));
-    if ([...chatCleanup, ...results].some(result => result.status === "rejected")) throw new Error("service_cleanup_failed");
+    if ([...chatCleanup, ...ledgerCleanup, ...results].some(result => result.status === "rejected")) throw new Error("service_cleanup_failed");
   });
   return app;
 }

@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { ChatReplySpeech } from '../src/chat-reply-speech.ts';
+import type { ReplySpeechCommand } from '../../../packages/contracts/src/speech.ts';
 import { ChatIPC } from '../src/chat-ipc.ts';
 import type { OnlineChatInput, ChatSendResult } from '../../../packages/contracts/src/online-chat.ts';
 
@@ -80,7 +82,9 @@ test('paged history detail is bound to the requested cursor as well as the conve
 
 test('chat IPC accepts only current-turn attachment bytes, never paths or history attachment fields', async () => {
   const sent: OnlineChatInput[] = [];
-  const bridge = new ChatIPC({ listChatModels: async () => ({ ok: true, models: [] }), sendOnlineChat: async (turn) => {
+  const grant = crypto.randomUUID();
+  const bridge = new ChatIPC({ listChatModels: async () => ({ ok: true, models: [] }),
+    approveChatMaterials: async () => ({ ok: true, grant }), sendOnlineChat: async (turn) => {
     sent.push(turn);
     return { ok: true, requestID: turn.requestID, text: '合成回复', replayable: false };
   } });
@@ -94,6 +98,50 @@ test('chat IPC accepts only current-turn attachment bytes, never paths or histor
   ];
   for (const payload of invalid) assert.deepEqual(await bridge.invoke('send', true, [payload]), { ok: false, error: 'invalid_request' });
   assert.equal(sent.length, 0);
-  assert.ok((await bridge.invoke('send', true, [{ ...input, attachments }]))?.ok);
+  const turn = { ...input, attachments };
+  assert.deepEqual(await bridge.invoke('send', true, [turn]), { ok: false, error: 'approval_required' });
+  assert.deepEqual(await bridge.approveMaterials(() => false, [turn]), { ok: false, error: 'invalid_request' });
+  assert.deepEqual(await bridge.approveMaterials(() => true, [turn]), { ok: true, grant });
+  bridge.cancel(); // Delivery cannot survive a workspace hide after approval.
+  const approved = { ...turn, materialGrant: grant };
+  assert.deepEqual(await bridge.invoke('send', true, [approved]), { ok: false, error: 'approval_required' });
+  assert.equal(sent.length, 0);
+  assert.deepEqual(await bridge.approveMaterials(() => true, [turn]), { ok: true, grant });
+  assert.ok((await bridge.invoke('send', true, [approved]))?.ok);
+  assert.deepEqual(await bridge.invoke('send', true, [approved]), { ok: false, error: 'approval_required' });
   assert.deepEqual(sent[0]?.attachments, attachments);
+});
+
+
+test('chat IPC gives speech only a new validated no-material result, never a cancelled result', async () => {
+  const commands: ReplySpeechCommand[] = [];
+  const speech = new ChatReplySpeech(async command => { commands.push(command); return true; });
+  speech.setEnabled(true);
+  const late = deferred<ChatSendResult>();
+  const reply = { ok: true, requestID: input.requestID, text: '合成的普通回复', replayable: true } as const;
+  const grant = crypto.randomUUID();
+  let result: Promise<ChatSendResult> = late.promise;
+  const chat = new ChatIPC({ listChatModels: async () => ({ ok: true, models: [] }),
+    sendOnlineChat: () => result, approveChatMaterials: async () => ({ ok: true, grant }) }, speech);
+  const pending = chat.invoke('send', true, [input]);
+  chat.cancel();
+  late.resolve(reply);
+  assert.deepEqual(await pending, { ok: false, error: 'cancelled' });
+  assert.equal(speech.displayed(input.requestID), false);
+
+  result = Promise.resolve({ ...reply, requestID: crypto.randomUUID() });
+  assert.deepEqual(await chat.invoke('send', true, [input]), { ok: false, error: 'unavailable' });
+  assert.equal(speech.displayed(input.requestID), false);
+
+  const withFile = { ...input, attachments: [{ name: 'synthetic.txt', mediaType: 'text/plain', data: '5L2g5aW9' }] };
+  assert.deepEqual(await chat.approveMaterials(() => true, [withFile]), { ok: true, grant });
+  result = Promise.resolve(reply);
+  assert.deepEqual(await chat.invoke('send', true, [{ ...withFile, materialGrant: grant }]), reply);
+  assert.equal(speech.displayed(input.requestID), false);
+
+  assert.deepEqual(await chat.invoke('send', true, [input]), reply);
+  assert.deepEqual(commands, [], 'no playback before the matching renderer acknowledgement');
+  assert.equal(speech.displayed(input.requestID), true);
+  assert.deepEqual(commands, [{ revision: 1, text: reply.text }]);
+  await speech.stop();
 });

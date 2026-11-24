@@ -27,6 +27,14 @@ function fixture(overrides: Partial<ModelsBridge> = {}) {
   return { controller, inputs, get: controller.getSnapshot };
 }
 
+test('the model page starts with its title followed by a descriptive subtitle', () => {
+  const html = renderToStaticMarkup(createElement(ModelPage));
+  const header = html.match(/<header class="model-page-header">([\s\S]*?)<\/header>/)?.[1];
+  assert.ok(header);
+  assert.doesNotMatch(header, /工作区|model-page-crumb/);
+  assert.match(header, /<h1[^>]*>模型管理<\/h1><p[^>]*>配置服务商和模型，设置聊天默认使用的模型。<\/p>/);
+});
+
 test('the model editor offers an empty password input without the clipboard menu workflow', async () => {
   const config = initial(); config.connections[0]!.credentialState = 'reference-present';
   const { controller: c, get } = fixture({ list: async () => good(config) });
@@ -306,7 +314,7 @@ test('the Responses editor keeps existing controls without exposing input types 
   assert.match(html, /API Key（选填）/);
   assert.match(html, /连接默认模型/);
   assert.doesNotMatch(html, /输入类型|支持图片输入|支持 PDF 输入|工具能力|最大输出 Token/);
-  assert.match(html, /思考等级/);
+  assert.match(html, /思考深度/);
   assert.match(html, /已保存连接/);
   assert.equal((html.match(/class="model-custom"/g) ?? []).length, 1);
 
@@ -640,4 +648,132 @@ test('leaving before save settles prevents any post-save connection test', async
   const pending = c.save('a', 'synthetic-test-key', ['m']); c.leave();
   const saved = initial(); saved.connections[0]!.credentialState = 'reference-present';
   confirm(good(saved)); assert.equal(await pending, true);
+});
+
+
+test('reloading model management restores saved-version probe status without re-testing', async () => {
+  const input = { connectionID: 'a', expectedRevision: 1, entryID: 'm', modelID: 'm' };
+  const result = { version: 1 as const, ok: true as const, connectionID: 'a', revision: 1, entryID: 'm' };
+  let calls = 0;
+  const { controller: c, get } = fixture({ list: async () => ({ ...good(), probeResults: [{ input, result, testedAt: '2026-11-24T00:00:00.000Z' }] }),
+    testConnection: async () => { calls++; return result; }, cancelConnectionTest: async () => {} });
+  await c.load();
+  assert.deepEqual(get().probeResults?.get(JSON.stringify(['a', 'm']))?.result, result);
+  assert.equal(calls, 0);
+});
+
+test('draft model evidence and obsolete revisions cannot mark a saved default as tested', async () => {
+  for (const input of [
+    { connectionID: 'a', expectedRevision: 1, entryID: 'm', modelID: 'unsaved-model' },
+    { connectionID: 'a', expectedRevision: 2, entryID: 'm', modelID: 'm' },
+    { connectionID: 'a', expectedRevision: 1, entryID: 'm', modelID: 'm', maxOutputTokens: 32 },
+  ]) {
+    const { controller, get } = fixture({ list: async () => ({ ...good(), probeResults: [{ input, testedAt: '2026-11-24T00:00:00.000Z',
+      result: { version: 1, ok: true, connectionID: 'a', revision: input.expectedRevision, entryID: 'm' } }] }) });
+    await controller.load();
+    assert.equal(get().probeResults?.size, 0);
+  }
+});
+
+test('cancelled or unconfirmed re-tests leave the last confirmed saved-model dot unchanged', async () => {
+  const result = { version: 1, ok: true, connectionID: 'a', revision: 1, entryID: 'm' } as const;
+  const input = { connectionID: 'a', expectedRevision: 1, entryID: 'm', modelID: 'm' };
+  let finish!: (reply: import('../../../packages/contracts/src/model-probe.ts').ModelProbeReply) => void;
+  const { controller: c, get } = fixture({ list: async () => ({ ...good(), probeResults: [{ input, result, testedAt: '2026-11-24T00:00:00.000Z' }] }),
+    testConnection: () => new Promise(resolve => { finish = resolve; }), cancelConnectionTest: async () => {} });
+  const render = () => renderToStaticMarkup(createElement(ModelPage, { controller: c }));
+  await c.load();
+  const cancelled = c.testSavedDefault('a', 1);
+  c.cancelConnectionTest('a', true);
+  finish({ version: 1, ok: false, error: 'cancelled' }); await cancelled;
+  assert.deepEqual(get().probeResults?.get(JSON.stringify(['a', 'm']))?.result, result);
+  assert.match(render(), /已停止等待/);
+  for (const error of ['unavailable', 'storage_unavailable', 'busy', 'cancelled'] as const) {
+    const pending = c.testSavedDefault('a', 1);
+    finish({ version: 1, ok: false, error }); await pending;
+    assert.deepEqual(get().probeResults?.get(JSON.stringify(['a', 'm']))?.result, result);
+    assert.match(render(), /aria-label="测试连接 连接 a：测试成功/);
+  }
+});
+
+test('a new list is authoritative for evidence without blocking model edits on a receipt warning', async () => {
+  const input = { connectionID: 'a', expectedRevision: 1, entryID: 'm', modelID: 'm' };
+  const result = { version: 1, ok: true, connectionID: 'a', revision: 1, entryID: 'm' } as const;
+  const configuration = { version: 1, ok: true, configuration: initial() } as const;
+  let reply: ModelWorkspaceReply = { ...configuration, probeResults: [{ input, result, testedAt: '2026-11-24T00:00:00.000Z' }] };
+  const { controller: c, get } = fixture({ list: async () => reply, testConnection: async () => assert.fail('read must not probe'), cancelConnectionTest: async () => {} });
+  const render = () => renderToStaticMarkup(createElement(ModelPage, { controller: c }));
+  await c.load(); assert.equal(get().probeResults?.size, 1);
+  reply = good(); await c.load(); assert.equal(get().probeResults?.size, 0);
+  reply = { ...configuration, probeStorageUnavailable: true }; await c.load();
+  assert.match(render(), /连接测试记录暂不可读取/);
+  assert.match(render(), /data-status="unavailable"[^>]*aria-label="测试连接 连接 a：状态不可用/);
+  assert.ok(c.savedDefaultTestBlockedReason('a', 1));
+  c.edit('a'); assert.ok(get().drafts.has('a'));
+  reply = good(); await c.load();
+  assert.doesNotMatch(render(), /连接测试记录暂不可读取/);
+});
+
+test('a newly saved non-global-default connection restores its tested dot from disk after service and UI restarts', { skip: process.platform === 'win32' }, async t => {
+  const { mkdtemp, realpath, rm, readFile } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { ModelManagement } = await import('../../app-service/src/models/management.ts');
+  const { textReply } = await import('../../app-service/test/fixtures/model-replies.ts');
+  const root = await realpath(await mkdtemp(resolve(tmpdir(), 'pet-model-status-restart-')));
+  let calls = 0, status = 200;
+  const fetch: typeof globalThis.fetch = async () => {
+    calls++;
+    return Response.json(status === 200 ? textReply('chat-completions') : {}, { status });
+  };
+  let service = new ModelManagement(root, undefined, undefined, { fetch });
+  t.after(async () => { await service.close(); await rm(root, { recursive: true, force: true }); });
+  const bridge: ModelsBridge = {
+    list: () => service.run('list', undefined),
+    save: input => service.run('save', input),
+    setDefault: input => service.run('default', input),
+    remove: input => service.run('remove', input),
+    testConnection: ({ operationID: _operationID, ...input }) => service.testConnection(input),
+    cancelConnectionTest: async () => {},
+  };
+  const { credentialState: _credentialState, revision: _revision, ...seed } = connection('a', 0);
+  const saved = await service.run('save', { connection: seed, expectedRevision: 0, credential: { kind: 'keep' } });
+  assert.ok(saved.ok);
+  assert.ok((await service.run('default', { expectedRevision: saved.configuration.revision, connectionID: 'a', entryID: 'm' })).ok);
+  let controller = fixture(bridge).controller;
+  await controller.load();
+  const id = controller.add('custom')!;
+  controller.patch(id, { displayName: '新增非全局默认服务商', baseURL: 'http://127.0.0.1:11434/v1' });
+  const entryID = controller.getSnapshot().drafts.get(id)!.edit.defaultModelEntryID;
+  controller.patchEntry(id, entryID, { modelID: 'synthetic-model', displayName: '合成模型' });
+  assert.equal(await controller.save(id, '', [entryID]), true);
+  assert.equal(controller.getSnapshot().configuration?.defaultConnectionID, 'a');
+  const render = () => renderToStaticMarkup(createElement(ModelPage, { controller }));
+  const dot = (state: string) => new RegExp(`<strong>新增非全局默认服务商</strong><button[^>]*data-status="${state}"`);
+  assert.match(render(), dot('ok'));
+  assert.equal(calls, 1);
+  const receipt = JSON.parse(await readFile(resolve(root, 'model-probes.json'), 'utf8'));
+  assert.equal(receipt.records[0].input.connectionID, id);
+  assert.equal(receipt.records[0].result.ok, true);
+  const restart = async () => {
+    controller.leave();
+    await service.close();
+    service = new ModelManagement(root, undefined, undefined, { fetch });
+    controller = fixture(bridge).controller;
+    await controller.load();
+  };
+  await restart();
+  assert.match(render(), dot('ok'));
+  assert.equal(calls, 1, 'restoring the saved dot must not contact the provider');
+  status = 401;
+  const revision = controller.getSnapshot().configuration!.connections.find(value => value.id === id)!.revision;
+  assert.equal((await controller.testSavedDefault(id, revision))?.ok, false);
+  await restart();
+  assert.match(render(), dot('failed'));
+  assert.equal(calls, 2);
+  controller.edit(id);
+  controller.patch(id, { baseURL: 'http://127.0.0.1:11435/v1' });
+  assert.equal(await controller.save(id), true);
+  await restart();
+  assert.match(render(), dot('untested'));
+  assert.equal(calls, 2, 'configuration edits and restarts must not silently re-test');
 });

@@ -114,3 +114,49 @@ test('a concurrent transfer cannot select one of two roots before publication', 
 });
 
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
+
+
+test('new business roots reserve private agents and skills directories beside models and workspace', { skip: process.platform === 'win32' }, async t => {
+  const { data, target } = await fixture(t);
+  await data.select();
+  for (const dir of ['agents', 'skills']) {
+    const info = await lstat(join(target, dir));
+    assert.ok(info.isDirectory());
+    assert.equal(info.mode & 0o777, 0o700);
+  }
+});
+
+test('explicit migration carries validated model probe evidence into the new business root', { skip: process.platform === 'win32' }, async t => {
+  const { data, legacy, target } = await fixture(t);
+  await seed(legacy);
+  const saved = configuration().connections[0]!, entry = saved.models[0]!;
+  const bytes = JSON.stringify({ schemaVersion: 1, records: [{
+    input: { connectionID: saved.id, expectedRevision: saved.revision, entryID: entry.entryID, modelID: entry.modelID },
+    result: { version: 1, ok: true, connectionID: saved.id, revision: saved.revision, entryID: entry.entryID }, testedAt: '2026-11-24T00:00:00.000Z',
+  }] });
+  await writeFile(join(legacy, 'models', 'model-probes.json'), bytes, { mode: 0o600 });
+  await data.migrate();
+  assert.equal(await readFile(join(target, 'models', 'model-probes.json'), 'utf8'), bytes);
+  assert.equal(await readFile(join(legacy, 'models', 'model-probes.json'), 'utf8'), bytes);
+});
+
+test('malformed model probe evidence aborts migration without selecting or deleting a data root', { skip: process.platform === 'win32' }, async t => {
+  const { data, legacy, target } = await fixture(t);
+  await seed(legacy);
+  await writeFile(join(legacy, 'models', 'model-probes.json'), '{invalid', { mode: 0o600 });
+  await assert.rejects(data.migrate());
+  await assert.rejects(lstat(target), { code: 'ENOENT' });
+  assert.equal((await data.select()).kind, 'legacy');
+});
+
+test('a damaged optional probe receipt cannot prevent reopening an already migrated root', { skip: process.platform === 'win32' }, async t => {
+  const { data, home, legacy, target } = await fixture(t);
+  await seed(legacy);
+  await data.migrate();
+  const receipt = join(target, 'models', 'model-probes.json');
+  await writeFile(receipt, '{invalid', { mode: 0o600 });
+  assert.deepEqual(await new LocalDataRoot(home, legacy).select(), { kind: 'adpets', root: target });
+  assert.equal(await readFile(receipt, 'utf8'), '{invalid');
+  await writeFile(join(target, 'models', 'model-providers.json'), '{invalid');
+  await assert.rejects(new LocalDataRoot(home, legacy).select());
+});

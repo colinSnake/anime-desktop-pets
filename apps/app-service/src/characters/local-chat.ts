@@ -15,10 +15,15 @@ function boundedLines(title: string, lines: string[], empty: string): string {
   return result === title ? empty : result;
 }
 
-export function buildLocalChatAnswer(intent: LocalChatIntent, state: CharacterState, now: string): string {
+export function buildLocalChatAnswer(intent: LocalChatIntent, state: CharacterState, now: string, displayName?: string): string {
   if (intent.intent === 'identity') {
     const identity = state.identity;
-    if (!identity || !safe(identity.name) || !safe(identity.role)) return '当前桌宠暂无可展示的本机身份。';
+    if (!identity) {
+      const name = displayName?.trim();
+      const introduction = name && safe(name) ? `我是${name}，你当前选择的桌宠。` : '我是你当前选择的桌宠。';
+      return `${introduction}\n尚未设置本机身份，可在「聊天 → ⋯ → 桌宠 Agent → 身份」中设置。`;
+    }
+    if (!safe(identity.name) || !safe(identity.role)) return '当前桌宠暂无可展示的本机身份。';
     return `我是${identity.name}。${identity.role ? `\n角色：${identity.role}` : ''}`;
   }
   if (intent.intent === 'goals') {
@@ -51,9 +56,9 @@ export function registerLocalChatRoute(app: FastifyInstance, workspace: PetWorks
     const input = { ...body, petID: request.params.id };
     if (!isLocalChatInput(input)) return fail('invalid');
     try {
-      return await workspace.withRegisteredInstance(input.petID, async petID => {
+      return await workspace.withRegisteredInstance(input.petID, async (petID, instance) => {
         const state = await repository.read(petID);
-        return { ok: true, petID, text: buildLocalChatAnswer(input, state, new Date().toISOString()) } satisfies LocalChatResult;
+        return { ok: true, petID, text: buildLocalChatAnswer(input, state, new Date().toISOString(), instance.displayName) } satisfies LocalChatResult;
       });
     } catch (error) {
       return fail(error instanceof WorkspaceError && error.code === 'not-found' ? 'not-found' : 'unavailable');

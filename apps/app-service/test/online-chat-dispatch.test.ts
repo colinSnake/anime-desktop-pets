@@ -1,5 +1,5 @@
-import { fileURLToPath } from 'node:url';
-import { createHarnessRuntime } from '../src/agent/harness-runtime.ts';
+import { AgentStateStore } from '../src/agent/agent-state.ts';
+import { createPiTextRuntime } from '../src/agent/pi-runtime.ts';
 import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
@@ -29,7 +29,7 @@ const writeDraft = (id: string) => {
   return { ...draft, id, displayName: id, baseURL: `https://${id}.invalid/v1` };
 };
 const syntheticRuntime: TextChatRuntime = (text, complete) => complete(text);
-async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, beforeRead?: () => Promise<void>, chatRuntime: TextChatRuntime | null = syntheticRuntime, withHistory = false) {
+async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, beforeRead?: () => Promise<void>, chatRuntime: TextChatRuntime | null = syntheticRuntime, withHistory = false, withAgentState = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'pet-online-chat-')));
   const { backend } = syntheticVault(); let reads = 0;
   const models = new ModelManagement(join(root, 'models'), { ...backend, read: async (...args) => { reads++; await beforeRead?.(); return backend.read(...args); } }, undefined, { fetch });
@@ -40,7 +40,8 @@ async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, befo
   const historyFile = join(root, 'chats.sqlite');
   if (withHistory) await writeFile(historyFile, '', { mode: 0o600 });
   const chatHistory = withHistory ? new ChatHistory(root) : undefined;
-  const app = createService({ token, models, workspace, characters, chatHistory, chatRuntime: chatRuntime ?? undefined, runtime: { snapshot, probe: async () => snapshot(), close: async () => {} } });
+  const agentState = withAgentState ? new AgentStateStore(root) : undefined;
+  const app = createService({ token, models, workspace, characters, chatHistory, agentState, chatRuntime: chatRuntime ?? undefined, runtime: { snapshot, probe: async () => snapshot(), close: async () => {} } });
   t.after(async () => { await app.close(); await rm(root, { recursive: true, force: true }); });
   const created = await workspace.mutate('add', { expectedRevision: 0, package: pkg });
   assert.ok(created.ok);
@@ -50,8 +51,15 @@ async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, befo
   };
   const defaultTo = async (connectionID: string, expectedRevision: number) => assert.ok((await models.run('default', { connectionID, entryID: 'entry-one', expectedRevision })).ok);
   const list = () => app.inject({ url: paths.list, headers });
-  const send = (route: object, fields: object = {}) => app.inject({ method: 'POST', url: paths.send, headers,
-    payload: { requestID: randomUUID(), petID, text: '聊聊纸船', history: [], route, ...(withHistory && { conversation: { id: randomUUID(), mode: 'new' } }), ...fields } });
+  const send = async (route: object, fields: object = {}) => {
+    const payload = { requestID: randomUUID(), petID, text: '聊聊纸船', history: [], route, ...(withHistory && { conversation: { id: randomUUID(), mode: 'new' } }), ...fields };
+    let materialGrant: string | undefined;
+    if ('attachments' in payload) {
+      const permit = await app.inject({ method: 'POST', url: '/v1/chat/approve-materials', headers, payload });
+      if (permit.statusCode === 200) materialGrant = permit.json().grant;
+    }
+    return app.inject({ method: 'POST', url: paths.send, headers, payload: { ...payload, ...(materialGrant && { materialGrant }) } });
+  };
   const routes = async () => {
     const result = await list(); assert.equal(result.statusCode, 200);
     return result.json().models as { route: { connectionID: string; modelEntryID: string; fingerprint: string }; ready: boolean }[];
@@ -63,7 +71,7 @@ async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, befo
     await characters.apply(petID, 2, { type: 'setMemoryChatShare', id, enabled: true });
     return () => workspace.withRegisteredInstance(petID, registered => characters.apply(registered, 3, { type: 'setMemoryChatShare', id, enabled: false }));
   };
-  return { app, petID, workspace, models, characters, historyFile, reads: () => reads, write, defaultTo, list, routes, send, share };
+  return { app, petID, workspace, models, characters, historyFile, agentState, reads: () => reads, write, defaultTo, list, routes, send, share };
 }
 
 test('fixed authenticated chat sends the visible destination and only authorized context, with no secret or endpoint in its list', use, async t => {
@@ -85,6 +93,76 @@ test('fixed authenticated chat sends the visible destination and only authorized
   const messages = JSON.parse(outbound[0]!.body).messages;
   assert.doesNotMatch(messages[0].content, /蓝色纸船/);
   assert.deepEqual(JSON.parse(messages.at(-1).content), { question: '聊聊纸船', characterContext: { personalMemories: ['蓝色纸船'] } });
+});
+
+test('online Responses chat consumes the terminal SSE reply from a stream-only saved gateway in one request', use, async t => {
+  const outbound: { url: string; body: Record<string, unknown>; accept: string | null }[] = [];
+  let cancelled = false;
+  const f = await fixture(t, async (url, init) => {
+    const body = JSON.parse(String(init?.body));
+    outbound.push({ url: String(url), body, accept: new Headers(init?.headers).get('accept') });
+    if (body.stream !== true) return Response.json({ status: 'failed', output: [] });
+    const completed = { status: 'completed', output: [
+      { type: 'reasoning' },
+      { type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: '合成流回复' }] },
+    ] };
+    const frame = Buffer.from(`event: response.output_text.delta\r\ndata: {"type":"response.output_text.delta","delta":"不能发布这段增量"}\r\n\r\nevent: response.completed\r\ndata: ${JSON.stringify({ type: 'response.completed', response: completed })}\r\n\r\n`);
+    return new Response(new ReadableStream({ start(controller) {
+      // Split the UTF-8 terminal and deliberately leave the stream open after completion.
+      const split = frame.indexOf(Buffer.from('合成流回复')) + 1;
+      controller.enqueue(frame.subarray(0, split)); controller.enqueue(frame.subarray(split));
+    }, cancel() { cancelled = true; } }), { headers: { 'content-type': 'text/event-stream; charset=utf-8' } });
+  });
+  const { revision, credentialRef, ...connection } = configuration('responses').connections[0]!;
+  assert.ok((await f.models.run('save', { connection, expectedRevision: 0, credential: { kind: 'replace', key } })).ok);
+  const [model] = await f.routes();
+  const result = await f.send(model!.route);
+  assert.equal(result.statusCode, 200, result.body);
+  assert.equal(result.json().text, '合成流回复');
+  assert.equal(outbound.length, 1);
+  const { body, accept, url } = outbound[0]!;
+  assert.equal(url, `${connection.baseURL}/responses`);
+  assert.match(accept ?? '', /text\/event-stream/);
+  assert.equal(body.store, false);
+  assert.equal(body.include, undefined);
+  assert.equal(body.max_output_tokens, 2048);
+  assert.equal(cancelled, true);
+});
+
+for (const transport of ['SSE', 'JSON']) test(`online Responses chat rejects an unfinished assistant message in a completed ${transport} envelope`, use, async t => {
+  let calls = 0;
+  const f = await fixture(t, async () => {
+    calls++;
+    const response = { status: 'completed', output: [
+      { type: 'message', role: 'assistant', status: 'in_progress', content: [{ type: 'output_text', text: '不可保存的部分正文' }] },
+    ] };
+    return transport === 'JSON' ? Response.json(response) : new Response(
+      `data: ${JSON.stringify({ type: 'response.completed', response })}\n\n`, { headers: { 'content-type': 'text/event-stream' } });
+  }, undefined, syntheticRuntime, true);
+  const { revision, credentialRef, ...connection } = configuration('responses').connections[0]!;
+  assert.ok((await f.models.run('save', { connection, expectedRevision: 0, credential: { kind: 'replace', key } })).ok);
+  const [model] = await f.routes();
+  const result = await f.send(model!.route);
+  assert.equal(result.statusCode, 502, result.body);
+  assert.deepEqual(result.json(), { ok: false, error: 'invalid_response' });
+  const history = await f.app.inject({ method: 'POST', url: chatHistoryPaths.list, headers, payload: { petID: f.petID } });
+  assert.deepEqual(history.json(), { ok: true, page: { rows: [], nextBefore: null } });
+  assert.equal(calls, 1);
+});
+
+test('online Responses chat rejects a stream without a terminal event instead of publishing a delta or retrying', use, async t => {
+  let calls = 0;
+  const f = await fixture(t, async (_url, init) => {
+    calls++;
+    assert.equal(JSON.parse(String(init?.body)).stream, true);
+    return new Response('data: {"type":"response.output_text.delta","delta":"未完成"}\n\n', { headers: { 'content-type': 'text/event-stream' } });
+  });
+  const { revision, credentialRef, ...connection } = configuration('responses').connections[0]!;
+  assert.ok((await f.models.run('save', { connection, expectedRevision: 0, credential: { kind: 'replace', key } })).ok);
+  const [model] = await f.routes();
+  const result = await f.send(model!.route);
+  assert.deepEqual(result.json(), { ok: false, error: 'invalid_response' });
+  assert.equal(calls, 1);
 });
 
 test('image attachments require a saved Responses image-capable route before credentials or Provider calls', use, async t => {
@@ -224,6 +302,43 @@ test('withdrawing authorization while a contextual request is in flight discards
   assert.deepEqual(response.json(), { ok: false, error: 'context_changed' });
 });
 
+test('final chat publication is ordered with consent withdrawal while the ledger is settling', use, async t => {
+  const finishing = deferred<void>(), publish = deferred<void>();
+  const f = await fixture(t, async () => completion('蓝色纸船'), undefined, createPiTextRuntime(), true, true);
+  await f.write('first'); const [saved] = await f.routes(); const withdraw = await f.share();
+  const ledger = f.agentState!;
+  const finish = ledger.finish.bind(ledger);
+  ledger.finish = async (...args) => {
+    if (args[1] === 'completed') { finishing.resolve(); await publish.promise; }
+    return finish(...args);
+  };
+  const pending = f.send(saved!.route);
+  await Promise.race([finishing.promise, pending.then(() => assert.fail('ledger was not reached'))]);
+  let withdrawn = false;
+  const revoke = withdraw().then(() => { withdrawn = true; });
+  try { await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(withdrawn, false, 'revocation must be ordered after the in-progress authorized commit'); }
+  finally { publish.resolve(); await revoke; }
+  assert.equal((await pending).statusCode, 200);
+});
+
+test('model rotation is ordered after a terminal publication already holding its route', use, async t => {
+  const finishing = deferred<void>(), publish = deferred<void>();
+  const f = await fixture(t, async () => completion(), undefined, createPiTextRuntime(), true, true);
+  await f.write('first'); const [saved] = await f.routes();
+  const ledger = f.agentState!, finish = ledger.finish.bind(ledger);
+  ledger.finish = async (...args) => {
+    if (args[1] === 'completed') { finishing.resolve(); await publish.promise; }
+    return finish(...args);
+  };
+  const pending = f.send(saved!.route);
+  await Promise.race([finishing.promise, pending.then(() => assert.fail('ledger was not reached'))]);
+  let rotated = false;
+  const rotate = f.write('first', 1, false).then(() => { rotated = true; });
+  try { await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(rotated, false, 'a route mutation must not overtake the authorized commit'); }
+  finally { publish.resolve(); await Promise.all([rotate, pending]); }
+  assert.equal((await pending).statusCode, 200);
+});
+
 test('aborting the trusted loopback request reaches the provider signal and suppresses a late reply', { ...use, timeout: 10_000 }, async t => {
   const entered = deferred<void>(), aborted = deferred<void>(), release = deferred<void>();
   const f = await fixture(t, async (_url, init) => {
@@ -248,34 +363,38 @@ test('aborting the trusted loopback request reaches the provider signal and supp
 
 test('cancelling during a pending credential read prevents the first provider call', use, async t => {
   const entered = deferred<void>(), release = deferred<void>();
-  let calls = 0;
-  const f = await fixture(t, async () => { calls++; return completion(); }, async () => { entered.resolve(); await release.promise; });
+  let calls = 0, reads = 0;
+  const f = await fixture(t, async () => { calls++; return completion(); }, async () => { if (++reads === 1) { entered.resolve(); await release.promise; } });
   await f.write('first'); const [first] = await f.routes();
   const controller = new AbortController();
-  const sent = sendOnlineChat(f.models, f.workspace, f.characters, { requestID: randomUUID(), petID: f.petID, route: first!.route, text: '合成问题', history: [] }, controller.signal, new TextChatTurns(syntheticRuntime));
+  const turns = new TextChatTurns(syntheticRuntime);
+  const input = { requestID: randomUUID(), petID: f.petID, route: first!.route, text: '合成问题', history: [] };
+  const sent = sendOnlineChat(f.models, f.workspace, f.characters, input, controller.signal, turns);
   await entered.promise;
   try {
     controller.abort();
     assert.deepEqual(await sent, { ok: false, error: 'cancelled' });
-  } finally { release.resolve(); }
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(await sendOnlineChat(f.models, f.workspace, f.characters, { ...input, requestID: randomUUID() }, new AbortController().signal, turns), { ok: false, error: 'busy' });
+  } finally { release.resolve(); await turns.close(); }
   // Let the pending vault read finish; the cancelled request must remain unable to dispatch.
   await new Promise<void>(resolve => setImmediate(resolve));
   assert.equal(calls, 0);
 });
 
-const useHarness = { ...use, timeout: 5_000 };
+const useRuntime = { ...use, timeout: 5_000 };
 
-async function harnessFixture(t: test.TestContext, transport: typeof globalThis.fetch, runtime: TextChatRuntime, beforeRead?: () => Promise<void>) {
+async function runtimeFixture(t: test.TestContext, transport: typeof globalThis.fetch, runtime: TextChatRuntime, beforeRead?: () => Promise<void>) {
   const f = await fixture(t, transport, beforeRead, runtime);
   await f.write('first');
   const [model] = await f.routes();
   return { ...f, route: model!.route, turn: (fields = {}) => f.send(model!.route, { requestID: randomUUID(), ...fields }) };
 }
 
-test('injected runtime owns the chat terminal; only a bound provider request carries saved history and consent', useHarness, async t => {
+test('injected runtime owns the chat terminal; only a bound provider request carries saved history and consent', useRuntime, async t => {
   const sent: { url: string; headers: Headers; body: string }[] = [];
   const consumed = deferred<void>(), finish = deferred<void>();
-  const f = await harnessFixture(t, async (url, init) => {
+  const f = await runtimeFixture(t, async (url, init) => {
     sent.push({ url: String(url), headers: new Headers(init?.headers), body: String(init?.body) });
     return completion('运行时未预知的回复');
   }, async (text, complete) => {
@@ -307,10 +426,10 @@ test('injected runtime owns the chat terminal; only a bound provider request car
   assert.deepEqual(JSON.parse(body.messages.at(-1).content), { question: '聊聊纸船', characterContext: { personalMemories: ['蓝色纸船'] } });
 });
 
-for (const kind of ['unclaimed', 'forged', 'worker-exit', 'provider-lost'] as const) test(`runtime ${kind} does not publish or fall back to direct generation`, useHarness, async t => {
+for (const kind of ['unclaimed', 'forged', 'worker-exit', 'provider-lost'] as const) test(`runtime ${kind} does not publish or fall back to direct generation`, useRuntime, async t => {
   let calls = 0, late: (() => Promise<string>) | undefined;
   const aborted = deferred<void>();
-  const f = await harnessFixture(t, async (_url, init) => {
+  const f = await runtimeFixture(t, async (_url, init) => {
     calls++;
     if (kind === 'provider-lost') throw new Error('PRIVATE-TRANSPORT-DETAIL');
     if (kind === 'worker-exit') return new Promise((_resolve, reject) => {
@@ -339,9 +458,9 @@ for (const kind of ['unclaimed', 'forged', 'worker-exit', 'provider-lost'] as co
   assert.equal(calls, kind === 'unclaimed' ? 0 : 1);
 });
 
-test('the runtime rechecks sharing after the provider reply and before publishing', useHarness, async t => {
+test('the runtime rechecks sharing after the provider reply and before publishing', useRuntime, async t => {
   let withdraw!: () => Promise<unknown>;
-  const f = await harnessFixture(t, async () => completion('蓝色纸船'), async (text, complete) => {
+  const f = await runtimeFixture(t, async () => completion('蓝色纸船'), async (text, complete) => {
     const reply = await complete(text);
     await withdraw();
     return reply;
@@ -350,9 +469,9 @@ test('the runtime rechecks sharing after the provider reply and before publishin
   assert.deepEqual((await f.turn()).json(), { ok: false, error: 'context_changed' });
 });
 
-test('the saved route cannot rotate between runtime launch and provider admission', useHarness, async t => {
+test('the saved route cannot rotate between runtime launch and provider admission', useRuntime, async t => {
   let rotate!: () => Promise<unknown>;
-  const f = await harnessFixture(t, async () => assert.fail('stale route must not dispatch'), async (text, complete) => {
+  const f = await runtimeFixture(t, async () => assert.fail('stale route must not dispatch'), async (text, complete) => {
     await rotate(); return complete(text);
   });
   rotate = () => f.write('first', 1);
@@ -360,10 +479,10 @@ test('the saved route cannot rotate between runtime launch and provider admissio
   assert.equal(f.reads(), 0);
 });
 
-test('another pet can run concurrently without receiving the first pet’s authorized context', useHarness, async t => {
+test('another pet can run concurrently without receiving the first pet’s authorized context', useRuntime, async t => {
   const first = deferred<void>(), release = deferred<void>();
   const outbound: string[] = [];
-  const f = await harnessFixture(t, async (_url, init) => { outbound.push(String(init?.body)); return completion(); }, async (text, complete) => {
+  const f = await runtimeFixture(t, async (_url, init) => { outbound.push(String(init?.body)); return completion(); }, async (text, complete) => {
     if (text === '聊聊纸船') { first.resolve(); await release.promise; }
     return complete(text);
   });
@@ -382,7 +501,7 @@ test('another pet can run concurrently without receiving the first pet’s autho
   assert.match(outbound[1]!, /蓝色纸船/);
 });
 
-test('a cancelled turn revokes provider admission before the vault is opened and retains its slot through worker cleanup', useHarness, async t => {
+test('a cancelled turn revokes provider admission before the vault is opened and retains its slot through worker cleanup', useRuntime, async t => {
   const f = await fixture(t, async () => assert.fail('cancelled turn must not dispatch'));
   await f.write('first'); const [first] = await f.routes();
   const entered = deferred<() => Promise<string>>(), release = deferred<void>();
@@ -407,20 +526,17 @@ test('a cancelled turn revokes provider admission before the vault is opened and
   } finally { release.resolve(); turns.close(); }
 });
 
-test('provider truncation is not a successful harness model response', useHarness, async t => {
-  const f = await harnessFixture(t, async () => Response.json({ choices: [{ message: { role: 'assistant', content: '被截断' }, finish_reason: 'length' }] }),
+test('provider truncation is not a successful Agent model response', useRuntime, async t => {
+  const f = await runtimeFixture(t, async () => Response.json({ choices: [{ message: { role: 'assistant', content: '被截断' }, finish_reason: 'length' }] }),
     (text, complete) => complete(text));
   assert.deepEqual((await f.turn()).json(), { ok: false, error: 'invalid_response' });
 });
 
-const useSDK = { skip: process.platform !== 'darwin', timeout: 25_000 };
-const sdkWorker = fileURLToPath(new URL('../src/agent/harness-worker.mjs', import.meta.url));
-
-test('the installed SDK runs a literal text turn through the fixed chat route without forwarding its envelope', useSDK, async t => {
+test('Pi runs a literal text turn through the fixed chat route without forwarding its envelope', useRuntime, async t => {
   const text = '/help\n聊聊纸船';
   const answer = `模型生成后才知道：${randomUUID()}`;
   let sent = 0;
-  const f = await harnessFixture(t, async (url, init) => {
+  const f = await runtimeFixture(t, async (url, init) => {
     sent++;
     assert.equal(url, 'https://first.invalid/v1/chat/completions');
     const { model, tools, messages } = JSON.parse(String(init?.body));
@@ -428,7 +544,7 @@ test('the installed SDK runs a literal text turn through the fixed chat route wi
     assert.deepEqual(JSON.parse(messages.at(-1).content), { question: text, characterContext: { personalMemories: ['蓝色纸船'] } });
     assert.doesNotMatch(String(init?.body), /system-reminder|pet-harness/);
     return completion(answer);
-  }, createHarnessRuntime({ worker: sdkWorker }));
+  }, createPiTextRuntime());
   await f.share();
   const requestID = randomUUID();
   assert.deepEqual((await f.turn({ requestID, text })).json(), { ok: true, requestID, text: answer, replayable: false });
@@ -436,18 +552,26 @@ test('the installed SDK runs a literal text turn through the fixed chat route wi
   assert.equal(sent, 1);
 });
 
-test('missing SDK worker never reads the selected Key or falls back', useSDK, async t => {
-  const f = await harnessFixture(t, async () => assert.fail('must not invoke the model'), createHarnessRuntime({ worker: `${sdkWorker}.missing` }));
-  assert.deepEqual((await f.turn()).json(), { ok: false, error: 'unavailable' });
-  assert.equal(f.reads(), 0);
+test('ordinary identity questions reach the selected Pi-backed model without pulling unrelated memories', useRuntime, async t => {
+  let sent = 0;
+  const f = await runtimeFixture(t, async (_url, init) => {
+    sent++;
+    assert.equal(JSON.parse(String(init?.body)).messages.at(-1).content, '你是谁？');
+    return completion('我是合成桌宠。');
+  }, createPiTextRuntime());
+  await f.share();
+  const result = await f.turn({ text: '你是谁？' });
+  assert.equal(result.statusCode, 200, result.body);
+  assert.equal(result.json().text, '我是合成桌宠。');
+  assert.equal(sent, 1);
 });
 
-test('closing the service stops a real SDK turn and aborts the pending provider', useSDK, async t => {
+test('closing the service stops a Pi turn and aborts the pending provider', useRuntime, async t => {
   const dispatched = deferred<void>(), cancelled = deferred<void>();
-  const f = await harnessFixture(t, async (_url, init) => new Promise((_resolve, reject) => {
+  const f = await runtimeFixture(t, async (_url, init) => new Promise((_resolve, reject) => {
     init!.signal!.addEventListener('abort', () => { cancelled.resolve(); reject(new Error('synthetic abort')); }, { once: true });
     dispatched.resolve();
-  }), createHarnessRuntime({ worker: sdkWorker }));
+  }), createPiTextRuntime());
   const turn = f.turn();
   await Promise.race([dispatched.promise, turn.then(() => assert.fail('provider was not reached'))]);
   await f.app.close();
@@ -464,16 +588,16 @@ test('the fixed chat handler without a configured Runtime cannot invoke the Prov
   assert.equal(f.reads(), 0);
 });
 
-test('a slash-only message is submitted as a literal SDK prompt', useSDK, async t => {
-  const f = await harnessFixture(t, async (_url, init) => {
+test('a slash-only message is submitted as a literal Pi prompt', useRuntime, async t => {
+  const f = await runtimeFixture(t, async (_url, init) => {
     assert.equal(JSON.parse(String(init?.body)).messages.at(-1).content, '/help');
     return completion('合成字面正文回应');
-  }, createHarnessRuntime({ worker: sdkWorker }));
+  }, createPiTextRuntime());
   const result = (await f.turn({ text: '/help' })).json();
   assert.equal(result.text, '合成字面正文回应');
 });
 
-test('cancellation during final verification keeps the same pet slot until verification drains', useHarness, async () => {
+test('cancellation during final verification keeps the same pet slot until verification drains', useRuntime, async () => {
   const turns = new TextChatTurns(syntheticRuntime);
   const rechecking = deferred<void>(), release = deferred<void>();
   const input = { requestID: randomUUID(), petID: 'test-pet', route: { connectionID: 'synthetic', modelEntryID: 'synthetic', fingerprint: 'f'.repeat(64) }, text: '合成正文', history: [] };
@@ -489,7 +613,7 @@ test('cancellation during final verification keeps the same pet slot until verif
   } finally { release.resolve(); await turns.close(); }
 });
 
-test('a Worker failure revokes but does not release a pet slot before its admitted Provider settles', useHarness, async () => {
+test('a Worker failure revokes but does not release a pet slot before its admitted Provider settles', useRuntime, async () => {
   const dispatched = deferred<void>(), release = deferred<void>();
   const turns = new TextChatTurns(async (text, complete) => {
     void complete(text).catch(() => {});
@@ -658,4 +782,86 @@ test('trusted loopback reads older messages without opening a credential or invo
   assert.deepEqual(await requestChatHistory(session, 'detail', { ...input, before: randomUUID() }), { ok: false, error: 'not_found' });
   assert.equal(f.reads(), readsBefore);
   assert.equal(providerCalls, 7);
+});
+
+test('material permission is one-use and bound to exact request before model dispatch', use, async t => {
+  const outbound: string[] = [];
+  const f = await fixture(t, async (_url, init) => {
+    outbound.push(String(init?.body));
+    const tool = (name: string, args: string) => Response.json({ choices: [{ finish_reason: 'tool_calls', message: { role: 'assistant', content: null,
+      tool_calls: [{ id: 'call-one', type: 'function', function: { name, arguments: args } }] } }] });
+    if (outbound.length === 1) return tool('read_task_file', '{"file":1,"offset":0}');
+    return completion();
+  });
+  await f.write('first');
+  const [saved] = await f.routes();
+  const input = { requestID: randomUUID(), petID: f.petID, text: '整理本次材料', history: [], route: saved!.route,
+    attachments: [{ name: 'notes.txt', mediaType: 'text/plain', data: '5L2g5aW9' }] };
+  const send = (payload: object) => f.app.inject({ method: 'POST', url: paths.send, headers, payload });
+  assert.equal((await send(input)).json().error, 'approval_required');
+  assert.equal(outbound.length, 0);
+  const approval = await f.app.inject({ method: 'POST', url: '/v1/chat/approve-materials', headers, payload: input });
+  assert.equal(approval.statusCode, 200);
+  const replacement = await f.app.inject({ method: 'POST', url: '/v1/chat/approve-materials', headers, payload: input });
+  assert.equal(replacement.statusCode, 200);
+  assert.notEqual(approval.json().grant, replacement.json().grant);
+  assert.equal((await send({ ...input, materialGrant: approval.json().grant })).json().error, 'approval_required');
+  const { grant } = replacement.json();
+  assert.equal((await send({ ...input, text: '不同的指令', materialGrant: grant })).json().error, 'approval_required');
+  const granted = await send({ ...input, materialGrant: grant });
+  assert.equal(granted.statusCode, 200, granted.body);
+  assert.equal((await send({ ...input, materialGrant: grant })).json().error, 'approval_required');
+  assert.equal(outbound.length, 2);
+  assert.match(outbound[0]!, /整理本次材料/);
+  assert.doesNotMatch(outbound[0]!, /verify_task_tools|notes.txt|你好/);
+  assert.match(outbound[1]!, /你好/);
+});
+
+test('mixed Responses inputs cannot bypass bounded text tools and use the saved streaming transport', use, async t => {
+  const outbound: Record<string, any>[] = [];
+  const f = await fixture(t, async (_url, init) => {
+    const body = JSON.parse(String(init?.body)); outbound.push(body);
+    if (body.stream !== true) return new Response(null, { status: 400 });
+    const output = outbound.length === 1 ? [
+      { type: 'reasoning', id: 'rs_1', encrypted_content: 'opaque-sealed-data', summary: [] },
+      { type: 'function_call', id: 'fc_1', call_id: 'call-one', name: 'read_task_file', arguments: '{"file":1,"offset":0}' },
+    ] : [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '已处理本轮材料' }] }];
+    return new Response(`event: response.completed\ndata: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed', output } })}\n\n`, { headers: { 'content-type': 'text/event-stream' } });
+  }, undefined, createPiTextRuntime());
+  const draft = writeDraft('mixed'); draft.apiProtocol = 'responses'; draft.models[0]!.inputModalities = ['image'];
+  assert.ok((await f.models.run('save', { connection: draft, expectedRevision: 0, credential: { kind: 'keep' } })).ok);
+  const [saved] = await f.routes();
+  const image = { name: 'diagram.png', mediaType: 'image/png', data: 'iVBORw0KGgoAAAAA' };
+  const text = (value: string) => ({ name: 'private-name.txt', mediaType: 'text/plain', data: Buffer.from(value).toString('base64') });
+  const rejected = await f.send(saved!.route, { attachments: [image, text('password policy')] });
+  assert.equal(rejected.statusCode, 400, rejected.body);
+  assert.equal(outbound.length, 0);
+  const sent = await f.send(saved!.route, { attachments: [image, text('你好' + '另'.repeat(600))] });
+  assert.equal(sent.statusCode, 200, sent.body);
+  assert.equal(outbound.length, 2);
+  assert.deepEqual(outbound[0]!.input[0].content.map(({ type }: { type: string }) => type), ['input_text', 'input_image']);
+  assert.doesNotMatch(JSON.stringify(outbound), /private-name|另{421}|verify_task_tools/);
+  assert.doesNotMatch(JSON.stringify(outbound[0]), /你好/);
+  assert.match(JSON.stringify(outbound[1]), /你好/);
+  assert.ok(outbound[1]!.input.some(({ type, encrypted_content }: { type: string; encrypted_content?: string }) => type === 'reasoning' && encrypted_content === 'opaque-sealed-data'));
+});
+
+test('project registration and chat scope stay local; unknown projects never dispatch', use, async t => {
+ const outbound: string[] = [];
+ const f = await fixture(t, async (_url, init) => { outbound.push(String(init?.body)); return completion(); }, undefined, syntheticRuntime, true);
+ await f.write('first'); const [first] = await f.routes();
+ const project = { id: randomUUID(), name: '合成项目目录' };
+ const payload = { petID: f.petID, project };
+ const pendingConversation = { id: randomUUID(), mode: 'new', projectID: project.id };
+ const invalid = await f.send(first!.route, { conversation: pendingConversation });
+ assert.equal(invalid.json().error, 'conversation_missing');
+ assert.equal(outbound.length, 0); assert.equal(f.reads(), 0);
+ const register = await f.app.inject({ method: 'POST', url: chatHistoryPaths.createProject, headers, payload });
+ assert.deepEqual(register.json(), { ok: true, project });
+ const list = await f.app.inject({ method: 'POST', url: chatHistoryPaths.projects, headers, payload: { petID: f.petID } });
+ assert.deepEqual(list.json(), { ok: true, projects: [project] });
+ assert.equal((await f.send(first!.route, { conversation: pendingConversation })).statusCode, 200);
+ const history = await f.app.inject({ method: 'POST', url: chatHistoryPaths.list, headers, payload: { petID: f.petID, projectID: project.id } });
+ assert.equal(history.json().page.rows[0].projectID, project.id);
+ assert.doesNotMatch(outbound[0]!, /合成项目目录|projectID/);
 });

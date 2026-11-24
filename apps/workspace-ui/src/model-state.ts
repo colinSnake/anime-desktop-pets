@@ -1,4 +1,4 @@
-import { isProbeReply, probeError, validProbeInput, type ModelProbeInput, type ModelProbeOperation, type ModelProbeReply } from '../../../packages/contracts/src/model-probe.ts';
+import { validProbeRecord, isProbeReply, isRecordedProbeFailure, probeError, validProbeInput, type ModelProbeInput, type ModelProbeOperation, type ModelProbeReply } from '../../../packages/contracts/src/model-probe.ts';
 import { normalizeModelBaseURL, validDiscoveryCandidate, validModelAPIKey, type ModelCandidate, type ModelDiscoveryError, type ModelDiscoveryReply, type ModelDefault, type ModelDraft, type ModelEntry, type ModelProtocol, type ModelsBridge, type ModelWorkspaceReply, type SavedModelConfiguration, type SavedModelConnection } from '../../../packages/contracts/src/models.ts';
 
 export const modelProtocols: Record<ModelProtocol, string> = {
@@ -38,6 +38,7 @@ export const probeResultKey = (id: string, entry: string) => JSON.stringify([id,
 export type ModelWorkspaceState = {
   discovery?: Discovery;
   connectionTest?: ConnectionTest;
+  probeStorageUnavailable?: true;
   probeResults?: ReadonlyMap<string, Extract<ConnectionTest, { kind: 'result' }>>;
   configuration?: SavedModelConfiguration;
   drafts: ReadonlyMap<string, DraftState>;
@@ -310,6 +311,7 @@ export class ModelWorkspaceController {
   connectionTestBlockedReason(id: string, entryID?: string): string | undefined {
     const saved = this.saved(id), draft = this.state.drafts.get(id);
     if (!this.bridge?.testConnection || !this.bridge.cancelConnectionTest) return '此工作区未接入连接测试。';
+    if (this.state.probeStorageUnavailable) return '连接测试记录暂不可读取，请重新读取后再试。';
     if (!saved) return '请先保存连接，再测试。';
     if (this.stale(id) || this.state.needsRefresh || this.state.requiresRestart) return '请先核对已保存的连接版本。';
     if (draft && (draft.detach || draft.proposedProtocol || draft.edit.baseURL !== saved.baseURL ||
@@ -344,8 +346,10 @@ export class ModelWorkspaceController {
     catch { result = probeError('unavailable'); }
     if (this.state.connectionTest !== pending || this.saved(id)?.revision !== input.expectedRevision) return;
     const completed = { kind: 'result', input: pending.input, result } as const;
-    this.update({ connectionTest: completed, probeResults: this.state.drafts.has(id) ? this.state.probeResults
-      : new Map(this.state.probeResults).set(probeResultKey(id, input.entryID), completed) });
+    const recorded = result.ok || isRecordedProbeFailure(result.error);
+    this.update({ connectionTest: completed, ...(recorded && !this.state.drafts.has(id) ? {
+      probeResults: new Map(this.state.probeResults).set(probeResultKey(id, input.entryID), completed),
+    } : {}) });
     return result;
   }
   cancelConnectionTest(id?: string, showCancellation = false): void {
@@ -353,9 +357,7 @@ export class ModelWorkspaceController {
     if (!current || id !== undefined && id !== current.input.connectionID) return;
     const cancelled = showCancellation && current.kind === 'pending'
       ? { kind: 'result', input: current.input, result: probeError('cancelled') } as const : undefined;
-    this.update({ connectionTest: cancelled, ...(cancelled && !this.state.drafts.has(current.input.connectionID) ? {
-      probeResults: new Map(this.state.probeResults).set(probeResultKey(current.input.connectionID, current.input.entryID), cancelled),
-    } : {}) });
+    this.update({ connectionTest: cancelled });
     if (current.kind === 'pending') void this.bridge?.cancelConnectionTest?.(current.input.operationID).catch(() => {});
   }
   async discover(id: string): Promise<void> {
@@ -432,9 +434,23 @@ export class ModelWorkspaceController {
       return [[id, new Set([...items].filter(entry => entryIDs.has(entry)))]] as const;
     }));
     const revisions = new Map(result.configuration.connections.map(connection => [connection.id, connection.revision]));
-    const probeResults = new Map([...(this.state.probeResults ?? [])].filter(([, item]) =>
+    // A successful list replaces the evidence, including an empty or unreadable store.
+    // Mutation responses do not carry probe records; retain only unchanged revisions there.
+    const probeResults = new Map(kind === 'load' ? [] : [...(this.state.probeResults ?? [])].filter(([, item]) =>
       revisions.get(item.input.connectionID) === item.input.expectedRevision));
+    for (const record of result.probeResults ?? []) {
+      if (!validProbeRecord(record)) continue;
+      const connection = result.configuration.connections.find(item => item.id === record.input.connectionID);
+      const entry = connection?.models.find(item => item.entryID === record.input.entryID);
+      // Draft probes are retained on disk, but cannot validate a different saved model/settings.
+      if (!connection || !entry || connection.revision !== record.input.expectedRevision || entry.modelID !== record.input.modelID ||
+          entry.maxOutputTokens !== record.input.maxOutputTokens ||
+          (entry.compatibility.outputTokenField ?? connection.compatibility.outputTokenField) !== record.input.outputTokenField) continue;
+      probeResults.set(probeResultKey(connection.id, entry.entryID), { kind: 'result',
+        input: { ...record.input, operationID: 'persisted-probe' }, result: record.result });
+    }
     this.update({ configuration: result.configuration, drafts, expanded, expandedModels, probeResults, needsRefresh: !!durability,
+      ...(kind === 'load' ? { probeStorageUnavailable: result.probeStorageUnavailable } : {}),
       requiresRestart: this.state.requiresRestart || result.writesBlocked === true, operation: undefined,
       feedback: kind === 'load' ? undefined : { id: kind === 'remove' ? undefined : id, text: note + durability + retained } });
     return true;

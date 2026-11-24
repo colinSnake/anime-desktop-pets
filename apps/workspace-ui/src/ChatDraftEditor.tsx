@@ -58,7 +58,7 @@ function $writeDraft(draft: ChatDraft) {
 }
 
 export function ChatDraftEditor({ input, hidden, draft, editable, placeholder, invalid, describedBy, onDraft, onTrouble, onKeyDown, onCompose }: {
-  input: RefObject<HTMLDivElement | null>; hidden: boolean; draft: ChatDraft; editable: boolean; placeholder: string; invalid: boolean; describedBy: string;
+  input: RefObject<HTMLDivElement | null>; hidden: boolean; draft: ChatDraft; editable: boolean; placeholder: string; invalid: boolean; describedBy?: string;
   onDraft(value: ChatDraft): boolean; onTrouble(value: 'limit' | 'broken' | ''): void;
   onKeyDown: KeyboardEventHandler<HTMLDivElement>; onCompose(active: boolean): void;
 }) {

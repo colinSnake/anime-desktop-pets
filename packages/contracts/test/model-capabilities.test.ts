@@ -2,12 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { modelReasoningLevels, validModelCapabilities } from '../src/model-capabilities.ts';
 
-test('reasoning controls are limited to exact reviewed OpenAI Responses model identities', () => {
+test('reasoning controls are limited to exact reviewed provider, endpoint, protocol and model identities', () => {
   assert.deepEqual(modelReasoningLevels({ protocol: 'responses', baseURL: 'https://api.openai.com/v1', modelID: 'gpt-6.2-astra' }),
     ['low', 'medium', 'high', 'xhigh', 'max']);
   assert.deepEqual(modelReasoningLevels({ protocol: 'responses', baseURL: 'https://gateway.example/v1', modelID: 'gpt-6.2-astra' }), []);
   assert.deepEqual(modelReasoningLevels({ protocol: 'responses', baseURL: 'https://api.openai.com/v1', modelID: 'unknown-model' }), []);
   assert.deepEqual(modelReasoningLevels({ protocol: 'chat-completions', baseURL: 'https://api.openai.com/v1', modelID: 'gpt-6.2-astra' }), []);
+  assert.deepEqual(modelReasoningLevels({ protocol: 'responses', baseURL: 'https://timicc.com/v1', modelID: 'gpt-6.2-sol' }), ['low', 'medium', 'high', 'xhigh']);
+  assert.deepEqual(modelReasoningLevels({ protocol: 'chat-completions', baseURL: 'https://api.deepseek.com/v1', modelID: 'deepseek-flash' }), ['none', 'low', 'high', 'max']);
+  assert.deepEqual(modelReasoningLevels({ protocol: 'chat-completions', baseURL: 'https://gateway.example/v1', modelID: 'deepseek-flash' }), []);
 });
 
 test('saved model capabilities reject cross-protocol modalities and unsupported reasoning values', () => {

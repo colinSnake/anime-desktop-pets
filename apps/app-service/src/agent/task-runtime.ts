@@ -1,9 +1,10 @@
 import { acceptedTaskResult, type AgentTaskCreate, type AgentTaskPhase } from '../../../../packages/contracts/src/agent-tasks.ts';
-import { validateChatAttachments } from '../../../../packages/contracts/src/chat-attachments.ts';
+import { validateChatAttachments, type ValidatedChatAttachment } from '../../../../packages/contracts/src/chat-attachments.ts';
 import { credentialLikeText } from '../../../../packages/contracts/src/character-records.ts';
 import { shape } from '../../../../packages/contracts/src/pets.ts';
 import { ModelError } from '../models/errors.ts';
-import type { JsonObject, ModelInput, ModelMessage, ModelReply, ToolDefinition } from '../models/types.ts';
+import { runPiAgent } from './pi-runtime.ts';
+import type { JsonObject, ModelInput, ModelReply, ToolDefinition } from '../models/types.ts';
 
 const object = (properties: JsonObject, required: string[]): JsonObject => ({ type: 'object', properties, required, additionalProperties: false });
 const integer = { type: 'integer', minimum: 1 };
@@ -16,23 +17,11 @@ const invalid = (): never => { throw new ModelError('invalid_response'); };
 const check = (signal: AbortSignal) => { if (signal.aborted) throw new ModelError('cancelled'); };
 const windowSize = 420; // Code points; leaves room for the protocol's aggregate history budget.
 export async function runAgentTask(task: AgentTaskCreate, signal: AbortSignal,
- complete: (input: ModelInput) => Promise<ModelReply>, progress?: (phase: AgentTaskPhase, percent: number) => Promise<void>, verifyUnknownTools = false): Promise<string> {
+ complete: (input: ModelInput) => Promise<ModelReply>, progress?: (phase: AgentTaskPhase, percent: number) => Promise<void>, media?: ValidatedChatAttachment[]): Promise<string> {
  check(signal);
  const validated = validateChatAttachments(task.files, task.prompt);
  if (!validated.ok || !validated.attachments.length || validated.attachments.some(file => file.text === undefined || credentialLikeText(file.text))) {
   throw new ModelError('invalid_request');
- }
- if (verifyUnknownTools) {
-  // No task text, file metadata or user content leaves until this fixed check returns the expected call.
-  await progress?.('thinking', 10);
-  check(signal);
-  const verification = await complete({ messages: [{ role: 'user', text: 'Call verify_task_tools with no arguments. Do not reply with text.' }],
-   tools: [{ name: 'verify_task_tools', description: 'Confirm that function calling works.', parameters: object({}, []) }] });
-  check(signal);
-  const calls = verification.message.toolCalls;
-  if (verification.stop !== 'tools' || calls?.length !== 1 || calls[0]!.name !== 'verify_task_tools' || !shape(calls[0]!.arguments, [])) {
-   throw new ModelError('tools_unavailable');
-  }
  }
  const files = validated.attachments.map(({ text }, i) => ({ id: i + 1, points: Array.from(text!) }));
  const permission = task.executionPermission?.mode ?? 'ask';
@@ -57,28 +46,14 @@ export async function runAgentTask(task: AgentTaskCreate, signal: AbortSignal,
   const offset = Array.from(full.slice(0, at)).length;
   return { file: file.id, found: true, offset, text: file.points.slice(offset, offset + windowSize).join('') };
  };
- const messages: ModelMessage[] = [{ role: 'user', text: task.prompt }];
- let remaining = 3300, calls = 0;
- for (let round = 0; round <= 5; round++) {
-  check(signal);
-  await progress?.('thinking', 20 + round * 12);
-  check(signal);
-  const reply = await complete({ system, messages: [...messages], tools });
-  check(signal);
-  const next = reply.message.toolCalls ?? [];
-  if (reply.stop === 'end' && !next.length && acceptedTaskResult(reply.message.text)) return reply.message.text.trim();
-  if (reply.stop !== 'tools' || round === 5 || !next.length || (calls += next.length) > 8 || messages.length + next.length + 1 > 12) return invalid();
-  const results: ModelMessage[] = next.map(call => {
-   const text = JSON.stringify(execute(call.name, call.arguments));
-   remaining -= text.length;
-   if (remaining < 0) return invalid();
-   return { role: 'tool', toolCallID: call.id, text };
-  });
-  remaining -= reply.message.text.length;
-  if (remaining < 0) return invalid();
-  // Preserve provider-native continuation metadata attached by the decoder, never persist it.
-  messages.push(reply.message, ...results);
-  await progress?.('reading', 25 + round * 12);
- }
- return invalid();
+ let round = 0;
+ return runPiAgent({ text: task.prompt, system, signal, attachments: media, acceptReply: acceptedTaskResult,
+  tools: tools.map(tool => ({ ...tool, execute: args => JSON.stringify(execute(tool.name, args)) })),
+  complete: async input => {
+   await progress?.('thinking', 20 + round++ * 12);
+   check(signal);
+   return complete(input);
+  },
+  afterTools: async () => { await progress?.('reading', 25 + (round - 1) * 12); },
+ });
 }

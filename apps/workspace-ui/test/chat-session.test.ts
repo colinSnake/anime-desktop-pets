@@ -231,6 +231,7 @@ test('saved default is pinned; context and other destinations never feed the nex
 test('selected attachments are sent only with the current turn and clear after a verified reply', async () => {
  const sent: OnlineChatInput[] = [];
  const c = new ChatWorkspaceController(undefined, undefined, {
+  approveMaterials: async () => ({ ok: true, grant: '11111111-1111-4111-8111-111111111111' }),
   list: async () => ({ ok: true, models: onlineOptions }), cancel: async () => {},
   send: async input => { sent.push(input); return { ok: true, requestID: input.requestID, text: '已读附件', replayable: false }; },
  });
@@ -238,7 +239,10 @@ test('selected attachments are sent only with the current turn and clear after a
  const files: ChatAttachment[] = [{ name: 'notes.txt', mediaType: 'text/plain', data: '5L2g5aW9' }];
  assert.equal(c.setAttachments('pet-one', files), true);
  c.edit('请整理附件');
- assert.equal(await c.send(), true);
+ assert.equal(await c.send(), false);
+ assert.equal(sent.length, 0);
+ assert.equal(c.getSnapshot().session.awaitingApproval, true);
+ assert.equal(await c.resolveMaterialApproval(true), true);
  assert.deepEqual(sent[0]?.attachments, files);
  assert.deepEqual(c.getSnapshot().session.attachments, []);
  assert.equal(JSON.stringify(c.getSnapshot()).includes(files[0]!.data), false);
@@ -248,6 +252,7 @@ test('cancel and pet switch clear in-memory attachments and do not make them ret
  const sent: OnlineChatInput[] = [];
  const reply = deferred<ChatSendResult>();
  const c = new ChatWorkspaceController(undefined, undefined, {
+  approveMaterials: async () => ({ ok: true, grant: '11111111-1111-4111-8111-111111111111' }),
   list: async () => ({ ok: true, models: onlineOptions }), cancel: async () => {},
   send: input => { sent.push(input); return reply.promise; },
  });
@@ -255,7 +260,9 @@ test('cancel and pet switch clear in-memory attachments and do not make them ret
  const files: ChatAttachment[] = [{ name: 'notes.txt', mediaType: 'text/plain', data: '5L2g5aW9' }];
  assert.equal(c.setAttachments('pet-one', files), true);
  c.edit('请整理附件');
- const pending = c.send();
+ assert.equal(await c.send(), false);
+ const pending = c.resolveMaterialApproval(true);
+ await Promise.resolve();
  assert.deepEqual(sent[0]?.attachments, files);
  c.cancel();
  assert.deepEqual(c.getSnapshot().session.attachments, []);
@@ -270,6 +277,40 @@ test('cancel and pet switch clear in-memory attachments and do not make them ret
  assert.deepEqual(c.getSnapshot().session.attachments, []);
 });
 
+test('a submitted online failure leaves the editor empty and can explicitly restore the frozen draft and selection', async () => {
+ const reply = deferred<ChatSendResult>(), calls: OnlineChatInput[] = [];
+ const c = new ChatWorkspaceController(undefined, undefined, { list: async () => ({ ok: true, models: onlineOptions }), cancel: async () => {},
+  send: input => { calls.push(input); return reply.promise; } });
+ c.syncCharacters(characters); await c.refreshModels();
+ const draft = { text: ' 原稿 ', selection: { anchor: 4, focus: 1 } };
+ assert.equal(c.editDraft('pet-one', draft), true);
+ const pending = c.send();
+ assert.equal(c.getSnapshot().session.draft, '');
+ reply.resolve({ ok: false, error: 'invalid_response' });
+ assert.equal(await pending, false);
+ assert.equal(c.getSnapshot().session.draft, '');
+ assert.equal(c.getSnapshot().session.turns.length, 1);
+ assert.equal(c.getSnapshot().canRetry, true);
+ assert.equal(calls.length, 1);
+ c.restoreDraft();
+ assert.deepEqual(c.getSnapshot().session.draftSnapshot, draft);
+ assert.equal(await c.retry(), false);
+ assert.equal(c.getSnapshot().session.draft, '');
+ assert.equal(c.getSnapshot().session.turns.length, 1);
+ assert.equal(calls.length, 2);
+});
+
+test('retry keeps newer editing even when its text equals the failed online turn', async () => {
+ const c = new ChatWorkspaceController(undefined, undefined, { list: async () => ({ ok: true, models: onlineOptions }), cancel: async () => {},
+  send: async () => ({ ok: false, error: 'invalid_response' }) });
+ c.syncCharacters(characters); await c.refreshModels(); c.edit('同文');
+ assert.equal(await c.send(), false);
+ const newer = { text: '同文', selection: { anchor: 0, focus: 0 } };
+ c.editDraft('pet-one', newer);
+ assert.equal(await c.retry(), false);
+ assert.deepEqual(c.getSnapshot().session.draftSnapshot, newer);
+});
+
 test('online retry does not silently replace a stale route and cancellation reaches the bridge', async () => {
  const sent: OnlineChatInput[] = [], cancelled: string[] = [];
  let options = onlineOptions;
@@ -282,6 +323,8 @@ test('online retry does not silently replace a stale route and cancellation reac
  assert.equal(await pending, false);
  c.selectCharacter('pet-one'); options = [onlineOptions[1]!]; await c.refreshModels();
  assert.equal(await c.retry(), false); assert.equal(sent.length, 1);
+ assert.equal(c.getSnapshot().session.draft, '');
+ c.restoreDraft();
  assert.equal(c.getSnapshot().session.draft, '当前问题');
 });
 
@@ -304,7 +347,7 @@ test('local shortcuts insert only into the current empty draft, without running 
  assert.equal(c.getSnapshot().session.draft, '手写草稿');
  const disconnected = new ChatWorkspaceController();
  disconnected.syncCharacters([{id:'one',name:'龙妹'}]);
- assert.equal(disconnected.prefillLocalShortcut('你是谁'), false);
+ assert.equal(disconnected.prefillLocalShortcut('查看本机身份'), false);
 });
 
 test('editor drafts keep semantic offsets per pet, reject delayed cross-pet events and restore the exact failed snapshot', async () => {
@@ -489,6 +532,9 @@ test('sending the same failed durable turn after changing models reconciles it w
  assert.equal(await c.send(), false);
  c.selectModel(c.getSnapshot().models[1]!.id);
  assert.equal(c.getSnapshot().canRetry, false);
+ assert.equal(c.getSnapshot().session.draft, '');
+ assert.equal(await c.send(), false);
+ c.restoreDraft();
  assert.equal(await c.send(), true);
  assert.equal(sent[0]?.turnID, sent[1]?.turnID);
  assert.notEqual(sent[0]?.requestID, sent[1]?.requestID);
@@ -514,4 +560,247 @@ test('a page of older messages cannot replace the latest detail when resuming a 
  assert.equal(c.getSnapshot().session.draft, '现有聊天草稿');
  assert.equal(c.continueConversation('pet-one', savedDetail), true);
  assert.deepEqual(c.getSnapshot().session.turns.map(turn => turn.text), [savedTurn.user, savedTurn.assistant]);
+});
+
+test('chat thinking starts high, stays scoped to the selected route and freezes for retry', async () => {
+ const sent: OnlineChatInput[] = [];
+ const c = new ChatWorkspaceController(undefined, undefined, {
+  list: async () => ({ ok: true, models: [
+   { ...onlineOptions[0]!, reasoningLevels: ['low', 'high', 'xhigh'], reasoningEffort: 'high' }, onlineOptions[1]!,
+  ] }), cancel: async () => {},
+  send: async input => {
+   sent.push(input);
+   return sent.length === 1 ? { ok: false, error: 'upstream_unavailable' } : { ok: true, requestID: input.requestID, text: '合成回复', replayable: false };
+  },
+ });
+ c.syncCharacters(characters); await c.refreshModels();
+ assert.equal(c.getSnapshot().session.reasoningEffort, 'high');
+ assert.equal(c.getSnapshot().models[0]?.providerName, '服务甲');
+ c.selectReasoning('low'); c.selectReasoning('none');
+ c.edit('合成问题'); assert.equal(await c.send(), false);
+ c.selectReasoning('xhigh');
+ assert.equal(await c.retry(), true);
+ assert.deepEqual(sent.map(input => input.reasoningEffort), ['low', 'low']);
+ c.selectCharacter('pet-two'); assert.equal(c.getSnapshot().session.reasoningEffort, 'high');
+ c.selectCharacter('pet-one'); assert.equal(c.getSnapshot().session.reasoningEffort, 'xhigh');
+ c.selectModel(c.getSnapshot().models[1]!.id);
+ assert.equal(c.getSnapshot().session.reasoningEffort, undefined);
+ c.edit('不支持思考'); assert.equal(await c.send(), true);
+ assert.equal(sent.at(-1)?.reasoningEffort, undefined);
+});
+
+test('full permission can be selected before composing but never preapproves future attachments', async () => {
+ const sent: OnlineChatInput[] = [], grants: OnlineChatInput[] = [];
+ const c = new ChatWorkspaceController(undefined, undefined, {
+  list: async () => ({ ok: true, models: onlineOptions }), cancel: async () => {},
+  approveMaterials: async input => { grants.push(input); return { ok: true, grant: crypto.randomUUID() }; },
+  send: async input => { sent.push(input); return { ok: true, requestID: input.requestID, text: '合成回复', replayable: false }; },
+ });
+ c.syncCharacters(characters); await c.refreshModels();
+ const editor = c.getSnapshot().session.editorKey;
+ const files: ChatAttachment[] = [{ name: 'notes.txt', mediaType: 'text/plain', data: '5L2g5aW9' }];
+ assert.equal(c.setMaterialPermission(true, editor), true);
+ assert.equal(c.getSnapshot().session.fullyAllowed, true);
+ assert.equal(c.getSnapshot().session.awaitingApproval, undefined);
+ assert.equal(grants.length, 0); assert.equal(sent.length, 0);
+ c.edit('整理材料');
+ assert.equal(c.getSnapshot().session.fullyAllowed, undefined);
+ assert.equal(c.setMaterialPermission(true, editor), true);
+ assert.equal(c.getSnapshot().session.fullyAllowed, true);
+ assert.equal(c.setAttachments('pet-one', files, editor), true);
+ assert.equal(c.getSnapshot().session.fullyAllowed, undefined);
+ assert.equal(await c.send(), false);
+ assert.equal(c.getSnapshot().session.awaitingApproval, true);
+ assert.equal(grants.length, 0); assert.equal(sent.length, 0);
+});
+
+test('a full permission confirmation cannot authorize attachments changed while the warning was open', async () => {
+ const c = new ChatWorkspaceController(undefined, undefined, {
+  list: async () => ({ ok: true, models: onlineOptions }), cancel: async () => {},
+  approveMaterials: async () => ({ ok: false, error: 'unavailable' }),
+  send: async () => { assert.fail('unexpected outbound request'); },
+ });
+ c.syncCharacters(characters); await c.refreshModels();
+ c.edit('整理材料');
+ const { editorKey, materialPermissionKey } = c.getSnapshot().session;
+ assert.ok(materialPermissionKey);
+ c.syncCharacters(characters);
+ assert.equal(c.getSnapshot().session.materialPermissionKey, materialPermissionKey);
+ assert.equal(c.setAttachments('pet-one', [{ name: 'notes.txt', mediaType: 'text/plain', data: '5L2g5aW9' }], editorKey), true);
+ assert.notEqual(c.getSnapshot().session.materialPermissionKey, materialPermissionKey);
+ assert.equal(c.setMaterialPermission(true, editorKey, materialPermissionKey), false);
+ assert.equal(c.getSnapshot().session.fullyAllowed, undefined);
+ assert.equal(await c.send(), false);
+ assert.equal(c.getSnapshot().session.awaitingApproval, true);
+});
+
+test('full permission resets on edits, and skipping an approval sends only the message', async () => {
+ const sent: OnlineChatInput[] = [], grants: OnlineChatInput[] = [];
+ const c = new ChatWorkspaceController(undefined, undefined, {
+  list: async () => ({ ok: true, models: onlineOptions }), cancel: async () => {},
+  approveMaterials: async input => { grants.push(input); return { ok: true, grant: crypto.randomUUID() }; },
+  send: async input => { sent.push(input); return { ok: true, requestID: input.requestID, text: '合成回复', replayable: false }; },
+ });
+ c.syncCharacters(characters); await c.refreshModels();
+ const files: ChatAttachment[] = [{ name: 'notes.txt', mediaType: 'text/plain', data: '5L2g5aW9' }];
+ const editor = c.getSnapshot().session.editorKey;
+ c.edit('整理材料'); c.setAttachments('pet-one', files, editor);
+ assert.equal(c.setMaterialPermission(true, editor), true);
+ assert.equal(c.getSnapshot().session.fullyAllowed, true);
+ c.edit('新的问题');
+ assert.equal(c.getSnapshot().session.fullyAllowed, undefined);
+ assert.equal(await c.send(), false);
+ assert.equal(c.getSnapshot().session.awaitingApproval, true);
+ assert.equal(await c.resolveMaterialApproval(false), true);
+ assert.equal(grants.length, 0); assert.equal(sent[0]?.attachments, undefined);
+ assert.equal(sent[0]?.text, '新的问题');
+ c.edit('整理附件'); c.setAttachments('pet-one', files, editor);
+ assert.equal(c.setMaterialPermission(true, editor), true);
+ assert.equal(await c.send(), true);
+ assert.equal(grants.length, 1); assert.deepEqual(sent[1]?.attachments, files);
+ assert.equal(c.getSnapshot().session.fullyAllowed, undefined);
+});
+
+test('project conversation stays pinned and changing conversations clears attachment permission but not the draft', async () => {
+ const sent: OnlineChatInput[] = [];
+ const c = new ChatWorkspaceController(undefined, undefined, {
+  list: async () => ({ ok: true, models: onlineOptions, persistentConversations: true }), cancel: async () => {},
+  approveMaterials: async () => ({ ok: false, error: 'unavailable' }),
+  send: async input => { sent.push(input); return { ok: true, requestID: input.requestID, text: '合成回复', replayable: true }; },
+ }, undefined, true);
+ c.syncCharacters(characters); await c.refreshModels();
+ const projectID = crypto.randomUUID();
+ assert.equal(c.newConversation(projectID), true);
+ c.edit('整理材料'); c.setAttachments('pet-one', [{ name: 'notes.txt', mediaType: 'text/plain', data: '5L2g5aW9' }]);
+ assert.equal(c.setMaterialPermission(true, c.getSnapshot().session.editorKey), true);
+ assert.equal(c.newConversation(), true);
+ const saved = c.getSnapshot().detachedDrafts[0]!;
+ assert.ok(c.openDetachedDraft(saved.id));
+ assert.equal(c.getSnapshot().session.draft, '整理材料');
+ assert.deepEqual(c.getSnapshot().session.attachments, []);
+ assert.equal(c.getSnapshot().session.fullyAllowed, undefined);
+ assert.equal(await c.send(), true);
+ c.edit('继续讨论'); assert.equal(await c.send(), true);
+ assert.equal(sent[0]?.conversation?.projectID, projectID);
+ assert.deepEqual(sent[1]?.conversation, { ...sent[0]?.conversation, mode: 'resume' });
+ assert.equal(c.newConversation(), true);
+ c.edit('独立聊天'); assert.equal(await c.send(), true);
+ assert.notEqual(sent[2]?.conversation?.id, sent[0]?.conversation?.id);
+ assert.equal(sent[2]?.conversation?.projectID, undefined);
+});
+
+test('the explicit local identity shortcut stays local without a model call', async () => {
+ const queries: string[] = [];
+ let sends = 0;
+ const c = new ChatWorkspaceController(undefined, { localChatContext: async ({ petID, intent }) => {
+  queries.push(intent); return { ok: true, petID, text: '我是合成伙伴。尚未设置本机身份。' };
+ } }, { list: async () => ({ ok: true, models: [] }), send: async () => { sends++; throw Error('local query must not dispatch'); }, cancel: async () => {} });
+ c.syncCharacters([{ id: 'pet-one', name: '合成伙伴' }]);
+ for (const question of ['查看本机身份', '查看本机身份？']) {
+  c.edit(question);
+  assert.equal(await c.send(), true);
+  assert.equal(c.getSnapshot().session.draft, '');
+  assert.equal(c.getSnapshot().session.turns.at(-1)?.localOnly, true);
+  assert.match(c.getSnapshot().session.turns.at(-1)?.text ?? '', /我是合成伙伴/);
+ }
+ assert.deepEqual(queries, ['identity', 'identity']);
+ assert.equal(sends, 0);
+});
+
+test('ordinary identity questions use the selected online model and never the local identity bridge', async () => {
+ const sent: OnlineChatInput[] = [];
+ const c = new ChatWorkspaceController(undefined, { localChatContext: async () => {
+  assert.fail('ordinary identity questions must not query local identity');
+ } }, { list: async () => ({ ok: true, models: onlineOptions }), send: async input => {
+  sent.push(input); return { ok: true, requestID: input.requestID, text: '合成在线身份回复', replayable: true };
+ }, cancel: async () => {} });
+ c.syncCharacters(characters); await c.refreshModels();
+ c.edit('你是谁？');
+ assert.equal(await c.send(), true);
+ assert.equal(sent.length, 1);
+ assert.equal(sent[0]?.text, '你是谁？');
+ assert.equal(c.getSnapshot().session.draft, '');
+ assert.deepEqual(c.getSnapshot().session.turns.map(turn => [turn.text, turn.localOnly]), [
+  ['你是谁？', undefined], ['合成在线身份回复', undefined],
+ ]);
+});
+
+test('ordinary identity questions without models preserve the normal model-selection state and draft', async () => {
+ const c = new ChatWorkspaceController(undefined, { localChatContext: async () => {
+  assert.fail('ordinary identity questions must not query local identity');
+ } }, { list: async () => ({ ok: true, models: [] }), send: async () => {
+  assert.fail('no model is available');
+ }, cancel: async () => {} });
+ c.syncCharacters(characters); await c.refreshModels();
+ const before = c.getSnapshot();
+ c.edit('你是谁？');
+ assert.equal(await c.send(), false);
+ assert.equal(c.getSnapshot().available, before.available);
+ assert.equal(c.getSnapshot().session.status, before.session.status);
+ assert.equal(c.getSnapshot().session.model, undefined);
+ assert.equal(c.getSnapshot().session.draft, '你是谁？');
+ assert.deepEqual(c.getSnapshot().session.turns, []);
+});
+
+test('voice transcription fills only its unchanged empty local draft and never sends it', () => {
+ const c = setup(async () => { assert.fail('draft import must not send'); });
+ const initial = c.getSnapshot().session;
+ c.edit('自己输入');
+ assert.equal(c.importVoiceDraft('pet-one', initial.editorKey, initial.draftSnapshot, '合成转写'), false);
+ c.edit('');
+ assert.equal(c.importVoiceDraft('pet-one', initial.editorKey, initial.draftSnapshot, '合成转写'), false);
+ const empty = c.getSnapshot().session;
+ c.selectCharacter('pet-two');
+ assert.equal(c.importVoiceDraft('pet-one', empty.editorKey, empty.draftSnapshot, '合成转写'), false);
+ c.selectCharacter('pet-one');
+ assert.equal(c.importVoiceDraft('pet-one', empty.editorKey, empty.draftSnapshot, 'invalid\nline'), false);
+ assert.equal(c.importVoiceDraft('pet-one', empty.editorKey, empty.draftSnapshot, '合成转写'), true);
+ assert.deepEqual(c.getSnapshot().session.draftSnapshot, textDraft('合成转写'));
+ assert.equal(c.getSnapshot().session.turns.length, 0);
+});
+
+test('reply speech acknowledges only a fresh plain result accepted in the current chat', async () => {
+ const displayed: string[] = [];
+ let stops = 0, lastRequest!: OnlineChatInput;
+ let next = deferred<ChatSendResult>();
+ const c = new ChatWorkspaceController(undefined, undefined, {
+  list: async () => ({ ok: true, models: onlineOptions }), cancel: async () => {},
+  approveMaterials: async () => ({ ok: true, grant: crypto.randomUUID() }),
+  send: input => { lastRequest = input; return next.promise; },
+ }, undefined, false, {
+  displayed: async id => {
+   assert.equal(c.getSnapshot().session.pending, false);
+   assert.equal(c.getSnapshot().session.turns.at(-1)?.text, '新收到的普通回复');
+   displayed.push(id);
+  },
+  stop: async () => { stops++; },
+ });
+ c.syncCharacters(characters); await c.refreshModels();
+ const send = () => { next = deferred(); c.edit('合成测试问题'); return c.send(); };
+ const reply = (text: string) => ({ ok: true, requestID: lastRequest.requestID, text, replayable: true } as const);
+ let pending = send();
+ assert.deepEqual(displayed, []);
+ next.resolve(reply('新收到的普通回复'));
+ assert.equal(await pending, true);
+ assert.deepEqual(displayed, [lastRequest.requestID]);
+ for (const privateResult of [{ recovered: true }, { replayable: false }, { historyStatus: 'omitted' }] as const) {
+  pending = send(); next.resolve({ ...reply('不应承诺播报'), ...privateResult });
+  assert.equal(await pending, true);
+ }
+ pending = send(); next.resolve({ ok: false, error: 'unavailable' }); assert.equal(await pending, false);
+ next = deferred(); c.edit('合成附件');
+ const editor = c.getSnapshot().session.editorKey;
+ c.setAttachments('pet-one', [{ name: 'synthetic.txt', data: '5L2g5aW9', mediaType: 'text/plain' }], editor);
+ assert.equal(c.setMaterialPermission(true, editor), true);
+ pending = c.send(); await Promise.resolve();
+ assert.ok(lastRequest.attachments?.length);
+ next.resolve(reply('即使服务误标也不播报附件回复'));
+ assert.equal(await pending, true);
+ pending = send();
+ const beforeSwitch = stops;
+ c.selectCharacter('pet-two');
+ assert.ok(stops > beforeSwitch);
+ next.resolve(reply('切会话后迟到的回复'));
+ assert.equal(await pending, false);
+ assert.equal(displayed.length, 1);
 });

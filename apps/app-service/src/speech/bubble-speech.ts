@@ -1,4 +1,4 @@
-import { isSpeechEnableInput, type SpeechResult, type SpeechStatus } from '../../../../packages/contracts/src/speech.ts';
+import { isSpeechEnableInput, type ReplySpeechCommand, type SpeechResult, type SpeechStatus } from '../../../../packages/contracts/src/speech.ts';
 import { isCue } from './cue.ts';
 import { readReferenceAudio } from './reference-audio.ts';
 
@@ -18,9 +18,12 @@ export class BubbleSpeech {
   private stoppingSource?: symbol;
   private stopUnconfirmed = false;
   private closed = false;
+  private replyRevision = 0;
+  private readonly replySource = Symbol('chat-reply');
+  private speakChatReplies = false;
 
   constructor(private backend: SpeechBackend) {}
-  status(): SpeechStatus { return { state: this.closed ? 'unavailable' : this.state, hasReference: !!this.reference }; }
+  status(): SpeechStatus { return { state: this.closed ? 'unavailable' : this.state, hasReference: !!this.reference, ...(this.transcript && this.speakChatReplies ? { speakChatReplies: true } : {}) }; }
   private ok(): SpeechResult { return { ok: true, speech: this.status() }; }
 
   async select(path: string): Promise<SpeechResult> {
@@ -43,26 +46,41 @@ export class BubbleSpeech {
     return this.ok();
   }
 
-  enable(transcript: string): SpeechResult {
+  enable(transcript: string, speakChatReplies = false): SpeechResult {
     if (this.closed) return { ok: false, error: 'unavailable' };
     if (this.selecting || this.suspending || this.stopUnconfirmed || this.current || this.transcript) return { ok: false, error: 'busy' };
     if (!isSpeechEnableInput({ referenceTranscript: transcript })) return { ok: false, error: 'invalid' };
     if (!this.reference) return { ok: false, error: 'reference-required' };
-    this.transcript = transcript.trim(); this.state = 'enabled';
+    this.transcript = transcript.trim(); this.speakChatReplies = speakChatReplies; this.state = 'enabled';
     return this.ok();
   }
 
   async disable(): Promise<SpeechResult> {
     if (this.closed) return { ok: false, error: 'unavailable' };
-    this.transcript = undefined;
+    this.transcript = undefined; this.speakChatReplies = false;
     try { await this.pause(); return this.ok(); }
     catch { return { ok: false, error: 'unavailable' }; }
   }
 
+  async reply(command: ReplySpeechCommand, eligible: () => boolean): Promise<SpeechResult> {
+    // A stop that passes a delayed HTTP offer must never let that offer restart audio.
+    if (this.closed || command.revision <= this.replyRevision) return { ok: false, error: 'unavailable' };
+    this.replyRevision = command.revision;
+    if (command.text === undefined) {
+      try { await this.cancelSource(this.replySource); return this.ok(); }
+      catch { return { ok: false, error: 'unavailable' }; }
+    }
+    // Chat is best-effort and cannot replace an already queued interaction bubble.
+    if (!this.speakChatReplies || (this.pending && this.pending.source !== this.replySource)) return { ok: false, error: 'unavailable' };
+    return this.offer(this.replySource, command.text, () => this.speakChatReplies && this.replyRevision === command.revision && eligible())
+      ? this.ok() : { ok: false, error: 'unavailable' };
+  }
+
   offer(source: symbol, text: string, eligible: () => boolean) {
-    if (!this.transcript || !this.reference || this.closed || this.suspending || this.stopUnconfirmed || !isCue(text) || !eligible()) return;
+    if (!this.transcript || !this.reference || this.closed || this.suspending || this.stopUnconfirmed || !isCue(text) || !eligible()) return false;
     this.pending = { source, text, eligible };
     this.runNext();
+    return true;
   }
 
   cancelSource(source: symbol) {

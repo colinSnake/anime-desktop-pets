@@ -43,6 +43,12 @@ test('workspace and startup components consume defined theme tokens instead of r
   assert.deepEqual(findings, []);
 });
 
+test('chat thinking levels use the workspace accent text color', async () => {
+  const css = await readFile(join(root, workspace, 'chat.css'), 'utf8');
+  const heading = css.match(/\.chat-thinking-heading\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(heading, /(?:^|;)\s*color:\s*var\(--accent-text\)\s*;/);
+});
+
 test('native window colors go through named theme values and UI icons can inherit their ink', async () => {
   const findings: string[] = [];
   for (const { path, source } of await sources(native, /\.ts$/)) {
@@ -56,4 +62,11 @@ test('native window colors go through named theme values and UI icons can inheri
     }
   }
   assert.deepEqual(findings, []);
+});
+
+test('model status dots keep a transparent hover target and visible keyboard focus', async () => {
+  const css = await readFile(join(root, workspace, 'models.css'), 'utf8');
+  const hover = css.match(/\.model-status-button:hover:not\(\[aria-disabled="true"\]\)\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(hover, /(?:^|;)\s*background:\s*var\(--transparent\)\s*;/);
+  assert.match(css, /\.model-status-button:focus-visible\s*\{[^}]*outline-width:\s*2px/);
 });

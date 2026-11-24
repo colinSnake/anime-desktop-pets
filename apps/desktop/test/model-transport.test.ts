@@ -111,3 +111,12 @@ test('trusted probe transport allows the service streaming deadline plus bridge 
   assert.deepEqual(await requestModelProbe(connection, input, signal, async () => Response.json(diagnostic, { status: 502 })), diagnostic);
   assert.deepEqual(deadline.mock.calls.map(call => call.arguments), [[62_000]]);
 });
+
+test('the loopback model bridge accepts a probe storage warning only on a list without evidence', async () => {
+  const warning = { ...ok, probeStorageUnavailable: true };
+  assert.deepEqual(await requestModelManagement(connection, 'list', undefined, async () => Response.json(warning)), warning);
+  for (const malformed of [{ ...warning, probeStorageUnavailable: 'private detail' }, { ...warning, probeResults: [] }]) {
+    assert.deepEqual(await requestModelManagement(connection, 'list', undefined, async () => Response.json(malformed)), unavailable);
+  }
+  assert.deepEqual(await requestModelManagement(connection, 'default', defaultInput, async () => Response.json({ ...warning, durability: 'confirmed', retainedCredentialVersions: false })), unknown);
+});

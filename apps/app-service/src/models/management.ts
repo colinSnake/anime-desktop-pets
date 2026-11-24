@@ -1,11 +1,13 @@
-import { modelProbeStatus, probeError, validProbeInput, type ModelProbeError, type ModelProbeReply } from '../../../../packages/contracts/src/model-probe.ts';
+import { isRecordedProbeFailure, modelProbeStatus, probeError, validProbeInput, type ModelProbeError, type ModelProbeReply } from '../../../../packages/contracts/src/model-probe.ts';
 import { MODEL_DISCOVERY_ERRORS, validDiscoveryInput, type ModelDiscoveryReply } from '../../../../packages/contracts/src/models.ts';
 import { discoveryError } from './discovery-contract.ts';
 import type { ModelClient, FreshChatInput } from './client.ts';
+import type { ReasoningEffort } from '../../../../packages/contracts/src/model-capabilities.ts';
 import type { ChatRoute } from '../../../../packages/contracts/src/online-chat.ts';
 import { chatOptions, resolveChatRoute } from './chat-models.ts';
 import { ModelConfigurationStore, type PublicationIO } from './configuration-store.ts';
 import { CredentialVault, type SecureCredentialBackend } from './credentials.ts';
+import { ModelProbeStore, currentProbeRecords } from './probe-store.ts';
 import { ModelError } from './errors.ts';
 import { managementError, validModelInput, type ModelAction, type ModelInputs, type ModelManagementReply, type SavedModelConfiguration } from './management-contract.ts';
 import { ModelMutationError, ModelRepository } from './repository.ts';
@@ -18,11 +20,12 @@ const saved = (state: ModelConfiguration): SavedModelConfiguration => ({
   })),
 });
 
-/** Configuration management and read-only discovery for the saved profile. */
+/** Saved configuration, read-only discovery and durable sanitized probe evidence. */
 export class ModelManagement {
   private repository?: Promise<ModelRepository>;
   private readonly store: ModelConfigurationStore;
   private readonly vault: CredentialVault;
+  private readonly probes: ModelProbeStore;
   private writing = false;
   private closed = false;
   private writesBlocked = false;
@@ -31,6 +34,7 @@ export class ModelManagement {
   constructor(root: string, backend: SecureCredentialBackend | undefined, publication?: PublicationIO, private readonly online?: { fetch?: typeof fetch }) {
     this.store = new ModelConfigurationStore(root, publication);
     this.vault = new CredentialVault(backend);
+    this.probes = new ModelProbeStore(root);
   }
   async run(method: ModelAction, input: unknown): Promise<ModelManagementReply> {
     if (this.closed) return managementError('unavailable');
@@ -47,7 +51,11 @@ export class ModelManagement {
     try {
       if (method === 'list') {
         const configuration = await this.store.read();
+        const records = await this.probes.read().catch(() => undefined);
+        const probeResults = records && currentProbeRecords(records, configuration);
         return this.closed ? managementError('unavailable') : { version: 1, ok: true, configuration: saved(configuration),
+          ...(probeResults?.length ? { probeResults } : {}),
+          ...(records === undefined ? { probeStorageUnavailable: true as const } : {}),
           ...(this.writesBlocked ? { writesBlocked: true } : {}) };
       }
       const repository = await this.openRepository();
@@ -84,27 +92,36 @@ export class ModelManagement {
     if (this.closed || this.writesBlocked) throw new ModelError('closed');
     return chatOptions(await this.store.read());
   }
-  async completeChat(route: ChatRoute, prepare: FreshChatInput, signal: AbortSignal) {
+  async completeChat(route: ChatRoute, prepare: FreshChatInput, signal: AbortSignal, reasoningEffort?: ReasoningEffort) {
     if (this.closed || this.writesBlocked) throw new ModelError('closed');
     const repository = await this.openRepository();
     if (signal.aborted) throw new ModelError('cancelled');
     const client = await this.onlineClient(repository);
-    return client.completeChat(route, prepare, signal);
+    return client.completeChat(route, prepare, signal, reasoningEffort);
   }
-  async completeAgentTask(route: ChatRoute, revision: number, prepare: FreshChatInput, signal: AbortSignal) {
+  async completeAgentTask(route: ChatRoute, revision: number, prepare: FreshChatInput, signal: AbortSignal, reasoningEffort?: ReasoningEffort) {
     if (this.closed || this.writesBlocked || signal.aborted) throw new ModelError(signal.aborted ? 'cancelled' : 'closed');
     const repository = await this.openRepository();
     if (signal.aborted) throw new ModelError('cancelled');
-    return (await this.onlineClient(repository)).completeTask(route, revision, prepare, signal);
+    return (await this.onlineClient(repository)).completeTask(route, revision, prepare, signal, reasoningEffort);
   }
-  async assertChatRoute(route: ChatRoute) {
+  async assertChatRoute(route: ChatRoute, reasoningEffort?: ReasoningEffort) {
     if (this.closed || this.writesBlocked) throw new ModelError('closed');
-    // Validate a restarted profile before launching the SDK, without taking a
+    // Validate a restarted profile before dispatch, without taking a
     // writer lease or touching the credential vault. After dispatch, use the
     // currently owned snapshot when one exists.
     const state = this.repository ? (await this.repository).snapshot() : await this.store.read();
     if (this.closed || this.writesBlocked) throw new ModelError('closed');
-    return resolveChatRoute(state, route);
+    return resolveChatRoute(state, route, reasoningEffort);
+  }
+  /** Serialize a short local terminal commit with saved-route mutations. No provider work belongs here. */
+  async withChatPublication<T>(route: ChatRoute, effort: ReasoningEffort | undefined, publish: () => Promise<T>): Promise<T> {
+    if (this.closed || this.writesBlocked) throw new ModelError('closed');
+    return (await this.openRepository()).withSnapshot(state => {
+      if (this.closed || this.writesBlocked) throw new ModelError('closed');
+      resolveChatRoute(state, route, effort);
+      return publish();
+    });
   }
   async discover(input: unknown, signal?: AbortSignal): Promise<ModelDiscoveryReply> {
     if (!validDiscoveryInput(input)) return discoveryError('invalid_configuration');
@@ -152,8 +169,17 @@ export class ModelManagement {
       const client = await this.onlineClient(repository);
       if (controller.signal.aborted) return probeError('cancelled');
       if (this.writing) return probeError('busy');
-      await client.testConnection(copy, controller.signal);
-      return controller.signal.aborted ? probeError('cancelled') : { version: 1, ok: true, connectionID, revision: expectedRevision, entryID };
+      // Check local evidence storage before any potentially billed request.
+      return await this.probes.recordTest(copy, () => repository.snapshot(), controller.signal, async () => {
+        try {
+          await client.testConnection(copy, controller.signal);
+          return { version: 1, ok: true, connectionID, revision: expectedRevision, entryID };
+        } catch (error) {
+          const code = error instanceof ModelError ? error.code : undefined;
+          if (!isRecordedProbeFailure(code)) throw error;
+          return probeError(code);
+        }
+      });
     } catch (error) {
       if (controller.signal.aborted) return probeError('cancelled');
       const code = error instanceof ModelError ? error.code : undefined;
@@ -166,6 +192,7 @@ export class ModelManagement {
   async close(): Promise<void> {
     this.closed = true;
     this.inspection?.controller.abort();
+    await this.probes.close();
     const repository = await this.repository?.catch(() => undefined);
     await repository?.close();
   }

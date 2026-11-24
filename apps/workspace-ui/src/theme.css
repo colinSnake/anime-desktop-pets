@@ -18,6 +18,17 @@
   --success: light-dark(#226a58, #a5d4bd);
   --danger: light-dark(#a2473a, #ecab98);
   --danger-soft: light-dark(#f8eae3, #432e28);
+  --chat-permission-warn: light-dark(#a23e13, #f6ad82);
+  --chat-permission-dialog-panel: light-dark(#ffffff, #272727);
+  --chat-permission-dialog-inset: light-dark(#f4f4f6, #333333);
+  --chat-permission-dialog-line: light-dark(#e4e3e7, #414141);
+  --chat-permission-dialog-text: light-dark(#26242b, #ededed);
+  --chat-permission-dialog-muted: light-dark(#615e68, #aaa);
+  --chat-permission-dialog-link: light-dark(#175da6, #55aaff);
+  --chat-permission-dialog-confirm-bg: light-dark(#fce7e8, #552e30);
+  --chat-permission-dialog-confirm-ink: light-dark(#ad252d, #ff777b);
+  --chat-permission-dialog-file-icon: light-dark(#2172b5, #54b4ff);
+  --chat-permission-dialog-network-icon: light-dark(#087a92, #36c5e8);
   --warning: light-dark(#916b25, #e0c78d);
   --shadow: 0 10px 32px #12101c0a;
   --shadow-control-ink: #0000000a;
@@ -64,6 +75,27 @@
   --nook-stage-button-line: light-dark(#bca9d38c, #bea2e078);
   --nook-status-fill: light-dark(#fff9, #1c172866);
   --nook-art-glow: light-dark(#67508435, #0006);
+}
+
+/* Neutral composer treatments from the chat reference; keep workspace dark roles. */
+.chat-composer {
+  --chat-composer-text: light-dark(#292929, var(--text));
+  --chat-composer-muted: light-dark(#686868, var(--muted));
+  --chat-composer-faint: light-dark(#707070, var(--muted));
+  --chat-composer-hover: light-dark(#f0f0f0, var(--surface-soft));
+  --chat-composer-selected: light-dark(#e9e9e9, var(--line));
+  --chat-composer-line: light-dark(#e9e9e9, var(--line));
+  --chat-composer-ring-line: light-dark(#d7d7d7, var(--line));
+  --chat-composer-add-ink: light-dark(#999999, var(--muted));
+  --chat-thinking-surface: light-dark(#f4f4f4, #303035);
+  --chat-thinking-border: light-dark(#d2d2d2, #4b4b50);
+  --chat-thinking-model: light-dark(#858585, #b2b2b7);
+  --chat-thinking-summary-hover: light-dark(#e6e6e6, #3b3b3b);
+  --chat-thinking-track: light-dark(#dedede, #4a4a50);
+  --chat-thinking-thumb: #ffffff;
+  --chat-thinking-marker: color-mix(in srgb, var(--chat-thinking-thumb) 31%, transparent);
+  --chat-model-surface: light-dark(#ffffff, #19191b);
+  --chat-model-border: light-dark(#e1e1e4, #37373b);
 }
 
 /* Role colors belong to the stage and avatars, not controls or status. */

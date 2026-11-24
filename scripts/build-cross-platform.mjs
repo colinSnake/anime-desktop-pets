@@ -64,11 +64,13 @@ export async function buildCrossPlatform(root, tools = { bundle, buildUI }) {
       await tools.bundle({
         absWorkingDir: root, entryPoints: [entry], outfile: output,
         bundle: true, platform: 'node', format: 'cjs', target: 'node24',
-        packages: 'external', sourcemap: false, logLevel: 'info',
+        // The service exports CommonJS for Electron utilityProcess. Bundle the ESM-only Pi
+        // graph; leave Fastify at its existing workspace dependency boundary.
+        ...(entry.startsWith('apps/app-service/') ? { external: ['fastify'] } : { packages: 'external' }),
+        sourcemap: false, logLevel: 'info',
       });
     }
     if (process.platform === 'darwin') {
-      await copyFile(join(root, 'apps/app-service/src/agent/harness-worker.mjs'), join(service, 'harness-worker.mjs'));
       for (const [source, output, build] of [
         ['apps/app-service/native/model-keychain.swift', join(service, 'model-keychain'), tools.buildKeychainHelper],
         ['apps/desktop/native/codex-presence.swift', join(desktop, 'codex-presence'), tools.buildPresenceHelper],
@@ -108,11 +110,16 @@ export async function buildCrossPlatform(root, tools = { bundle, buildUI }) {
     const speech = join(desktop, 'runtime', 'speech');
     await mkdir(speech);
     await copyFile(join(root, 'apps/runtime-bridge/bubble_speech_worker.py'), join(speech, 'bubble_speech_worker.py'));
-    for (const name of ['stdio_service.py', 'mlx_backend.py', 'protocol.py', 'queueing.py', 'session.py']) {
+    for (const name of ['stdio_service.py', 'mlx_backend.py', 'protocol.py', 'queueing.py', 'session.py', 'voice_draft_worker.py']) {
       await copyFile(join(root, 'apps/speech-runtime', name), join(speech, name));
     }
     for (const name of ['pet_sources.py', 'pet_library.py', 'pet_reference_lock.py']) {
       await copyFile(join(root, 'apps/pet-runtime/pets', name), join(desktop, 'runtime', name));
+    }
+    // Preserve exact upstream notices for the Pi code bundled into the service.
+    await mkdir(join(service, 'licenses'));
+    for (const name of ['pi-mit.txt', 'pi-schema-typebox.txt']) {
+      await copyFile(join(root, 'licenses', name), join(service, 'licenses', name));
     }
     await tools.buildUI({
       configFile: join(root, 'apps/workspace-ui/vite.config.mjs'), root: join(root, 'apps/workspace-ui'),
@@ -121,6 +128,7 @@ export async function buildCrossPlatform(root, tools = { bundle, buildUI }) {
     const uiAssets = join(desktop, 'ui', 'assets');
     await mkdir(uiAssets, { recursive: true });
     await copyFile(join(root, 'resources', 'branding', 'app-icon.svg'), join(uiAssets, 'app-icon.svg'));
+    await copyFile(join(root, 'apps/desktop/src/microphone-worklet.js'), join(uiAssets, 'microphone-worklet.js'));
     for (const path of ['main.cjs', 'preload.cjs', 'ui/index.html', 'runtime/worker.py', 'runtime/guardian.py', 'runtime/pet_sources.py', 'runtime/pet_library.py', 'runtime/pet_reference_lock.py']) await access(join(desktop, path));
     await access(join(service, 'entry.cjs'));
     await publishBuild([

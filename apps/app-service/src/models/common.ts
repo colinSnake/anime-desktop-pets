@@ -119,14 +119,16 @@ export function snapshotInput(route: ModelRoute, input: ModelInput): ModelInput 
       if (!text.trim() && !(m.role === 'assistant' && Array.isArray(m.toolCalls) && m.toolCalls.length)) throw 0;
       let attachments: ValidatedChatAttachment[] = [];
       if (m.attachments !== undefined) {
-        if (m.role !== 'user' || index !== messages.length - 1 || route.purpose !== 'text-chat' || !Array.isArray(m.attachments)) throw 0;
+        const textChat = route.purpose === 'text-chat' && index === messages.length - 1;
+        const materialChat = route.purpose === 'agent-task' && index === 0 && route.apiProtocol === 'responses' && tools.length > 0;
+        if (m.role !== 'user' || (!textChat && !materialChat) || !Array.isArray(m.attachments)) throw 0;
         const dto = m.attachments.map(item => {
           const file = object(item);
           if (Object.keys(file).some(key => !['name', 'mediaType', 'data', 'bytes', 'text'].includes(key))) throw 0;
           return { name: file.name, mediaType: file.mediaType, data: file.data } as ChatAttachment;
         });
         const validated = validateChatAttachments(dto, text);
-        if (!validated.ok || validated.attachments.some(file => file.mediaType !== 'text/plain' &&
+        if (!validated.ok || validated.attachments.some(file => file.mediaType === 'text/plain' ? materialChat :
             (route.apiProtocol !== 'responses' || !route.inputModalities?.includes(file.mediaType === 'application/pdf' ? 'pdf' : 'image')))) throw 0;
         attachments = validated.attachments;
       }

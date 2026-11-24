@@ -14,6 +14,11 @@ export const modelProbeStatus = {
   timed_out: 504, cancelled: 409, unavailable: 503,
 } as const;
 export type ModelProbeError = keyof typeof modelProbeStatus;
+const recordedFailures = ['authentication_failed', 'rate_limited', 'invalid_response', 'response_too_large', 'upstream_unavailable',
+  'provider_bad_request', 'provider_forbidden', 'provider_not_found', 'output_budget_exhausted', 'timed_out'] as const satisfies readonly ModelProbeError[];
+export function isRecordedProbeFailure(code: unknown): code is typeof recordedFailures[number] {
+  return recordedFailures.some(failure => failure === code);
+}
 export type ModelProbeReply = { version: 1; ok: true; connectionID: string; revision: number; entryID: string } | { version: 1; ok: false; error: ModelProbeError };
 export const probeError = (error: ModelProbeError): ModelProbeReply => ({ version: 1, ok: false, error });
 const identifier = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value);
@@ -28,4 +33,13 @@ export function validProbeInput(value: unknown): value is ModelProbeInput {
 export function isProbeReply(value: unknown, input: ModelProbeInput): value is ModelProbeReply {
   return shape(value, ['version', 'ok', 'error']) && value.version === 1 && value.ok === false && typeof value.error === 'string' && Object.hasOwn(modelProbeStatus, value.error) ||
     shape(value, ['version', 'ok', 'connectionID', 'revision', 'entryID']) && value.version === 1 && value.ok === true && value.connectionID === input.connectionID && value.revision === input.expectedRevision && value.entryID === input.entryID;
+}
+
+/** Completed, sanitized evidence; never provider output, credentials, or a license to send requests. */
+export type ModelProbeRecord = { input: ModelProbeInput; result: ModelProbeReply; testedAt: string };
+export const MAX_MODEL_PROBE_RECORDS = 512;
+export function validProbeRecord(value: unknown): value is ModelProbeRecord {
+  return shape(value, ['input', 'result', 'testedAt']) && validProbeInput(value.input) && isProbeReply(value.result, value.input) &&
+    (value.result.ok || isRecordedProbeFailure(value.result.error)) && typeof value.testedAt === 'string' &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value.testedAt) && Number.isFinite(Date.parse(value.testedAt));
 }

@@ -1,4 +1,5 @@
 import { streamingModelProbeTimeoutMs, type ModelProbeInput } from '../../../../packages/contracts/src/model-probe.ts';
+import type { ReasoningEffort } from '../../../../packages/contracts/src/model-capabilities.ts';
 import type { ChatRoute } from '../../../../packages/contracts/src/online-chat.ts';
 import { resolveChatRoute } from './chat-models.ts';
 import { validDiscoveryCandidate, type ModelCandidate } from '../../../../packages/contracts/src/models.ts';
@@ -20,9 +21,11 @@ type Options = {
 };
 const RESPONSE_BYTES = 1_048_576, DISCOVERY_BYTES = 4 * RESPONSE_BYTES, REQUEST_BYTES = 131_072, ATTACHMENT_REQUEST_BYTES = 24 * 1024 * 1024;
 const check = (signal: AbortSignal) => { if (signal.aborted) throw signal.reason instanceof ModelError ? signal.reason : new ModelError('cancelled'); };
-const cancelBody = (response: Response) => { void response.body?.cancel().catch(() => {}); };
+const cancelBody = (response: Response) => response.body?.cancel().catch(() => {});
 
-type ProbeMode = 'json' | 'streaming-responses';
+const supportsResponsesStream = (route: ModelRoute) => route.apiProtocol === 'responses' && new URL(route.baseURL).origin !== 'https://api.deepseek.com';
+const responsesAccept = { accept: 'text/event-stream, application/json' };
+type ResponseMode = { probe?: true; streamResponses?: boolean; drain?: boolean };
 const probeHttpErrors: Readonly<Partial<Record<number, ModelErrorCode>>> = {
   400: 'provider_bad_request', 401: 'authentication_failed', 403: 'provider_forbidden',
   404: 'provider_not_found', 422: 'provider_bad_request', 429: 'rate_limited',
@@ -62,7 +65,8 @@ function createResponsesStreamParser() {
     if (type === 'response.failed' || type === 'error') throw new ModelError('invalid_response');
     if (type !== 'response.completed' && type !== 'response.incomplete') return;
     const response = object(message.response);
-    if (type !== `response.${response.status}`) throw new ModelError('invalid_response');
+    if (type !== `response.${response.status}` || response.error != null ||
+        (response.status === 'completed' && response.incomplete_details != null)) throw new ModelError('invalid_response');
     return response;
   };
   return (chunk: Uint8Array) => {
@@ -111,22 +115,25 @@ export class ModelClient {
       return decoded;
     });
   }
-  completeChat(selection: ChatRoute, prepare: FreshChatInput, signal: AbortSignal): Promise<ModelReply> {
-    return this.completePinned(selection, prepare, signal);
+  completeChat(selection: ChatRoute, prepare: FreshChatInput, signal: AbortSignal, reasoningEffort?: ReasoningEffort): Promise<ModelReply> {
+    return this.completePinned(selection, prepare, signal, undefined, reasoningEffort);
   }
-  completeTask(selection: ChatRoute, revision: number, prepare: FreshChatInput, signal: AbortSignal): Promise<ModelReply> {
-    return this.completePinned(selection, prepare, signal, revision);
+  completeTask(selection: ChatRoute, revision: number, prepare: FreshChatInput, signal: AbortSignal, reasoningEffort?: ReasoningEffort): Promise<ModelReply> {
+    return this.completePinned(selection, prepare, signal, revision, reasoningEffort);
   }
-  private async completePinned(selection: ChatRoute, prepare: FreshChatInput, signal: AbortSignal, taskRevision?: number): Promise<ModelReply> {
+  private async completePinned(selection: ChatRoute, prepare: FreshChatInput, signal: AbortSignal, taskRevision?: number, reasoningEffort?: ReasoningEffort): Promise<ModelReply> {
     this.assertOpen();
     const resolve = () => {
-      const current = resolveChatRoute(this.configuration(), selection);
+      const current = resolveChatRoute(this.configuration(), selection, reasoningEffort);
       if (taskRevision === undefined) return current;
       if (current.connectionRevision !== taskRevision) throw new ModelError('route_changed');
       if (current.tools === 'unsupported') throw new ModelError('tools_unavailable');
       return { ...current, purpose: 'agent-task' as const };
     };
     const route = resolve();
+    // Match the saved Responses transport for chat and tools. Tools retain native
+    // continuation items; plain chat has no use for encrypted reasoning replay.
+    const streamResponses = supportsResponsesStream(route);
     return this.run(route, signal, async owned => {
       const auth = await this.auth(route, owned);
       const key = auth.authorization?.slice(7) ?? auth['x-api-key'] ?? auth['x-goog-api-key'];
@@ -134,7 +141,7 @@ export class ModelClient {
       const containsSensitive = (text: string) => sensitive.some(value => text.includes(value));
       let pending: Promise<unknown> | undefined;
       let toolNames: string[] = [];
-      await prepare(input => {
+      try { await prepare(input => {
         check(owned);
         if (pending) throw new ModelError('invalid_request');
         const current = resolve();
@@ -143,24 +150,37 @@ export class ModelClient {
         toolNames = snapshot.tools?.map(tool => tool.name) ?? [];
         if (snapshot.messages.some(message => containsSensitive(message.text)) || snapshot.referenceData &&
             sensitive.some(value => JSON.stringify(snapshot.referenceData).includes(JSON.stringify(value).slice(1, -1)))) throw new ModelError('invalid_request');
-        const encoded = adapters[route.apiProtocol].encode(current, snapshot), body = JSON.stringify(encoded.body);
+        const encoded = adapters[route.apiProtocol].encode(current, snapshot);
+        if (streamResponses) {
+          encoded.body.stream = true;
+          if (taskRevision === undefined) delete encoded.body.include; // Plain chat needs neither provider-side storage nor private reasoning replay.
+        }
+        const body = JSON.stringify(encoded.body);
         const maxRequestBytes = snapshot.messages.some(message => message.role === 'user' && message.attachments?.length)
           ? ATTACHMENT_REQUEST_BYTES : REQUEST_BYTES;
         if (Buffer.byteLength(body) > maxRequestBytes || sensitive.some(value => body.includes(JSON.stringify(value).slice(1, -1)))) throw new ModelError('invalid_request');
         // request() invokes the injected fetch synchronously before its first await.
-        pending = this.request(current, encoded.path, { method: 'POST', headers: { ...encoded.headers, ...auth, 'content-type': 'application/json' }, body }, owned, { bytes: 0, max: RESPONSE_BYTES });
+        pending = this.request(current, encoded.path, { method: 'POST', headers: { ...encoded.headers, ...auth, ...(streamResponses ? responsesAccept : {}), 'content-type': 'application/json' }, body }, owned, { bytes: 0, max: RESPONSE_BYTES }, { streamResponses, drain: true });
         void pending.catch(() => {});
-      }, owned);
+      }, owned); } catch (error) {
+        await pending?.catch(() => {});
+        throw error;
+      }
       if (!pending) throw new ModelError('invalid_request');
-      const raw = await pending;
+      let raw = await pending;
       check(owned);
       resolve();
+      if (streamResponses) {
+        const response = object(raw);
+        if (response.error != null || (response.status === 'completed' && response.incomplete_details != null)) throw new ModelError('invalid_response');
+        if (taskRevision === undefined) raw = { ...response, output: array(response.output).filter(item => object(item).type !== 'reasoning') };
+      }
       const result = adapters[route.apiProtocol].decode(route, raw);
       const names = new Set(toolNames);
       if (result.message.toolCalls?.some(call => taskRevision === undefined || !names.has(call.name)) ||
           containsSensitive(result.message.text) || sensitive.some(value => JSON.stringify(result.message).includes(JSON.stringify(value).slice(1, -1)))) throw new ModelError('invalid_response');
       return result;
-    });
+    }, route.timeoutMs, true);
   }
   async testConnection(input: ModelProbeInput, signal: AbortSignal): Promise<void> {
     this.assertOpen();
@@ -176,7 +196,7 @@ export class ModelClient {
     const route = routeFor(state.revision, { ...connection, compatibility }, { entryID, modelID, displayName: modelID, maxOutputTokens,
       capabilities: { tools: { status: 'unsupported', source: 'user' } }, compatibility }, 'text-chat');
     // Gate streaming on the saved protocol and origin, not a renderer-supplied flag.
-    const streamResponses = route.apiProtocol === 'responses' && new URL(route.baseURL).origin !== 'https://api.deepseek.com';
+    const streamResponses = supportsResponsesStream(route);
     route.tokenBudget = Math.min(streamResponses ? 256 : 32, route.tokenBudget);
     const adapter = adapters[route.apiProtocol];
     const encoded = adapter.encode(route, { messages: [{ role: 'user', text: streamResponses ? `Reply with exactly ${probeMarker}. Do not use tools.` : 'Reply with OK.' }] });
@@ -188,7 +208,7 @@ export class ModelClient {
       const key = auth.authorization?.slice(7) ?? auth['x-api-key'] ?? auth['x-goog-api-key'];
       if (key && modelID.includes(key) || route.credentialRef && modelID.includes(route.credentialRef)) throw new ModelError('invalid_configuration');
       current();
-      const raw = await this.request(route, encoded.path, { method: 'POST', headers: { ...encoded.headers, ...auth, ...(streamResponses ? { accept: 'text/event-stream, application/json' } : {}), 'content-type': 'application/json' }, body }, owned, { bytes: 0, max: 64 * 1024 }, streamResponses ? 'streaming-responses' : 'json');
+      const raw = await this.request(route, encoded.path, { method: 'POST', headers: { ...encoded.headers, ...auth, ...(streamResponses ? responsesAccept : {}), 'content-type': 'application/json' }, body }, owned, { bytes: 0, max: 64 * 1024 }, { probe: true, streamResponses });
       check(owned); current();
       if (route.apiProtocol === 'responses') verifyResponsesProbe(raw, streamResponses);
       if (streamResponses) return; // The probe verified the marker without retaining private reasoning or replay.
@@ -257,7 +277,7 @@ export class ModelClient {
   private configuration(): ModelConfiguration {
     try { return this.options.readConfiguration(); } catch { throw new ModelError('invalid_configuration'); }
   }
-  private async run<T>(route: ModelRoute, external: AbortSignal | undefined, action: (signal: AbortSignal) => Promise<T>, deadline = route.timeoutMs): Promise<T> {
+  private async run<T>(route: ModelRoute, external: AbortSignal | undefined, action: (signal: AbortSignal) => Promise<T>, deadline = route.timeoutMs, drain = false): Promise<T> {
     this.assertOpen();
     if (external?.aborted) throw new ModelError('cancelled');
     if (this.active.size >= 3) throw new ModelError('busy');
@@ -267,15 +287,17 @@ export class ModelClient {
     this.active.set(controller, route.connectionID);
     const timeout = setTimeout(() => controller.abort(new ModelError('timed_out')), Math.min(deadline, this.options.timeoutMs ?? deadline));
     let onAbort!: () => void;
-    const aborted = new Promise<never>((_resolve, reject) => { onAbort = () => reject(owned.reason); owned.addEventListener('abort', onAbort, { once: true }); });
+    const aborted = !drain && new Promise<never>((_resolve, reject) => { onAbort = () => reject(owned.reason); owned.addEventListener('abort', onAbort, { once: true }); });
     try {
-      const value = await Promise.race([action(owned), aborted]); check(owned); return value;
+      const work = action(owned);
+      const value = await (aborted ? Promise.race([work, aborted]) : work);
+      check(owned); return value;
     } catch (error) {
       check(owned);
       if (error instanceof ModelError) throw error;
       throw new ModelError('upstream_unavailable');
     } finally {
-      clearTimeout(timeout); external?.removeEventListener('abort', cancel); owned.removeEventListener('abort', onAbort); this.active.delete(controller);
+      clearTimeout(timeout); external?.removeEventListener('abort', cancel); if (aborted) owned.removeEventListener('abort', onAbort); this.active.delete(controller);
     }
   }
   private async auth(route: ModelRoute, signal: AbortSignal): Promise<Record<string, string>> {
@@ -288,27 +310,29 @@ export class ModelClient {
     if (typeof key !== 'string' || !key.trim() || key.length > 8192 || /[^\x21-\x7e]/.test(key)) throw new ModelError('credentials_unavailable');
     return route.apiProtocol === 'anthropic' ? { 'x-api-key': key } : route.apiProtocol === 'gemini' ? { 'x-goog-api-key': key } : { authorization: `Bearer ${key}` };
   }
-  private async request(route: ModelRoute, path: string, init: RequestInit, signal: AbortSignal, budget: { bytes: number; max: number }, probe?: ProbeMode): Promise<unknown> {
+  private async request(route: ModelRoute, path: string, init: RequestInit, signal: AbortSignal, budget: { bytes: number; max: number }, mode?: ResponseMode): Promise<unknown> {
     check(signal);
     // Only adapter-owned relative paths; never follow an upstream-supplied URL.
     if (!path.startsWith('/') || path.startsWith('//') || /[\r\n\\#]/.test(path)) throw new ModelError('invalid_request');
     let response: Response;
     try { response = await this.transport(`${route.baseURL}${path}`, { ...init, signal, redirect: 'error', credentials: 'omit', cache: 'no-store' }); }
     catch { check(signal); throw new ModelError('upstream_unavailable'); }
-    if (signal.aborted) { cancelBody(response); check(signal); }
+    const discard = async () => { const cancelled = cancelBody(response); if (mode?.drain) await cancelled; };
+    if (signal.aborted) { await discard(); check(signal); }
     if (response.redirected || !response.ok) {
-      cancelBody(response);
-      if (probe && !response.redirected) throw new ModelError(probeHttpErrors[response.status] ?? 'upstream_unavailable');
+      await discard();
+      if (mode?.probe && !response.redirected) throw new ModelError(probeHttpErrors[response.status] ?? 'upstream_unavailable');
       throw new ModelError(response.status === 401 || response.status === 403 ? 'authentication_failed' : response.status === 429 ? 'rate_limited' : 'upstream_unavailable');
     }
     const type = response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase();
-    const eventStream = probe === 'streaming-responses' && type === 'text/event-stream';
-    if (!type || (!eventStream && !/^application\/(?:json|[a-z0-9!#$&^_.+-]+\+json)$/.test(type)) || !response.body) { cancelBody(response); throw new ModelError('invalid_response'); }
+    const eventStream = mode?.streamResponses && type === 'text/event-stream';
+    if (!type || (!eventStream && !/^application\/(?:json|[a-z0-9!#$&^_.+-]+\+json)$/.test(type)) || !response.body) { await discard(); throw new ModelError('invalid_response'); }
     const length = Number(response.headers.get('content-length'));
-    if (length > RESPONSE_BYTES || length + budget.bytes > budget.max) { cancelBody(response); throw new ModelError('response_too_large'); }
+    if (length > RESPONSE_BYTES || length + budget.bytes > budget.max) { await discard(); throw new ModelError('response_too_large'); }
     const reader = response.body.getReader(), chunks: Uint8Array[] = [], streamParser = eventStream ? createResponsesStreamParser() : undefined;
     let bytes = 0;
-    const cancel = () => { void reader.cancel().catch(() => {}); };
+    let cancelled: Promise<unknown> | undefined;
+    const cancel = () => { cancelled ??= reader.cancel().catch(() => {}); };
     signal.addEventListener('abort', cancel, { once: true });
     try {
       for (;;) {
@@ -329,6 +353,10 @@ export class ModelClient {
       cancel(); check(signal);
       if (error instanceof ModelError) throw error;
       throw new ModelError('upstream_unavailable');
-    } finally { signal.removeEventListener('abort', cancel); reader.releaseLock(); }
+    } finally {
+      signal.removeEventListener('abort', cancel);
+      if (mode?.drain) await cancelled;
+      reader.releaseLock();
+    }
   }
 }

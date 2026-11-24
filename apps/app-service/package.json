@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@deepseek-ai/dsh-llm-pi-ai": "0.2.2-rc.5",
-    "@deepseek-ai/dsh-sdk-client": "0.2.2-rc.5",
+    "@earendil-works/pi-agent-core": "1.6.0",
+    "@earendil-works/pi-ai": "1.6.0",
     "fastify": "5.12.8"
   },
   "exports": "./dist/entry.cjs"

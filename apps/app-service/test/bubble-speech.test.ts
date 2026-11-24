@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BubbleSpeech, type SpeechTask } from '../src/speech/bubble-speech.ts';
@@ -132,13 +132,18 @@ class LocalMLXBackend:
         yield b'\\x00\\x00' * 100
         if cue == '取消这句': await asyncio.sleep(30)
 `);
-  await writeFile(join(dir, 'sounddevice.py'), `def check_output_settings(**settings):
+  await writeFile(join(dir, 'sounddevice.py'), `from pathlib import Path
+
+def check_output_settings(**settings):
     assert settings['samplerate'] == 24000
 class RawOutputStream:
     def __init__(self, **settings): assert settings['dtype'] == 'int16'
     def start(self): pass
     def write(self, data): assert data == b'\\x00\\x00' * 100
-    def stop(self): pass
+    def stop(self, *, ignore_errors):
+        assert not ignore_errors
+        with Path(__file__).with_name('device-drains').open('a') as f:
+            f.write('drained\\n')
     def close(self): pass
     def abort(self): pass
 `);
@@ -153,9 +158,75 @@ class RawOutputStream:
   const run = (text: string, controller = abort, onStart = () => {}) => backend.run({ text, audio: wav(), transcript: 'synthetic-transcript', signal: controller.signal,
     resolveStatus: (state) => { assert.equal(state, 'speaking'); started++; onStart(); } });
   await run('第一句'); await run('第二句');
+  assert.equal(await readFile(join(dir, 'device-drains'), 'utf8'), 'drained\ndrained\n');
   const profiles = (await readFile(join(dir, 'worker-profiles'), 'utf8')).trim().split('\n');
   assert.equal(profiles.length, 1); assert.equal(started, 2);
   await assert.rejects(run('取消这句', abort, () => abort.abort()));
   assert.equal(started, 3);
   await assert.rejects(access(profiles[0]!));
+});
+
+test('reply speech route enforces authentication, opt-in, revision order, pause and owned playback cancellation', async t => {
+  const { path } = await fixture(t);
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'pet-reply-workspace-'));
+  const { createService } = await import('../src/server.ts');
+  const { PetWorkspace } = await import('../src/pet-workspace.ts');
+  const run: SpeechTask[] = [];
+  const speech = new BubbleSpeech({ run: task => new Promise<void>(resolve => {
+    run.push(task); task.signal.addEventListener('abort', () => resolve(), { once: true });
+  }), close: async () => {} });
+  const workspace = new PetWorkspace({ root, catalog: [], onPauseRequested: () => { void speech.pause(); } });
+  const snapshot = () => ({ kind: 'diagnostic', status: 'idle', detail: '' } as const);
+  const headers = { host: '127.0.0.1', authorization: `Bearer ${'e'.repeat(64)}` };
+  const app = createService({ token: 'e'.repeat(64), speech, workspace, runtime: { snapshot, probe: async () => snapshot(), close: async () => {} } });
+  t.after(async () => { try { await app.close(); } finally { await rm(root, { recursive: true, force: true }); } });
+  const url = '/v1/speech/bubbles/chat-reply';
+  const request = async (payload: object) => (await app.inject({ method: 'POST', url, headers, payload })).json();
+  const text = '本机合成聊天回复';
+  const unavailable = { ok: false, error: 'unavailable' };
+  assert.equal((await app.inject({ method: 'POST', url, headers: { host: headers.host }, payload: { revision: 1, text } })).statusCode, 401);
+  for (const payload of [{ revision: 0, text }, { revision: 2.5, text }, { revision: 1, text, extra: true },
+    { revision: 1, text: null }, { revision: 1, text: '字'.repeat(121) }, { revision: 1, text: 'api_key = sk-example1234567890' }]) {
+    assert.deepEqual(await request(payload), { ok: false, error: 'invalid' });
+  }
+  assert.equal((await speech.select(path)).ok, true);
+  assert.equal(speech.enable('参考合成音').ok, true);
+  assert.deepEqual(await request({ revision: 1, text }), unavailable);
+  assert.equal((await speech.disable()).ok, true);
+  assert.deepEqual(speech.enable('参考合成音', true), { ok: true, speech: { state: 'enabled', hasReference: true, speakChatReplies: true } });
+  assert.equal((await request({ revision: 3 })).ok, true);
+  assert.deepEqual(await request({ revision: 2, text }), unavailable);
+  assert.equal(run.length, 0);
+
+  const bubble = Symbol('unrelated-pet-bubble');
+  speech.offer(bubble, '互动气泡', () => true);
+  assert.equal((await request({ revision: 4, text })).ok, true);
+  assert.equal((await request({ revision: 5 })).ok, true);
+  assert.equal(run[0]?.signal.aborted, false, 'reply stop must not abort a pet bubble');
+  await speech.cancelSource(bubble);
+  assert.equal(run.length, 1, 'cancelled pending reply never plays');
+  assert.equal((await request({ revision: 6, text })).ok, true);
+  assert.equal(run[1]?.text, text);
+  const paused = await workspace.mutate('pause', { expectedRevision: 0 });
+  assert.equal(paused.ok, true);
+  assert.equal(run[1]?.signal.aborted, true);
+  assert.deepEqual(await request({ revision: 7, text }), unavailable);
+  assert.equal((await workspace.mutate('resume', { expectedRevision: 0 })).ok, true);
+  assert.equal((await request({ revision: 8, text })).ok, true);
+  assert.equal((await speech.disable()).ok, true);
+  assert.equal(run[2]?.signal.aborted, true);
+  assert.equal(speech.status().speakChatReplies, undefined);
+  assert.equal(speech.enable('参考合成音').ok, true);
+  assert.deepEqual(await request({ revision: 9, text }), unavailable);
+  assert.equal(run.length, 3);
+
+  assert.equal((await speech.disable()).ok, true);
+  assert.equal(speech.enable('参考合成音', true).ok, true);
+  const otherBubble = Symbol('pending-bubble');
+  speech.offer(bubble, '正在播报的互动气泡', () => true);
+  speech.offer(otherBubble, '排队中的互动气泡', () => true);
+  assert.deepEqual(await request({ revision: 10, text }), unavailable);
+  await speech.cancelSource(bubble);
+  assert.equal(run.at(-1)?.text, '排队中的互动气泡');
+  await speech.cancelSource(otherBubble);
 });

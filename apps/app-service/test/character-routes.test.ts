@@ -403,3 +403,29 @@ test('legacy handoff only accepts authenticated, registered, revision-scoped com
   assert.ok((await deletion).ok);
   assert.equal((await repository.read(id)).identity, null);
 });
+
+test('local identity without a saved persona introduces the registered pet without creating identity records', { skip: process.platform === 'win32' }, async t => {
+  const { request, id, other, repository, workspace } = await setupRecordRoutes(t);
+  const before = await repository.read(id);
+  assert.equal(before.identity, null);
+  const answer = (petID = id) => request('chat/local-context', { intent: 'identity' }, petID);
+  const first = await answer();
+  assert.equal(first.statusCode, 200);
+  assert.equal(first.json().petID, id);
+  assert.match(first.json().text, /我是合成桌宠/);
+  assert.match(first.json().text, /尚未设置本机身份/);
+  assert.match(first.json().text, /桌宠 Agent.*身份/);
+  assert.deepEqual(await repository.read(id), before);
+  const current = await workspace.list();
+  assert.ok(current.ok);
+  const initial = current.workspace;
+  const instance = initial.instances.find(row => row.id === other)!;
+  assert.ok((await workspace.mutate('save', { id: other, enabled: instance.enabled, autoStartOnLaunch: instance.autoStartOnLaunch, preferences: instance.preferences, displayName: '另一只伙伴', expectedRevision: initial.revision })).ok);
+  assert.match((await answer(other)).json().text, /我是另一只伙伴/);
+  assert.doesNotMatch((await answer()).json().text, /另一只伙伴/);
+  await repository.apply(id, before.revision, { type: 'saveIdentity', value: { ...identity, name: '保存的身份', role: '导航向导' } });
+  const saved = (await answer()).json().text;
+  assert.equal(saved, `我是保存的身份。
+角色：导航向导`);
+  assert.doesNotMatch(saved, /尚未设置|合成桌宠/);
+});

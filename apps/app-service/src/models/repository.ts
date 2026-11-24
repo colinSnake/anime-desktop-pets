@@ -43,6 +43,9 @@ export class ModelRepository {
     });
     this.queue = pending.catch(() => {}); return pending;
   }
+  withSnapshot<T>(operation: (state: ModelConfiguration) => Promise<T>): Promise<T> {
+    return this.enqueue(() => operation(this.snapshot()));
+  }
   private failClosed = (): void => { this.closed = true; this.client?.close(); };
   private adopt(publication: Publication, retainedCredentialVersions = false): ModelMutation {
     const next = publication.configuration;

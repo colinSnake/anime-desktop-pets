@@ -114,8 +114,6 @@ async function runPreview(args) {
     const env = { ...process.env };
     delete env.PET_WORKSPACE_VIDEO_DIR;
     delete env.PET_WORKSPACE_UI_HMR;
-    delete env.PET_HARNESS_NODE;
-    if (workspace && process.platform === 'darwin') env.PET_HARNESS_NODE = process.execPath;
     if (workspaceUI) env.PET_WORKSPACE_UI_HMR = workspaceUI.activation;
     if (mediaReady || companionReady) env.PET_WORKSPACE_VIDEO_DIR = folder;
     const result = workspace

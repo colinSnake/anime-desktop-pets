@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import test from 'node:test';
 import { ModelClient } from '../src/models/client.ts';
+import { chatOptions } from '../src/models/chat-models.ts';
 import { resolveRoute } from '../src/models/config.ts';
 import { ModelError } from '../src/models/errors.ts';
 import { MODEL_PROTOCOLS, type ModelInput } from '../src/models/types.ts';
@@ -144,4 +145,23 @@ for (const mode of ['apiKey', 'none'] as const) test(`loopback without a Key (${
   const client = new ModelClient({ readConfiguration: () => config, readCredential: async () => { throw Error('must not read'); } });
   try { await client.complete(undefined, 'text-chat', input); assert.equal(auth, undefined); await assert.rejects(client.discover('connection-one'), code('upstream_unavailable')); assert.equal(hits, 2); assert.deepEqual(paths, ['/deployment/v1/chat/completions', '/deployment/v1/models']); }
   finally { client.close(); server.closeAllConnections(); await new Promise<void>((r, reject) => server.close(e => e ? reject(e) : r())); }
+});
+
+test('chat reasoning choice and default high reach the outbound request path without changing saved settings', async () => {
+  const config = configuration('responses');
+  config.connections[0]!.baseURL = 'https://api.openai.com/v1';
+  config.connections[0]!.models[0]!.modelID = 'gpt-6.2-sol';
+  const route = chatOptions(config)[0]!.route;
+  const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const client = new ModelClient({ readConfiguration: () => config, readCredential: async () => 'SYNTHETIC-KEY', fetch: async (url, init) => {
+    requests.push({ url: String(url), body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+    return response(textReply('responses'));
+  } });
+  const dispatch = async (send: (value: ModelInput) => void) => { send(input); };
+  await client.completeChat(route, dispatch, new AbortController().signal, 'low');
+  await client.completeChat(route, dispatch, new AbortController().signal);
+  assert.deepEqual(requests.map(request => request.body.reasoning), [{ effort: 'low' }, { effort: 'high' }]);
+  assert.ok(requests.every(request => request.url === 'https://api.openai.com/v1/responses'));
+  assert.equal(config.connections[0]!.models[0]!.reasoningEffort, undefined);
+  client.close();
 });

@@ -88,35 +88,32 @@ const toolReply = (name: string, args: string) => Response.json({ choices: [{ fi
  tool_calls: [{ id: 'call-one', type: 'function', function: { name, arguments: args } }] } }] });
 const textReply = (content: string) => Response.json({ choices: [{ finish_reason: 'stop', message: { role: 'assistant', content } }] });
 
-test('an unknown saved model can start a task only after a fixed, private-data-free tool check', async t => {
+test('an unknown saved model starts the authorised task directly, without a charged tool probe', async t => {
  const outbound: string[] = [];
  const f = await setup(t, async (_url, init) => {
   outbound.push(String(init?.body));
-  if (outbound.length === 1) return toolReply('verify_task_tools', '{}');
-  if (outbound.length === 2) return toolReply('read_task_file', '{"file":1,"offset":0}');
-  return textReply('待审结果');
+  return outbound.length === 1 ? toolReply('read_task_file', '{"file":1,"offset":0}') : textReply('待审结果');
  }, 'unknown');
  assert.equal(f.option.taskTools, 'unverified');
  assert.equal(outbound.length, 0);
  assert.equal((await f.send('create', f.input)).statusCode, 200);
  assert.equal((await f.until('completed')).result, '待审结果');
- assert.equal(outbound.length, 3);
- assert.match(outbound[0]!, /verify_task_tools/);
- assert.doesNotMatch(outbound[0]!, /读这份文件|notes.txt|你好|read_task_file/);
- assert.match(outbound[1]!, /读这份文件/);
- assert.match(outbound[2]!, /你好/);
+ assert.equal(outbound.length, 2);
+ assert.match(outbound[0]!, /读这份文件/);
+ assert.doesNotMatch(outbound[0]!, /verify_task_tools|notes.txt|你好/);
+ assert.match(outbound[1]!, /你好/);
 });
 
-test('unknown routes that ignore the tool check receive no task prompt or material', async t => {
+test('unknown routes requesting an unapproved tool receive no material or continuation', async t => {
  const outbound: string[] = [];
  const f = await setup(t, async (_url, init) => {
   outbound.push(String(init?.body));
-  return textReply('不调用工具');
+  return toolReply('shell', '{}');
  }, 'unknown');
  assert.equal((await f.send('create', f.input)).statusCode, 200);
- assert.equal((await f.until('failed')).error, 'tools_unavailable');
+ assert.equal((await f.until('failed')).error, 'provider_failed');
  assert.equal(outbound.length, 1);
- assert.doesNotMatch(outbound[0]!, /读这份文件|notes.txt|你好/);
+ assert.doesNotMatch(outbound[0]!, /verify_task_tools|notes.txt|你好/);
 });
 
 test('an explicitly unsupported model never dispatches a task or a tool check', async t => {

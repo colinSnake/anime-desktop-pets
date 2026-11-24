@@ -1,3 +1,5 @@
+import { dafeiyu, longmei, samePetPackage } from '../../../../packages/contracts/src/built-in-pets.ts';
+import type { PackageReference } from '../../../../packages/contracts/src/pets.ts';
 import { parseLocalChatCommand } from '../../../../packages/contracts/src/local-chat.ts';
 import { knowledgeMatchLimit, knowledgeQueryLimit } from '../../../../packages/contracts/src/knowledge-search.ts';
 import type { Memory } from '../../../../packages/contracts/src/character-records.ts';
@@ -59,15 +61,21 @@ export function buildOnlineChatContext(state: CharacterState, question: string, 
   return context;
 }
 
-type ChatContextSnapshot = { characterRevision: number; context: OnlineChatContext };
+export function builtInChatPersona(pkg: PackageReference): string | undefined {
+  if (samePetPackage(pkg, longmei)) return '你是桌宠龙妹。语气轻松直接，先给结论，再给必要细节。不确定就直说，不声称执行过未完成的操作。';
+  if (samePetPackage(pkg, dafeiyu)) return '你是桌宠大肥鱼。语气温和简短，诚实说明不确定之处，不声称执行过未完成的操作。';
+}
+
+type ChatContextSnapshot = { characterRevision: number; context: OnlineChatContext; persona?: string };
 
 /** The synchronous callback can start transport while authorization is ordered
  * with record edits and instance deletion. Never wait for network in this queue. */
 export function withOnlineChatContext<T>(workspace: PetWorkspace, repository: CharacterRepository, petID: string, question: string,
   use: (snapshot: ChatContextSnapshot) => T, now?: string) {
-  return workspace.withRegisteredInstance(petID, async id => {
+  return workspace.withRegisteredInstance(petID, async (id, instance) => {
     const state = await repository.readForOnlineChat(id);
-    return use({ characterRevision: state.revision, context: buildOnlineChatContext(state, question, now ?? new Date().toISOString()) });
+    const persona = builtInChatPersona(instance.package);
+    return use({ characterRevision: state.revision, ...(persona && { persona }), context: buildOnlineChatContext(state, question, now ?? new Date().toISOString()) });
   });
 }
 

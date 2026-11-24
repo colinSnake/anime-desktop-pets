@@ -43,6 +43,9 @@ export const responses: ProtocolAdapter = {
         const c = call(item.call_id, item.name, argumentsObject(item.arguments)); calls.push(c);
         replay.push({ type: 'function_call', ...(item.id === undefined ? {} : { id: token(item.id) }), call_id: c.id, name: c.name, arguments: JSON.stringify(c.arguments) });
       } else if (item.type === 'message' && item.role === 'assistant') {
+        // Some gateways omit the item status, but an explicitly unfinished
+        // message contradicts a completed envelope and must not become history.
+        if (root.status === 'completed' && item.status != null && item.status !== 'completed') return invalidResponse();
         const content: JsonObject[] = [];
         for (const v of array(item.content)) {
           const part = object(v);

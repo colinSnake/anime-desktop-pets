@@ -6,7 +6,7 @@ import type { LegacyHandoffReply } from '../../../packages/contracts/src/legacy-
 import type { WorkspaceVideoHost } from './workspace-video-host.ts';
 import { isTaskFollowingState, type TaskFollowingState } from '../../app-service/src/codex-task-following.ts';
 import { probeError, type ModelProbeInput, type ModelProbeReply } from '../../../packages/contracts/src/model-probe.ts';
-import { chatUnavailable, requestChatHistory, requestChatModels, requestOnlineChat } from './chat-transport.ts';
+import { chatUnavailable, requestChatMaterialApproval, requestChatHistory, requestChatModels, requestOnlineChat } from './chat-transport.ts';
 import type { ChatListResult, ChatSendResult, OnlineChatInput } from '../../../packages/contracts/src/online-chat.ts';
 import { recordRoutes, type RecordAction } from '../../../packages/contracts/src/character-records.ts';
 import type { IdentityWriteAction } from '../../../packages/contracts/src/characters.ts';
@@ -50,7 +50,6 @@ export class ServiceProcess {
     private options: {
       modelsRoot?: string;
       businessRoot?: string;
-      harnessExecutable?: string;
       taskFollowingHome?: string;
       onTaskFollowingState?: (state: TaskFollowingState) => void;
       speech?: { python: string; model: string; worker: string };
@@ -139,7 +138,6 @@ export class ServiceProcess {
           workspace: this.options.workspace,
           modelsRoot: this.options.modelsRoot,
           ...(this.options.businessRoot ? { businessRoot: this.options.businessRoot } : {}),
-          ...(this.options.harnessExecutable ? { harnessExecutable: this.options.harnessExecutable } : {}),
           speech: this.options.speech,
           taskFollowingHome: this.options.taskFollowingHome,
           ...(this.options.videoHost ? { workspaceVideo: true } : {}),
@@ -229,13 +227,19 @@ export class ServiceProcess {
     const result = await requestChatModels({ port, token: this.token });
     return this.closed || this.port !== port ? chatUnavailable : result;
   }
+  async approveChatMaterials(input: OnlineChatInput, signal: AbortSignal) {
+    const port = this.port;
+    if (this.closed || !port || !this.options.modelsRoot) return chatUnavailable;
+    const result = await requestChatMaterialApproval({ port, token: this.token }, input, signal);
+    return this.closed || this.port !== port ? chatUnavailable : result;
+  }
   async sendOnlineChat(input: OnlineChatInput, signal: AbortSignal): Promise<ChatSendResult> {
     const port = this.port;
     if (this.closed || !port || !this.options.modelsRoot) return chatUnavailable;
     const result = await requestOnlineChat({ port, token: this.token }, input, signal);
     return this.closed || this.port !== port ? chatUnavailable : result;
   }
-  async speechRequest(method: 'status' | 'reference' | 'clear-reference' | 'enable' | 'disable', data?: unknown): Promise<SpeechResult> {
+  async speechRequest(method: 'status' | 'reference' | 'clear-reference' | 'enable' | 'disable' | 'chat-reply', data?: unknown): Promise<SpeechResult> {
     const unavailable = { ok: false, error: 'unavailable' } as const;
     if (this.closed || !this.port) return unavailable;
     const url = `http://127.0.0.1:${this.port}/v1/speech/bubbles${method === 'status' ? '' : `/${method}`}`;

@@ -3,7 +3,7 @@
 .model-page-header, .model-list-header, .model-parameter-heading, .model-actions { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .model-page-header { padding-bottom: 18px; margin-bottom: 14px; border-bottom: 1px solid var(--line); }
 .model-page-header h1 { margin: 0; font-size: clamp(22px, 3vw, 28px); line-height: 1.2; letter-spacing: -.035em; }
-.model-page-crumb { margin: 0 0 3px; color: var(--muted); font-size: 11px; }
+.model-page-subtitle { margin: 4px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
 .model-actions { justify-content: flex-end; flex-wrap: wrap; }
 .model-page-header .workspace-topline-actions { margin: 0; }
 .model-page-header .theme-toggle, .model-add-config { min-height: 34px; height: 34px; }
@@ -45,8 +45,9 @@
 .model-status-button { display: inline-grid; place-items: center; flex: none; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 8px; background: var(--transparent); color: var(--model-test-untested); }
 .model-status-button[data-status="ok"] { color: var(--model-test-success); }
 .model-status-button[data-status="failed"] { color: var(--model-test-failure); }
+.model-status-button[data-status="unavailable"] { color: var(--muted); }
 .model-status-button[aria-disabled="true"] { cursor: default; }
-.model-status-button:hover:not([aria-disabled="true"]) { background: var(--button-hover); }
+.model-status-button:hover:not([aria-disabled="true"]) { background: var(--transparent); }
 .model-status-button:focus-visible { outline-width: 2px; outline-offset: 0; }
 .model-status-dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
 .model-status-button[data-testing] .model-status-dot { outline: 1px solid currentColor; outline-offset: 2px; }

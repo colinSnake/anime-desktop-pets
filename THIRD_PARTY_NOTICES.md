@@ -70,10 +70,11 @@ AppKit、AVFoundation、AVKit、CoreGraphics、ImageIO、QuartzCore 是系统框
 龙妹外观观察与提示词仅是对既有素材的描述性归纳，不恢复原始生成参数，
 不使第三方角色成为本项目原创，也不授予新生成衍生角色的商用或再分发权利。
 
-## 聊天编辑器与 DeepSeek Harness SDK
+## 聊天编辑器与 Pi Agent Core
 
 - Lexical、`@lexical/plain-text`、`@lexical/history` 与 `@lexical/utils` 固定 `0.49.0`，用于桌面聊天编辑，按上游 MIT 与各包附带声明。无移动 WebKit 补丁。`react-markdown` 固定 `10.1.0`（MIT），仅为本机草稿预览；禁用 HTML、外部链接及图片加载。传递依赖适用各自许可证。
-- Ape Agent Harness 仅作本机架构和输入交互参考；不复制内部源码或产品数据。常规 macOS 开发服务通过 pnpm 直接固定 `@deepseek-ai/dsh-sdk-client` 和 `@deepseek-ai/dsh-llm-pi-ai` `0.2.2-rc.5`（MIT）；同版 `@deepseek-ai/dsh` 由 SDK 传递安装和解析。这些包保留自身许可证；其传递依赖适用各自许可。普通构建不复制完整第三方依赖树或 Node 二进制，独立分发需另做依赖与许可证清点。
+- Ape Agent Harness 仅作本机编辑交互参考，不复制内部源码或产品数据。旧 DeepSeek Harness 运行依赖不再随当前服务构建。
+- `earendil-works/pi` `v1.6.0`（`faac585884ae2c013a6b1400f3e9e77f10b34bac`）：直接锁定 `@earendil-works/pi-agent-core`、`@earendil-works/pi-ai`，搭配同版传递依赖 `@earendil-works/pi-schema`。服务只构建实际用到的循环、消息流和验证代码，不接其内置服务商。保留原 [MIT 许可证](licenses/pi-mit.txt)和 schema 随包的 [TypeBox 声明](licenses/pi-schema-typebox.txt)；构建原样放在服务 `dist/licenses/`。独立发布仍需完整清点其他依赖与素材。
 
 ## 工作区图标
 

@@ -1,5 +1,22 @@
+import { replySpeechIPC } from '../../../packages/contracts/src/speech.ts';
 import { contextBridge, ipcRenderer } from "electron";
+import { microphoneIPC, voiceDraftIPC } from '../../../packages/contracts/src/voice-draft.ts';
 import type { DesktopBridge } from "../../../packages/contracts/src/index.ts";
+
+import { MicrophoneCapture } from './microphone-capture.ts';
+import { openMicrophone } from './microphone-device.ts';
+import { MicrophoneGesture } from './microphone-gesture.ts';
+
+const microphone = process.platform === 'darwin' && process.arch === 'arm64' && process.isMainFrame === true
+  ? new MicrophoneCapture({
+    arm: () => ipcRenderer.invoke(microphoneIPC.arm),
+    started: id => ipcRenderer.invoke(microphoneIPC.started, id),
+    cancel: id => ipcRenderer.invoke(microphoneIPC.cancel, id),
+    finish: (id, audio) => ipcRenderer.invoke(microphoneIPC.finish, id, audio),
+  }, openMicrophone) : undefined;
+const microphoneGesture = microphone ? new MicrophoneGesture(window) : undefined;
+const noMicGesture = Promise.resolve({ ok: false, error: 'cancelled' } as const);
+if (microphone) ipcRenderer.on(microphoneIPC.revoked, (_event, id) => microphone.revoked(id));
 
 const bridge: DesktopBridge = Object.freeze({
   ...(process.platform === 'darwin' ? {
@@ -31,11 +48,14 @@ const bridge: DesktopBridge = Object.freeze({
     setGoalChatShare: input => ipcRenderer.invoke('pet:characters-setGoalChatShare', input),
   } satisfies NonNullable<DesktopBridge['characters']>) } : {}),
   ...(process.platform === 'darwin' ? { agentTasks: Object.freeze({
-    create: input => ipcRenderer.invoke('pet:agent-tasks-create', input),
     list: input => ipcRenderer.invoke('pet:agent-tasks-list', input),
     read: input => ipcRenderer.invoke('pet:agent-tasks-read', input),
     cancel: input => ipcRenderer.invoke('pet:agent-tasks-cancel', input),
   } satisfies NonNullable<DesktopBridge['agentTasks']>) } : {}),
+  ...(process.platform === 'darwin' ? { chatProjects: Object.freeze({
+    list: input => ipcRenderer.invoke('pet:chat-project-list', input),
+    create: input => ipcRenderer.invoke('pet:chat-project-create', input),
+  } satisfies NonNullable<DesktopBridge['chatProjects']>) } : {}),
   ...(process.platform === 'darwin' ? { chatHistory: Object.freeze({
     list: input => ipcRenderer.invoke('pet:chat-history-list', input),
     detail: input => ipcRenderer.invoke('pet:chat-history-detail', input),
@@ -44,6 +64,7 @@ const bridge: DesktopBridge = Object.freeze({
   ...(process.platform === 'darwin' ? { onlineChat: Object.freeze({
     list: () => ipcRenderer.invoke('pet:chat-models'),
     send: input => ipcRenderer.invoke('pet:chat-send', input),
+    approveMaterials: input => ipcRenderer.invoke('pet:chat-approve-materials', input),
     cancel: async id => { await ipcRenderer.invoke('pet:chat-cancel', id); },
   } satisfies NonNullable<DesktopBridge['onlineChat']>) } : {}),
   ...(process.platform === 'darwin' ? { models: Object.freeze({
@@ -56,6 +77,21 @@ const bridge: DesktopBridge = Object.freeze({
     testConnection: input => ipcRenderer.invoke('pet:models-test-connection', input),
     cancelConnectionTest: async id => { await ipcRenderer.invoke('pet:models-cancel-connection-test', id); },
   } satisfies NonNullable<DesktopBridge['models']>) } : {}),
+  ...(microphone ? { voiceDraft: Object.freeze({
+    select: () => ipcRenderer.invoke(voiceDraftIPC.select),
+    cancel: async () => { await ipcRenderer.invoke(voiceDraftIPC.cancel); },
+    microphone: Object.freeze({
+      authorize: () => microphoneGesture?.take('authorize') ? ipcRenderer.invoke(microphoneIPC.authorize) : noMicGesture,
+      start: (interrupted: () => void) => microphoneGesture?.take('start')
+        ? microphone.start(typeof interrupted === 'function' ? interrupted : undefined) : noMicGesture,
+      stop: () => microphone.stop(),
+      cancel: () => microphone.cancel(),
+    }),
+  } satisfies NonNullable<DesktopBridge['voiceDraft']>) } : {}),
+  ...(microphone ? { replySpeech: Object.freeze({
+    displayed: async requestID => { await ipcRenderer.invoke(replySpeechIPC.displayed, requestID); },
+    stop: async () => { await ipcRenderer.invoke(replySpeechIPC.stop); },
+  } satisfies NonNullable<DesktopBridge['replySpeech']>) } : {}),
   ...(process.platform === 'darwin' && process.arch === 'arm64' ? { speech: Object.freeze({
     status: () => ipcRenderer.invoke('pet:speech-status'),
     selectReference: () => ipcRenderer.invoke('pet:speech-selectReference'),

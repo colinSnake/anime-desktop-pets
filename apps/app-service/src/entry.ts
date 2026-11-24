@@ -16,7 +16,8 @@ import { catalogEntry, shape, type CatalogEntry } from "../../../packages/contra
 import { PetLifecycle } from "./pet-lifecycle.ts";
 import { dirname, isAbsolute, join } from "node:path";
 import { createService } from "./server.ts";
-import { createHarnessRuntime } from "./agent/harness-runtime.ts";
+import { createPiTextRuntime } from "./agent/pi-runtime.ts";
+import { AgentStateStore } from "./agent/agent-state.ts";
 import { PythonRuntime } from "./python-runtime.ts";
 import { PetPackageImporter } from "./pet-package-importer.ts";
 
@@ -99,8 +100,6 @@ function message(value: unknown) {
       !input.workspace)) ||
     (input.taskFollowingHome !== undefined && (typeof input.taskFollowingHome !== 'string' ||
       !isAbsolute(input.taskFollowingHome) || input.taskFollowingHome.includes('\0') || Buffer.byteLength(input.taskFollowingHome) > 3072)) ||
-    (input.harnessExecutable !== undefined && (typeof input.harnessExecutable !== "string" ||
-      !isAbsolute(input.harnessExecutable) || input.harnessExecutable.includes("\0") || Buffer.byteLength(input.harnessExecutable) > 4096)) ||
     (input.modelsRoot !== undefined && (typeof input.modelsRoot !== "string" || input.modelsRoot.length > 4096 || input.modelsRoot.includes("\0") || !isAbsolute(input.modelsRoot)))
   ) {
     void stop();
@@ -166,18 +165,14 @@ function message(value: unknown) {
     const keychain = typeof __dirname === "string" ? new MacKeychainBackend(join(__dirname, "model-keychain")) : undefined;
     const models = process.platform === "darwin" && typeof input.modelsRoot === "string"
       ? new ModelManagement(input.modelsRoot, keychain) : undefined;
+    const agentState = models && workspace && typeof businessRoot === 'string' ? new AgentStateStore(businessRoot) : undefined;
     service = createService({
       token,
       models,
       agentTasks: models && workspace && typeof businessRoot === 'string' ? new AgentTaskStore(businessRoot) : undefined,
       chatHistory: typeof businessRoot === 'string' ? new ChatHistory(businessRoot) : undefined,
-      // The normal desktop service always composes the SDK route. Missing
-      // Node/worker/SDK fails before reading a model Key.
-      chatRuntime: models && createHarnessRuntime({
-        worker: typeof __dirname === 'string' ? join(__dirname, 'harness-worker.mjs') : '',
-        executable: typeof input.harnessExecutable === 'string' ? input.harnessExecutable : (parentPort ? '' : process.execPath),
-        privateRoots: [businessRoot, input.modelsRoot, workspaceOptions?.root].filter((value): value is string => typeof value === 'string'),
-      }),
+      agentState,
+      chatRuntime: models && createPiTextRuntime(),
       speech,
       characters: process.platform === "darwin" && workspaceOptions ? new CharacterRepository(join(workspaceOptions.root, "characters")) : undefined,
       workspace,
@@ -187,7 +182,9 @@ function message(value: unknown) {
         python: python as string | undefined,
       }),
     });
+    // Workspace owns the cross-process lease. Do not initialize the ledger until the lease is held.
     if (businessRoot && !(await workspace?.list())?.ok) throw new Error('workspace_storage_unavailable');
+    await agentState?.ready();
     await service.listen({ host: "127.0.0.1", port: 0 });
     const address = service.server.address();
     if (!address || typeof address === "string")
