@@ -32,7 +32,7 @@ test('the model page starts with its title followed by a descriptive subtitle', 
   const header = html.match(/<header class="model-page-header">([\s\S]*?)<\/header>/)?.[1];
   assert.ok(header);
   assert.doesNotMatch(header, /工作区|model-page-crumb/);
-  assert.match(header, /<h1[^>]*>模型管理<\/h1><p[^>]*>配置服务商和模型，设置聊天默认使用的模型。<\/p>/);
+  assert.match(header, /<h1[^>]*>模型管理<\/h1><p[^>]*>聊天和弹幕演练默认使用首个已保存的服务商。<\/p>/);
 });
 
 test('the model editor offers an empty password input without the clipboard menu workflow', async () => {
@@ -95,15 +95,16 @@ test('independent connection and model folds retain both connection drafts and s
   assert.equal(payload.connection.defaultModelEntryID, 'm');
 });
 
-test('defaults and deletes operate on saved versions and require explicit replacements', async () => {
+test('the editor retains the connection default but exposes no manual global default controls', async () => {
   const { controller: c, get, inputs } = fixture(); await c.load();
   c.edit('a'); c.patch('a', { defaultModelEntryID: 'n' });
-  await c.setDefault('a');
-  assert.deepEqual(inputs[0], ['default', { expectedRevision: 3, connectionID: 'a', entryID: 'm' }]);
+  const html = renderToStaticMarkup(createElement(ModelEditorDialog, { editor: { kind: 'edit', id: 'a' },
+    state: get(), controller: c, onMode() {}, onClose() {}, onSaved() {} }));
+  assert.match(html, /连接默认模型/);
+  assert.doesNotMatch(html, /全局默认/);
   c.removeEntry('a', 'n'); assert.equal(get().drafts.get('a')?.edit.models.length, 2);
   c.removeEntry('a', 'n', 'm'); assert.equal(get().drafts.get('a')?.edit.defaultModelEntryID, 'm');
-  await c.remove('a'); assert.equal(inputs.length, 1);
-  await c.remove('a', 'b'); assert.deepEqual(inputs[1], ['remove', { expectedRevision: 1, connectionID: 'a', replacementDefault: 'b' }]);
+  assert.deepEqual(inputs, []);
 });
 
 test('changing protocol confirms removal of incompatible options, never overwrites a manual address or follows with a saved Key', async () => {
@@ -265,6 +266,27 @@ test('the status button next to the service name reports only the saved default 
   assert.match(render(), status('untested', '未测试'));
 });
 
+test('a test without a confirmed outcome explains why the dot did not change, without replacing prior evidence', async () => {
+  const input = { connectionID: 'a', expectedRevision: 1, entryID: 'm', modelID: 'm' };
+  let listing = good();
+  const { controller: c } = fixture({ list: async () => listing,
+    testConnection: async () => ({ version: 1, ok: false, error: 'credentials_unavailable' }), cancelConnectionTest: async () => {} });
+  const render = () => renderToStaticMarkup(createElement(ModelPage, { controller: c }));
+  await c.load();
+  await c.testSavedDefault('a', 1);
+  assert.match(render(), /data-status="untested"[^>]*aria-label="测试连接 连接 a：未测试/);
+  assert.match(render(), /role="alert">连接 a：本次测试未确认，状态保持不变。无法读取此连接的 Key/);
+
+  listing = { version: 1, ok: true, configuration: initial(), probeResults: [{ input, testedAt: '2026-11-24T00:00:00.000Z',
+    result: { version: 1, ok: true, connectionID: 'a', revision: 1, entryID: 'm' } }] };
+  c.leave();
+  await c.load();
+  assert.doesNotMatch(render(), /role="alert">连接 a：本次测试未确认/);
+  await c.testSavedDefault('a', 1);
+  assert.match(render(), /data-status="ok"[^>]*aria-label="测试连接 连接 a：测试成功/);
+  assert.match(render(), /role="alert">连接 a：本次测试未确认/);
+});
+
 test('testing the saved default without a Key sends once and rejects drafts, stale revisions and overlapping tests', async () => {
   const config = initial();
   const saved = config.connections[0]!;
@@ -406,7 +428,7 @@ test('changing protocol clears reasoning and modality choices that the new proto
   assert.equal(model.inputModalities, undefined);
 });
 
-test('deleting the last saved model requires explicitly handling the global default', async () => {
+test('deleting the last saved model requires confirmation but no global replacement choice', async () => {
   const config = initial();
   const saved = config.connections[0]!;
   saved.models.pop();
@@ -414,8 +436,8 @@ test('deleting the last saved model requires explicitly handling the global defa
   await c.load();
   const deletion = renderToStaticMarkup(createElement(DeleteModelDialog, { connection: saved, controller: c, state: get(), close: () => {} }));
   assert.match(deletion, /最后一个模型.*?一并移除连接/);
-  assert.match(deletion, /清空全局默认/);
-  assert.match(deletion, /disabled=""[^>]*>确认删除/);
+  assert.doesNotMatch(deletion, /全局默认|替代的连接默认模型/);
+  assert.doesNotMatch(deletion, /disabled=""[^>]*>确认删除/);
 });
 
 test('deleting one model pins the saved revision and replaces a default only on explicit selection', async () => {
@@ -431,11 +453,10 @@ test('deleting one model pins the saved revision and replaces a default only on 
   assert.equal(get().configuration?.defaultConnectionID, 'a');
 });
 
-test('last-model removal requires an explicit global fallback and does not save an empty connection', async () => {
+test('last-model removal clears a legacy reference without asking for a fallback or saving an empty connection', async () => {
   const config = initial(); config.connections[0]!.models.pop();
   const { controller: c, inputs } = fixture({ list: async () => good(config) }); await c.load();
-  assert.equal(await c.deleteModel('a', 1, 'm'), false);
-  assert.equal(await c.deleteModel('a', 1, 'm', null), true);
+  assert.equal(await c.deleteModel('a', 1, 'm'), true);
   assert.deepEqual(inputs, [['remove', { connectionID: 'a', expectedRevision: 1, replacementDefault: null }]]);
 });
 
@@ -476,8 +497,9 @@ test('deleting a saved connection with an older revision works against the isola
   assert.equal((await service.run('default', { expectedRevision: 2, connectionID: 'a', entryID: 'm' })).ok, true);
   const { controller: c, get } = fixture({ list: () => service.run('list', undefined), remove: input => service.run('remove', input) });
   await c.load(); assert.equal(get().configuration?.revision, 3); assert.equal(get().configuration?.connections[0]?.revision, 1);
-  await c.remove('a', 'b');
-  assert.equal(get().configuration?.defaultConnectionID, 'b'); assert.deepEqual(get().configuration?.connections.map(item => item.id), ['b']);
+  await c.remove('a');
+  assert.equal(get().configuration?.defaultConnectionID, null); assert.deepEqual(get().configuration?.connections.map(item => item.id), ['b']);
+  assert.deepEqual((await service.listChatModels()).filter(item => item.isDefault).map(item => item.route.connectionID), ['b']);
 });
 
 const discovered = (ids = ['m', 'new/model']): ModelDiscoveryReply => ({ version: 1, ok: true, connectionID: 'a', revision: 1, truncated: true,
@@ -595,6 +617,24 @@ test('post-save batch tests require explicit opt-in and a confirmed write, and p
     assert.equal(await c.save('a', 'synthetic-test-key', optIn ? ['m', 'n'] : undefined), !fails);
     assert.deepEqual(requests, optIn && !fails ? ['m', 'n'] : []);
   }
+});
+
+test('an explicitly approved post-save batch checks the saved default before another model can stop the batch', async () => {
+  const requests: string[] = [];
+  const { controller: c } = fixture({ save: async input => good({ ...initial(), connections: [
+    { ...input.connection, credentialState: 'missing', revision: 9 },
+  ] }), testConnection: async input => {
+    requests.push(input.entryID);
+    return input.entryID === 'm' ? { version: 1, ok: false, error: 'provider_not_found' }
+      : { version: 1, ok: true, connectionID: 'a', revision: 9, entryID: 'n' };
+  }, cancelConnectionTest: async () => {} });
+  await c.load();
+  c.edit('a');
+  c.patch('a', { defaultModelEntryID: 'n' });
+  assert.equal(await c.save('a', '', ['m', 'n']), true);
+  assert.deepEqual(requests, ['n', 'm']);
+  const html = renderToStaticMarkup(createElement(ModelPage, { controller: c }));
+  assert.match(html, /data-status="ok"[^>]*aria-label="测试连接 连接 a：测试成功/);
 });
 
 test('a new local connection can save and explicitly test with a blank Key', async () => {

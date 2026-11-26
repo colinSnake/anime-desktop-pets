@@ -14,7 +14,6 @@ export function ModelEditorDialog({ editor, state, controller, onMode, onClose, 
   onMode(mode: 'provider' | 'custom'): void; onClose(): void; onSaved(): void;
 }) {
   const [parameterDrafts, setParameterDrafts] = useState<ReadonlySet<string>>(new Set());
-  const [confirmClear, setConfirmClear] = useState(false);
   const modelToFocus = useRef<string>(undefined);
   const keyInput = useRef<HTMLInputElement>(null);
   const [approved, setApproved] = useState<{ id: string; draft: object }>();
@@ -40,8 +39,6 @@ export function ModelEditorDialog({ editor, state, controller, onMode, onClose, 
   const feedback = !state.feedback?.id || state.feedback.id === id ? state.feedback : undefined;
   const decision = draft && keyNeedsDecision(draft, saved);
   const shown = connection?.models ?? [];
-  const global = state.configuration?.defaultConnectionID === id;
-  const defaultUnsaved = !!saved && connection?.defaultModelEntryID !== saved.defaultModelEntryID;
   const offerTestAfterSave = controller.canTest && !!connection;
   const normalizedBase = connection && normalizeModelBaseURL(connection.baseURL, connection.apiProtocol);
   const canTestAfterSave = offerTestAfterSave && !!normalizedBase;
@@ -112,16 +109,6 @@ export function ModelEditorDialog({ editor, state, controller, onMode, onClose, 
           onChange={event => controller.patch(id, { defaultModelEntryID: event.currentTarget.value })}>
           {connection.models.map(entry => <option key={entry.entryID} value={entry.entryID}>{modelName(entry)}</option>)}
         </select></ModelField></div>}
-        {saved && <div className="model-default-options">
-          {confirmClear && global ? <div className="model-inline"><p>清空全局默认后不会自动换用其他模型。</p><div className="model-actions">
-            <button type="button" className="button secondary" onClick={() => setConfirmClear(false)}>取消清空</button>
-            <button type="button" className="button destructive" disabled={blocked || stale} onClick={() => {
-              if (controller.getSnapshot().configuration?.defaultConnectionID === id) void controller.setDefault(null);
-              setConfirmClear(false);
-            }}>确认清空</button></div></div> : <button type="button" className="model-text-button" disabled={blocked || stale || (!global && defaultUnsaved)}
-            onClick={() => { if (global) setConfirmClear(true); else void controller.setDefault(id); }}>{global ? '清空全局默认' : '将已保存的连接默认设为全局默认'}</button>}
-          {!global && defaultUnsaved && <p className="model-note">请先保存连接默认模型的变更。</p>}
-        </div>}
         {!decision && !draft.detach && detachKey}
         <ModelParameters draftKey={`${id}:${draft.provider ?? ''}:${draft.expectedRevision}`} entries={shown} expanded={parametersOpen}
           onToggle={() => setParametersOpen(!parametersOpen)} onChange={(entryID, fields) => controller.patchEntry(id, entryID, fields)}

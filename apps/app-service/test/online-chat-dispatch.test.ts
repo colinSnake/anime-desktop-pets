@@ -11,6 +11,8 @@ import { chatHistoryPaths, isHistoryDetailResult } from '../../../packages/contr
 import { ModelManagement } from '../src/models/management.ts';
 import { PetWorkspace } from '../src/pet-workspace.ts';
 import { CharacterRepository } from '../src/characters/repository.ts';
+import { BubbleSpeech } from '../src/speech/bubble-speech.ts';
+import { LiveProfileStore } from '../src/live/profile.ts';
 import { createService } from '../src/server.ts';
 import { sendOnlineChat } from '../src/online-chat.ts';
 import { TextChatTurns, type TextChatRuntime } from '../src/agent/text-chat-runtime.ts';
@@ -29,7 +31,7 @@ const writeDraft = (id: string) => {
   return { ...draft, id, displayName: id, baseURL: `https://${id}.invalid/v1` };
 };
 const syntheticRuntime: TextChatRuntime = (text, complete) => complete(text);
-async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, beforeRead?: () => Promise<void>, chatRuntime: TextChatRuntime | null = syntheticRuntime, withHistory = false, withAgentState = false) {
+async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, beforeRead?: () => Promise<void>, chatRuntime: TextChatRuntime | null = syntheticRuntime, withHistory = false, withAgentState = false, speech?: BubbleSpeech) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'pet-online-chat-')));
   const { backend } = syntheticVault(); let reads = 0;
   const models = new ModelManagement(join(root, 'models'), { ...backend, read: async (...args) => { reads++; await beforeRead?.(); return backend.read(...args); } }, undefined, { fetch });
@@ -41,7 +43,7 @@ async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, befo
   if (withHistory) await writeFile(historyFile, '', { mode: 0o600 });
   const chatHistory = withHistory ? new ChatHistory(root) : undefined;
   const agentState = withAgentState ? new AgentStateStore(root) : undefined;
-  const app = createService({ token, models, workspace, characters, chatHistory, agentState, chatRuntime: chatRuntime ?? undefined, runtime: { snapshot, probe: async () => snapshot(), close: async () => {} } });
+  const app = createService({ token, models, workspace, characters, ...(speech && {speech,liveProfile:new LiveProfileStore(join(root,'live'))}), chatHistory, agentState, chatRuntime: chatRuntime ?? undefined, runtime: { snapshot, probe: async () => snapshot(), close: async () => {} } });
   t.after(async () => { await app.close(); await rm(root, { recursive: true, force: true }); });
   const created = await workspace.mutate('add', { expectedRevision: 0, package: pkg });
   assert.ok(created.ok);
@@ -62,7 +64,7 @@ async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, befo
   };
   const routes = async () => {
     const result = await list(); assert.equal(result.statusCode, 200);
-    return result.json().models as { route: { connectionID: string; modelEntryID: string; fingerprint: string }; ready: boolean }[];
+    return result.json().models as { route: { connectionID: string; modelEntryID: string; fingerprint: string }; ready: boolean; isDefault: boolean }[];
   };
   const share = async () => {
     const added = await characters.apply(petID, 0, { type: 'addMemory', value: { kind: '事实', text: '蓝色纸船', source: '', citation: '', version: '' } });
@@ -71,8 +73,29 @@ async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, befo
     await characters.apply(petID, 2, { type: 'setMemoryChatShare', id, enabled: true });
     return () => workspace.withRegisteredInstance(petID, registered => characters.apply(registered, 3, { type: 'setMemoryChatShare', id, enabled: false }));
   };
-  return { app, petID, workspace, models, characters, historyFile, agentState, reads: () => reads, write, defaultTo, list, routes, send, share };
+  return { app, root, petID, workspace, models, characters, historyFile, agentState, reads: () => reads, write, defaultTo, list, routes, send, share };
 }
+
+test('online chat returns reported input usage and the saved capacity without an extra provider call', use, async t => {
+  let calls = 0;
+  const f = await fixture(t, async () => {
+    calls++;
+    return Response.json({ ...await completion().json(), usage: calls === 1 ? { prompt_tokens: 151_000, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 120_000 } } : { completion_tokens: 2 } });
+  });
+  const draft = writeDraft('usage'); draft.models[0]!.contextWindow = 258_000;
+  assert.ok((await f.models.run('save', { connection: draft, expectedRevision: 0, credential: { kind: 'keep' } })).ok);
+  const option = (await f.list()).json().models[0];
+  assert.equal(option.contextWindow, 258_000);
+  assert.equal(calls, 0);
+  const first = await f.send(option.route);
+  assert.equal(first.statusCode, 200, first.body);
+  assert.deepEqual(first.json().usage, { inputTokens: 151_000 });
+  assert.equal(calls, 1);
+  const next = await f.send(option.route);
+  assert.equal(next.statusCode, 200, next.body);
+  assert.equal(Object.hasOwn(next.json(), 'usage'), false);
+  assert.equal(calls, 2);
+});
 
 test('fixed authenticated chat sends the visible destination and only authorized context, with no secret or endpoint in its list', use, async t => {
   const outbound: { url: string; headers: Headers; body: string }[] = [];
@@ -251,13 +274,38 @@ test('a model without a Key is selectable and sends anonymously; a stale default
     assert.equal(new Headers(init?.headers).has('authorization'), false);
     return completion();
   });
-  await f.write('first'); await f.write('missing', 0, false); await f.defaultTo('first', 2);
-  const [first, missing] = await f.routes();
+  await f.write('first'); await f.write('missing', 0, false);
+  const [, missing] = await f.routes();
   assert.equal(missing!.ready, true);
   assert.equal((await f.send(missing!.route)).statusCode, 200);
-  await f.defaultTo('missing', 3);
-  assert.equal((await f.send({ ...first!.route, useDefault: true })).json().error, 'route_changed');
   assert.equal(calls, 1); assert.equal(f.reads(), 0);
+});
+
+test('chat defaults to the earliest saved connection and its saved default entry, not the legacy override', use, async t => {
+  const sent: string[] = [];
+  const f = await fixture(t, async (url, options) => {
+    sent.push(`${new URL(String(url)).hostname}/${JSON.parse(String(options?.body)).model}`);
+    return completion();
+  });
+  const earliest = writeDraft('z-first');
+  const alternate = { ...earliest.models[0]!, entryID: 'entry-alternate', modelID: 'preferred-api' };
+  earliest.models.push(alternate);
+  earliest.defaultModelEntryID = alternate.entryID;
+  assert.ok((await f.models.run('save', { connection: earliest, expectedRevision: 0, credential: { kind: 'keep' } })).ok);
+  await f.write('a-second', 0, false);
+  const [other, first, second] = await f.routes();
+  assert.deepEqual([other!.isDefault, first!.isDefault, second!.isDefault], [false, true, false]);
+  const defaultRoute = { ...first!.route, useDefault: true };
+  assert.equal((await f.send(defaultRoute)).statusCode, 200);
+  await f.defaultTo('a-second', 2);
+  assert.deepEqual((await f.routes()).map(item => item.isDefault), [false, true, false]);
+  assert.equal((await f.send(defaultRoute)).statusCode, 200);
+  assert.equal((await f.send(second!.route)).statusCode, 200, 'explicit per-chat choice remains available');
+  assert.ok((await f.models.run('remove', { connectionID: 'z-first', expectedRevision: 1 })).ok);
+  assert.equal((await f.send(defaultRoute)).json().error, 'route_changed');
+  assert.deepEqual((await f.routes()).filter(item => item.isDefault).map(item => item.route.connectionID), ['a-second']);
+  assert.equal((await f.send({ ...second!.route, useDefault: true })).statusCode, 200);
+  assert.deepEqual(sent, ['z-first.invalid/preferred-api', 'z-first.invalid/preferred-api', ...Array(2).fill(`a-second.invalid/${earliest.models[0]!.modelID}`)]);
 });
 
 test('withdrawal during credential read is reflected before the request leaves', use, async t => {
@@ -721,10 +769,12 @@ test('switches saved models inside one conversation without replaying role data,
 
 test('retry of a completed logical turn recovers the saved answer without dispatching or appending again', use, async t => {
   let calls = 0;
-  const f = await fixture(t, async () => { calls++; return completion(); }, undefined, syntheticRuntime, true);
+  const f = await fixture(t, async () => { calls++; return Response.json({ ...await completion().json(), usage: { prompt_tokens: 68 } }); }, undefined, syntheticRuntime, true);
   await f.write('first'); const [first] = await f.routes();
   const id = randomUUID(), turnID = randomUUID(), conversation = { id, mode: 'new' };
-  assert.equal((await f.send(first!.route, { conversation, turnID })).statusCode, 200);
+  const firstReply = await f.send(first!.route, { conversation, turnID });
+  assert.equal(firstReply.statusCode, 200);
+  assert.deepEqual(firstReply.json().usage, { inputTokens: 68 });
   const requestID = randomUUID();
   assert.deepEqual((await f.send(first!.route, { requestID, conversation, turnID })).json(), { ok: true, requestID, text: '合成回应', replayable: true, recovered: true });
   assert.equal((await f.send(first!.route, { conversation, turnID, text: '不是原问题' })).json().error, 'invalid_request');
@@ -733,6 +783,7 @@ test('retry of a completed logical turn recovers the saved answer without dispat
   assert.equal(calls, 1);
   const res = await f.app.inject({ method: 'POST', url: chatHistoryPaths.detail, headers, payload: { petID: f.petID, id } });
   assert.equal(res.statusCode, 200);
+  assert.equal(Object.hasOwn(res.json().detail.turns[0], 'usage'), false);
   assert.deepEqual(res.json().detail.turns.map((row: { requestID: string }) => row.requestID), [turnID]);
 });
 
@@ -817,7 +868,7 @@ test('material permission is one-use and bound to exact request before model dis
   assert.match(outbound[1]!, /你好/);
 });
 
-test('mixed Responses inputs cannot bypass bounded text tools and use the saved streaming transport', use, async t => {
+for (const finalInput of [350, undefined]) test(`mixed Responses streaming reports only the last material round usage (${finalInput})`, use, async t => {
   const outbound: Record<string, any>[] = [];
   const f = await fixture(t, async (_url, init) => {
     const body = JSON.parse(String(init?.body)); outbound.push(body);
@@ -826,7 +877,7 @@ test('mixed Responses inputs cannot bypass bounded text tools and use the saved 
       { type: 'reasoning', id: 'rs_1', encrypted_content: 'opaque-sealed-data', summary: [] },
       { type: 'function_call', id: 'fc_1', call_id: 'call-one', name: 'read_task_file', arguments: '{"file":1,"offset":0}' },
     ] : [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '已处理本轮材料' }] }];
-    return new Response(`event: response.completed\ndata: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed', output } })}\n\n`, { headers: { 'content-type': 'text/event-stream' } });
+    return new Response(`event: response.completed\ndata: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed', output, usage: { input_tokens: outbound.length === 1 ? 120 : finalInput, output_tokens: 20 } } })}\n\n`, { headers: { 'content-type': 'text/event-stream' } });
   }, undefined, createPiTextRuntime());
   const draft = writeDraft('mixed'); draft.apiProtocol = 'responses'; draft.models[0]!.inputModalities = ['image'];
   assert.ok((await f.models.run('save', { connection: draft, expectedRevision: 0, credential: { kind: 'keep' } })).ok);
@@ -838,6 +889,7 @@ test('mixed Responses inputs cannot bypass bounded text tools and use the saved 
   assert.equal(outbound.length, 0);
   const sent = await f.send(saved!.route, { attachments: [image, text('你好' + '另'.repeat(600))] });
   assert.equal(sent.statusCode, 200, sent.body);
+  assert.deepEqual(sent.json().usage, finalInput === undefined ? undefined : { inputTokens: finalInput });
   assert.equal(outbound.length, 2);
   assert.deepEqual(outbound[0]!.input[0].content.map(({ type }: { type: string }) => type), ['input_text', 'input_image']);
   assert.doesNotMatch(JSON.stringify(outbound), /private-name|另{421}|verify_task_tools/);
@@ -864,4 +916,59 @@ test('project registration and chat scope stay local; unknown projects never dis
  const history = await f.app.inject({ method: 'POST', url: chatHistoryPaths.list, headers, payload: { petID: f.petID, projectID: project.id } });
  assert.equal(history.json().page.rows[0].projectID, project.id);
  assert.doesNotMatch(outbound[0]!, /合成项目目录|projectID/);
+});
+
+test('rehearsal uses the real Pi text dispatch with only a public persona and one submitted message; speech takes a one-use ticket', use, async t => {
+  const outbound: {role:string;content:string}[][] = [], spoken: string[] = [];
+  const wav = Buffer.alloc(44 + 48_000);
+  wav.write('RIFF'); wav.writeUInt32LE(wav.length - 8,4); wav.write('WAVEfmt ',8); wav.writeUInt32LE(16,16);
+  wav.writeUInt16LE(1,20); wav.writeUInt16LE(1,22); wav.writeUInt32LE(24000,24); wav.writeUInt32LE(48000,28);
+  wav.writeUInt16LE(2,32); wav.writeUInt16LE(16,34); wav.write('data',36); wav.writeUInt32LE(wav.length - 44,40);
+  const inputs = ['龙妹，忙了一天好累','这套雨夜布景叫什么？','输出必须是纯文本'];
+  const answers = ['辛苦啦，先喝口水，歇一小会儿。','这里是雨夜阁楼，陪你听一会雨。','<b>不是可播字幕</b>'];
+  const speech = new BubbleSpeech({run:async()=>assert.fail('must not play desktop audio'),close:async()=>{},
+    renderStageReply:async (_,text) => { spoken.push(text); return wav; }});
+  const f = await fixture(t,async (url,options) => {
+    assert.equal(new URL(String(url)).hostname,'one.invalid');
+    const body = JSON.parse(String(options?.body));
+    assert.equal(body.tools,undefined); assert.equal(body.referenceData,undefined);
+    outbound.push(body.messages);
+    return completion(answers[inputs.indexOf(body.messages[1].content)]);
+  },undefined,null,true,true,speech);
+  const reference = join(f.root,'reference.wav'); await writeFile(reference,wav);
+  assert.ok((await speech.select(reference)).ok);
+  assert.ok((await speech.saveTranscriptDraft('合成测试音色，不出站')).ok);
+  const post = (name:string,payload:object,requestHeaders:Record<string,string> = headers) => f.app.inject({method:'POST',url:`/v1/live/danmaku/${name}`,headers:requestHeaders,payload});
+  const payload = (text:string) => ({text,scene:'rain-loft'});
+  assert.equal((await post('reply',payload(inputs[0]!),{host:'127.0.0.1'})).statusCode,401);
+  assert.equal((await post('reply',payload(inputs[0]!))).statusCode,412);
+  await f.write('one'); await f.write('two');
+  assert.equal((await post('reply',{...payload(inputs[0]!),model:'any'})).statusCode,400);
+  assert.equal((await post('audio',{text:answers[0]})).statusCode,400);
+  for (const [index,input] of inputs.slice(0,2).entries()) {
+    const generated = await post('reply',payload(input)); assert.equal(generated.statusCode,200);
+    const {ticket,text} = generated.json(); assert.equal(text,answers[index]);
+    const rendered = await post('audio',{ticket}); assert.equal(rendered.statusCode,200); assert.deepEqual(rendered.rawPayload,wav);
+    assert.equal((await post('audio',{ticket})).statusCode,409);
+  }
+  await f.defaultTo('two',2); // Old configuration metadata must not redirect rehearsal.
+  assert.equal((await post('reply',payload(inputs[2]!))).statusCode,503);
+  assert.deepEqual(spoken,answers.slice(0,2));
+  for (const [index,messages] of outbound.entries()) {
+    assert.deepEqual(messages.map(m=>m.role),['system','user']);
+    assert.match(messages[0]!.content,/龙妹.*雨夜阁楼/s);
+    assert.doesNotMatch(messages[0]!.content,/合成测试音色|合成桌宠|SYNTHETIC/);
+    assert.equal(messages[1]!.content,inputs[index]);
+  }
+  const superseded = await post('reply',payload(inputs[0]!)); assert.equal(superseded.statusCode,200);
+  const fifth = await post('reply',payload(inputs[0]!)); assert.equal(fifth.statusCode,200);
+  assert.equal((await post('audio',{ticket:superseded.json().ticket})).statusCode,409);
+  const pending = await post('reply',payload(inputs[0]!)); assert.equal(pending.statusCode,200);
+  assert.equal((await post('reply',payload(inputs[0]!))).statusCode,429);
+  assert.ok((await f.models.run('remove', { connectionID: 'one', expectedRevision: 1 })).ok);
+  assert.equal((await post('audio',{ticket:pending.json().ticket})).statusCode,503);
+  assert.deepEqual(spoken,answers.slice(0,2));
+  assert.ok((await f.workspace.mutate('pause',{expectedRevision:1})).ok);
+  assert.equal((await post('reply',payload(inputs[0]!))).statusCode,409);
+  assert.equal(outbound.length,6);
 });

@@ -1,5 +1,5 @@
 import { validProbeRecord, isProbeReply, isRecordedProbeFailure, probeError, validProbeInput, type ModelProbeInput, type ModelProbeOperation, type ModelProbeReply } from '../../../packages/contracts/src/model-probe.ts';
-import { normalizeModelBaseURL, validDiscoveryCandidate, validModelAPIKey, type ModelCandidate, type ModelDiscoveryError, type ModelDiscoveryReply, type ModelDefault, type ModelDraft, type ModelEntry, type ModelProtocol, type ModelsBridge, type ModelWorkspaceReply, type SavedModelConfiguration, type SavedModelConnection } from '../../../packages/contracts/src/models.ts';
+import { normalizeModelBaseURL, validDiscoveryCandidate, validModelAPIKey, type ModelCandidate, type ModelDiscoveryError, type ModelDiscoveryReply, type ModelDraft, type ModelEntry, type ModelProtocol, type ModelsBridge, type ModelWorkspaceReply, type SavedModelConfiguration, type SavedModelConnection } from '../../../packages/contracts/src/models.ts';
 
 export const modelProtocols: Record<ModelProtocol, string> = {
   'chat-completions': 'Chat Completions', responses: 'OpenAI Responses', anthropic: 'Anthropic Messages', gemini: 'Gemini 原生 API',
@@ -25,7 +25,7 @@ export const modelProviderTemplates = {
 export type ModelProviderTemplate = keyof typeof modelProviderTemplates;
 
 type DraftState = { edit: ModelDraft; expectedRevision: number; isNew: boolean; detach: boolean; provider?: ModelProviderTemplate; proposedProtocol?: ModelProtocol };
-type Operation = { kind: 'load' | 'save' | 'default' | 'remove' | 'remove-entry'; id?: string };
+type Operation = { kind: 'load' | 'save' | 'remove' | 'remove-entry'; id?: string };
 type Feedback = { text: string; id?: string; error?: boolean };
 type Discovery = {
   id: string;
@@ -244,14 +244,17 @@ export class ModelWorkspaceController {
     });
     apiKey = ''; // Do not retain the submitted value while a post-save probe runs.
     if (published && testAfterSave?.length) {
-      const revision = this.saved(id)?.revision;
+      const saved = this.saved(id), revision = saved?.revision, defaultEntry = saved?.defaultModelEntryID;
+      const entries = new Set(testAfterSave);
+      // The list represents the saved default. A non-default failure must not prevent that approved test.
+      const orderedEntries = defaultEntry && entries.delete(defaultEntry) ? [defaultEntry, ...entries] : entries;
       let started = false;
-      for (const entry of new Set(testAfterSave)) {
+      for (const entry of orderedEntries) {
         if (generation !== this.visibilityGeneration || this.saved(id)?.revision !== revision || this.connectionTestBlockedReason(id, entry)) break;
         this.prepareConnectionTest(id, entry);
         started = true;
         const outcome = await this.confirmConnectionTest(id);
-        if (!outcome?.ok) break; // Stop when a result cannot be confirmed; never retry on its own.
+        if (!outcome?.ok) break; // Stop the batch on the first non-success; never retry on its own.
       }
       const feedback = this.state.feedback;
       if (started && feedback?.id === id && !feedback.error) this.update({ feedback: { ...feedback,
@@ -260,29 +263,20 @@ export class ModelWorkspaceController {
     }
     return published;
   }
-  async setDefault(id: string | null, entry?: string): Promise<void> {
-    if (!this.canWrite()) return;
-    const expectedRevision = this.state.configuration!.revision;
-    const saved = id === null ? undefined : this.saved(id);
-    if (id !== null && !saved) return;
-    const entryID = entry ?? saved?.defaultModelEntryID;
-    if (id !== null && (!entryID || !saved?.models.some(model => model.entryID === entryID))) return;
-    const input: ModelDefault = id === null ? { expectedRevision, connectionID: null } : { expectedRevision, connectionID: id, entryID: entryID! };
-    await this.perform({ kind: 'default', id: id ?? undefined }, () => this.bridge!.setDefault(input));
-  }
-  async remove(id: string, replacementDefault?: string | null): Promise<boolean> {
+  async remove(id: string): Promise<boolean> {
     const saved = this.saved(id);
     if (!this.canWrite() || !saved) return false;
-    const { defaultConnectionID } = this.state.configuration!;
     const expectedRevision = saved.revision;
-    if (defaultConnectionID === id ? replacementDefault === undefined || (replacementDefault !== null && (replacementDefault === id || !this.saved(replacementDefault))) : replacementDefault !== undefined) return false;
-    return this.perform({ kind: 'remove', id }, () => this.bridge!.remove({ connectionID: id, expectedRevision, ...(replacementDefault === undefined ? {} : { replacementDefault }) }));
+    // Clear a legacy pointer in the same confirmed deletion, without asking
+    // the user to maintain a setting that no longer selects chat routes.
+    const legacyDefault = this.state.configuration!.defaultConnectionID === id;
+    return this.perform({ kind: 'remove', id }, () => this.bridge!.remove({ connectionID: id, expectedRevision, ...(legacyDefault && { replacementDefault: null }) }));
   }
-  async deleteModel(id: string, revision: number, entry: string, replacement?: string | null): Promise<boolean> {
+  async deleteModel(id: string, revision: number, entry: string, replacement?: string): Promise<boolean> {
     const saved = this.saved(id);
     if (!this.canWrite() || !saved || saved.revision !== revision || this.state.drafts.has(id)
       || !saved.models.some(model => model.entryID === entry)) return false;
-    if (saved.models.length === 1) return this.remove(id, replacement);
+    if (saved.models.length === 1) return replacement === undefined && this.remove(id);
     const models = saved.models.filter(model => model.entryID !== entry);
     if (saved.defaultModelEntryID === entry ? !models.some(model => model.entryID === replacement) : replacement !== undefined) return false;
     const { edit } = toDraft(saved);
@@ -421,7 +415,7 @@ export class ModelWorkspaceController {
     }
     const drafts = new Map(this.state.drafts);
     if (id && (kind === 'save' || kind === 'remove')) drafts.delete(id);
-    const note = kind === 'remove-entry' ? '模型已从本地配置移除。' : kind === 'remove' ? '连接已从本地配置移除。' : kind === 'default' ? '已更新本地默认值。' : '已保存本地配置，尚未测试连接。';
+    const note = kind === 'remove-entry' ? '模型已从本地配置移除。' : kind === 'remove' ? '连接已从本地配置移除。' : '已保存本地配置，尚未测试连接。';
     const durability = result.durability === 'unconfirmed' ? ' 文件发布后未确认磁盘同步，请重新读取核对。' : '';
     const retained = result.retainedCredentialVersions ? ' 旧凭证条目仍保留。' : '';
     const known = new Map(result.configuration.connections.map(connection => [connection.id, connection.models]));

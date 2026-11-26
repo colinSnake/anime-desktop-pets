@@ -1,14 +1,17 @@
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { isRecordedProbeFailure } from '../../../packages/contracts/src/model-probe.ts';
 import type { SavedModelConnection } from '../../../packages/contracts/src/models.ts';
 import { DeleteModelDialog } from './ModelConnectionActions.tsx';
 import { probeResultText } from './ModelConnectionTest.tsx';
 import { ModelEditorDialog, type ModelEditor } from './ModelEditorDialog.tsx';
 import { PetNookIcon } from './PetNookIcon.tsx';
-import { emptyModelState, probeResultKey, type ModelWorkspaceController, type ModelWorkspaceState } from './model-state.ts';
+import { emptyModelState, probeResultKey, type ConnectionTest, type ModelWorkspaceController, type ModelWorkspaceState } from './model-state.ts';
 
 const noop = () => () => {};
 const empty = () => emptyModelState;
 type Action = ModelEditor | { kind: 'delete'; connection: SavedModelConnection };
+const unconfirmedProbe = (test: ConnectionTest | undefined) =>
+  test?.kind === 'result' && !test.result.ok && !isRecordedProbeFailure(test.result.error) ? test : undefined;
 
 function ConnectionStatus({ connection, state, controller }: {
   connection: SavedModelConnection; state: ModelWorkspaceState; controller: ModelWorkspaceController;
@@ -26,6 +29,7 @@ function ConnectionStatus({ connection, state, controller }: {
     : status === 'ok' ? '测试成功' : status === 'failed' ? '测试失败' : '未测试';
   const displayed = recent ?? result;
   const detail = !testing && displayed ? probeResultText(displayed) : undefined;
+  const unconfirmed = unconfirmedProbe(recent);
   const reason = controller.savedDefaultTestBlockedReason(id, revision);
   const action = status === 'failed' ? '点击重新测试连接，可能产生费用。' : '点击发送一次短测试，可能产生费用。';
   const title = [label, detail, testing ? undefined : reason ?? action].filter(Boolean).join(' · ');
@@ -35,7 +39,7 @@ function ConnectionStatus({ connection, state, controller }: {
       title={title} onClick={() => { if (!reason) void controller.testSavedDefault(id, revision); }}>
       <span className="model-status-dot" aria-hidden="true" />
     </button>
-    <span className="sr-only" role="status">{testing || recent || result ? `${displayName}：${detail ?? label}` : ''}</span>
+    <span className="sr-only" role="status">{!unconfirmed && (testing || recent || result) ? `${displayName}：${detail ?? label}` : ''}</span>
   </>;
 }
 
@@ -62,6 +66,9 @@ export function ModelPage({ controller, appearance }: { controller?: ModelWorksp
   const busy = !!state.operation || state.connectionTest?.kind === 'pending';
   const blocked = busy || state.needsRefresh || state.requiresRestart;
   const config = state.configuration, rows = config?.connections ?? [];
+  const unconfirmed = unconfirmedProbe(state.connectionTest);
+  const unconfirmedConnection = unconfirmed && !state.drafts.has(unconfirmed.input.connectionID) && rows.find(connection =>
+    connection.id === unconfirmed.input.connectionID && connection.revision === unconfirmed.input.expectedRevision);
   const close = () => setAction(undefined);
   const chooseDraft = (mode: 'provider' | 'custom', alternativeDraftID?: string) => {
     if (!controller) return;
@@ -88,12 +95,13 @@ export function ModelPage({ controller, appearance }: { controller?: ModelWorksp
     onClick={event => { event.currentTarget.focus(); add(); }}><PetNookIcon name="plus" />添加配置</button>;
   return <article className="model-page">
     <header className="model-page-header">
-      <div><h1 tabIndex={-1}>模型管理</h1><p className="model-page-subtitle">配置服务商和模型，设置聊天默认使用的模型。</p></div>
+      <div><h1 tabIndex={-1}>模型管理</h1><p className="model-page-subtitle">聊天和弹幕演练默认使用首个已保存的服务商。</p></div>
       <div className="model-actions">{appearance}</div>
     </header>
     {!controller?.available ? <p className="model-empty">本机模型管理当前不可用。</p> : <section aria-label="已配置的服务商" className="model-models">
       <div className="model-list-header"><h2>已配置的服务商</h2>{addButton}</div>
       {state.feedback && !action && <p className={state.feedback.error ? 'model-alert' : 'model-note'} role={state.feedback.error ? 'alert' : 'status'}>{state.feedback.text}</p>}
+      {!action && unconfirmed && unconfirmedConnection && <p className="model-alert" role="alert">{unconfirmedConnection.displayName}：本次测试未确认，状态保持不变。{probeResultText(unconfirmed)}</p>}
       {state.requiresRestart && <p className="model-alert" role="status">重启前只读。请重新读取，核对磁盘版本。</p>}
       {state.probeStorageUnavailable && <><p className="model-alert" role="status">连接测试记录暂不可读取，已保存的模型配置仍可使用。请保留原文件。</p>
         <button type="button" className="button secondary" disabled={busy} onClick={() => { void controller.load(); }}>重新读取测试记录</button></>}

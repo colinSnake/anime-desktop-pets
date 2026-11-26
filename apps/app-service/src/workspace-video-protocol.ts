@@ -5,7 +5,9 @@ import type { TaskAnimation } from './task-animation.ts';
 
 type Header = { version: 1; seq: number; id: string };
 export type VideoDisplay = { size: number; hideInFullscreen: boolean };
-export type VideoControl = { op: 'display'; value: VideoDisplay } | { op: 'behavior'; value: BehaviorPreferences } | { op: 'visibility'; value: boolean } | { op: 'task'; value: TaskAnimation };
+export type VideoSpeechState = 'held' | 'drained' | 'released';
+export type VideoCaptionSpeech = { cue: number; state: VideoSpeechState };
+export type VideoControl = { op: 'display'; value: VideoDisplay } | { op: 'behavior'; value: BehaviorPreferences } | { op: 'visibility'; value: boolean } | { op: 'task'; value: TaskAnimation } | { op: 'caption-speech'; value: VideoCaptionSpeech };
 export type VideoCommand = Header & { type: 'workspace-video-command' } & (
   { op: 'start'; package: PackageReference; preferences: PetPreferences } | { op: 'stop' } | (VideoControl & { epoch: number })
 );
@@ -42,6 +44,8 @@ export function videoCommand(value: unknown): value is VideoCommand {
     if (value.op === 'behavior') return shape(value.value, ['scheduledActivity', 'movement']) &&
       typeof value.value.scheduledActivity === 'boolean' && typeof value.value.movement === 'boolean';
     if (value.op === 'task') return videoTask(value.value);
+    if (value.op === 'caption-speech') return shape(value.value, ['cue', 'state']) && revision(value.value.cue) && value.value.cue > 0 &&
+      (value.value.state === 'held' || value.value.state === 'drained' || value.value.state === 'released');
     return value.op === 'display' && videoDisplay(value.value);
   }
   return shape(value, ['type', 'version', 'id', 'seq', 'op', 'preferences', 'package']) && header(value) &&

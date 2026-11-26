@@ -1,13 +1,13 @@
 import type { PackageReference } from '../../../packages/contracts/src/pets.ts';
 import type { OwnedPlayer, OwnedStatus } from './pet-lifecycle.ts';
-import { videoCue, videoDrop, videoMenu, videoReply, type VideoMenuIntent, type VideoCommand, type VideoControl, type VideoPosition, type VideoResult } from './workspace-video-protocol.ts';
+import { videoCue, videoDrop, videoMenu, videoReply, type VideoMenuIntent, type VideoCommand, type VideoControl, type VideoPosition, type VideoResult, type VideoSpeechState } from './workspace-video-protocol.ts';
 
 const snapshot = (status: OwnedStatus) => ({ status });
 
 type Instance = { status: OwnedStatus; seq: number; onDrop?: (position: VideoPosition) => void;
   source: symbol; lastCue: number; activeCue: number; cancelSpeech?: Promise<void> };
 type VideoSpeech = {
-  offer(source: symbol, text: string, eligible: () => boolean): void;
+  offer(source: symbol, text: string, eligible: () => boolean, report: (state: VideoSpeechState) => void): boolean;
   cancelSource(source: symbol): Promise<void>;
 };
 type Pending = { id: string; settle: (result: VideoResult) => void };
@@ -48,8 +48,17 @@ export class WorkspaceVideoClient {
       own.activeCue = own.lastCue = input.cue;
       const eligible = () => this.instances.get(input.id) === own && own.seq === input.seq && own.status === 'running' && own.activeCue === input.cue;
       const text = input.text;
-      if (own.cancelSpeech) void own.cancelSpeech.then(() => { if (eligible()) speech.offer(own.source, text, eligible); });
-      else speech.offer(own.source, text, eligible);
+      const offer = () => {
+        if (!eligible()) return;
+        speech.offer(own.source, text, eligible, state => {
+          if (!eligible()) return;
+          try { this.send({ type: 'workspace-video-command', version: 1, id: input.id, seq: ++this.seq, epoch: own.seq,
+            op: 'caption-speech', value: { cue: input.cue, state } }); }
+          catch { /* The native caption has its own expiry if the channel is lost. */ }
+        });
+      };
+      if (own.cancelSpeech) void own.cancelSpeech.then(offer);
+      else offer();
       return;
     }
     if (videoDrop(input)) {

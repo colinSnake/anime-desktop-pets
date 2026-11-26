@@ -29,10 +29,10 @@ const groups = [
 const rolePages = [{ id: 'identity', label: '身份' }, { id: 'memory', label: '记忆' }, { id: 'goals', label: '能力与目标' }] as const;
 type Page = typeof groups[number]['pages'][number]['id'] | typeof rolePages[number]['id'];
 const isModulePage = (page: Page) => page !== 'pets' && page !== 'chat' && page !== 'models';
-type ViewProps = DiagnosticProps & { petState?: PetWorkspaceState; petController?: PetWorkspaceController; initialPage?: Page; chatState?: ChatWorkspaceState; chatController?: ChatWorkspaceController; chatHistory?: DesktopBridge['chatHistory']; chatProjects?: DesktopBridge['chatProjects']; onChatOpen?: () => void; modelController?: ModelWorkspaceController; speech?: DesktopBridge['speech']; voiceDraft?: DesktopBridge['voiceDraft']; characters?: DesktopBridge['characters']; openWorkspaceData?: DesktopBridge['openWorkspaceData']; migrateWorkspaceData?: DesktopBridge['migrateWorkspaceData'] };
+type ViewProps = DiagnosticProps & { petState?: PetWorkspaceState; petController?: PetWorkspaceController; initialPage?: Page; chatState?: ChatWorkspaceState; chatController?: ChatWorkspaceController; chatHistory?: DesktopBridge['chatHistory']; chatProjects?: DesktopBridge['chatProjects']; onChatOpen?: () => void; modelController?: ModelWorkspaceController; speech?: DesktopBridge['speech']; liveStage?: DesktopBridge['liveStage']; voiceDraft?: DesktopBridge['voiceDraft']; characters?: DesktopBridge['characters']; openWorkspaceData?: DesktopBridge['openWorkspaceData']; migrateWorkspaceData?: DesktopBridge['migrateWorkspaceData'] };
 
 /** Kept exported for offline rendering; diagnostics are now explicitly under Advanced. */
-export function WorkspaceView({ petState = emptyPetState, petController, initialPage = 'pets', chatState = emptyChatState, chatController, chatHistory, chatProjects, onChatOpen, modelController, speech, voiceDraft, characters, openWorkspaceData, migrateWorkspaceData, ...diagnostics }: ViewProps) {
+export function WorkspaceView({ petState = emptyPetState, petController, initialPage = 'pets', chatState = emptyChatState, chatController, chatHistory, chatProjects, onChatOpen, modelController, speech, liveStage, voiceDraft, characters, openWorkspaceData, migrateWorkspaceData, ...diagnostics }: ViewProps) {
   const [page, setPage] = useState<Page>(initialPage);
   const [visitedModules, setVisitedModules] = useState(() => isModulePage(initialPage));
   const headingRef = useRef<HTMLElement>(null);
@@ -55,7 +55,6 @@ export function WorkspaceView({ petState = emptyPetState, petController, initial
   const deletePet = petState.workspace?.instances.find(pet => pet.id === petState.deleteId);
   const error = petState.error ? petErrorMessages[petState.error] : '';
   const busy = !!petState.operation;
-  const current = [...groups.flatMap(group => [...group.pages]), ...rolePages].find(entry => entry.id === page)!;
   const inNook = page === 'pets';
   const inChat = page === 'chat';
   const companionLayout = inNook || inChat;
@@ -87,24 +86,7 @@ export function WorkspaceView({ petState = emptyPetState, petController, initial
           <Suspense fallback={null}><ChatProjectNavigation key={chatState.selectedId} petID={chatState.selectedId} projects={chatProjects} history={chatHistory} state={chatState} controller={chatController} /></Suspense>}
       </aside>
       <main id="main" className={`content${page === 'chat' ? ' content-chat' : interactionLayout ? ' content-interaction' : ''}`} ref={headingRef} tabIndex={-1}>
-        <div className="workspace-topline">
-          <nav className="workspace-breadcrumb" aria-label="当前位置">
-            <ol role="list">
-              <li className="workspace-crumb-root">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.35" aria-hidden="true">
-                  <rect x="2" y="2" width="4.5" height="4.5" rx="1" /><rect x="9.5" y="2" width="4.5" height="4.5" rx="1" />
-                  <rect x="2" y="9.5" width="4.5" height="4.5" rx="1" /><rect x="9.5" y="9.5" width="4.5" height="4.5" rx="1" />
-                </svg>
-                <span>工作区</span>
-              </li>
-              <li className="workspace-crumb-page">
-                <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m4.5 2.75 3.25 3.25-3.25 3.25" /></svg>
-                <span className="workspace-crumb-current" aria-current="page">{current.label}</span>
-              </li>
-            </ol>
-          </nav>
-          {!nookStyle && theme}
-        </div>
+        {!nookStyle && <div className="workspace-module-tools">{theme}</div>}
         <div className={`feedback${error || busy ? ' visible' : ''}`} aria-live="polite" aria-atomic="true">{error ? <p role="alert" className="error">{error}</p> : petState.notice ? <p className="sr-only">{petState.notice}</p> : busy ? <p>{({ load: '正在读取配置', importPackages: '正在导入并校验素材', save: '正在保存配置', add: '正在登记配置', clone: '正在复制配置', delete: '正在删除配置', theme: '正在保存主题', start: '正在请求启动实例', stop: '正在请求停止实例', applyDisplay: '正在应用显示偏好', applyBehavior: '正在应用行为偏好', visibility: '正在调整窗口显隐', pause: '正在暂停自有播放器', resume: '正在解除暂停' } as const)[petState.operation!] ?? '正在处理'}…</p> : null}</div>
         <Suspense fallback={<PageLoadingSkeleton />}>
           {page === 'pets' ? <PetPage appearance={theme} state={petState} controller={petController} /> : page === 'chat' ? <ChatPage state={chatState} controller={chatController} history={chatHistory} voiceDraft={voiceDraft} appearance={theme} onOpenPets={() => changePage('pets')}
@@ -113,7 +95,7 @@ export function WorkspaceView({ petState = emptyPetState, petController, initial
         </Suspense>
         {/* Mount on first visit, then retain the module drafts across navigation. */}
         {visitedModules && <Suspense fallback={isModulePage(page) || activeAgent ? <PageLoadingSkeleton /> : null}>
-          <WorkspaceModules page={activeAgent ? 'agent' : isModulePage(page) ? page : null} workspace={petState.workspace} diagnostics={diagnostics} speech={speech} appearance={interactionLayout ? theme : undefined} characters={characters} openWorkspaceData={openWorkspaceData} migrateWorkspaceData={migrateWorkspaceData}
+          <WorkspaceModules page={activeAgent ? 'agent' : isModulePage(page) ? page : null} workspace={petState.workspace} diagnostics={diagnostics} speech={speech} liveStage={liveStage} appearance={interactionLayout ? theme : undefined} characters={characters} openWorkspaceData={openWorkspaceData} migrateWorkspaceData={migrateWorkspaceData}
             agent={activeAgent && chatCharacter ? { name: chatCharacter.name, opener: activeAgent.opener, chat: chatState, onClose: () => setOpenAgent(undefined) } : undefined}
             selectedInstance={activeAgent ? chatInstance : petState.needsRefresh ? undefined : petState.workspace?.instances.find(pet => pet.id === petState.selectedId)} />
         </Suspense>}
@@ -169,9 +151,9 @@ export function App() {
     // Share the existing lazy route; keep its controller alive after the first visit.
     void loadChat().then(({ ChatWorkspaceController }) => {
       if (!mounted.current) return;
-      const { characters, onlineChat, chatHistory, replySpeech } = window.petDesktop ?? {};
+      const { characters, onlineChat, chatHistory } = window.petDesktop ?? {};
       const memory = typeof characters?.saveChatMemory === 'function' && typeof characters.readMemories === 'function' ? characters : undefined;
-      setChatController(current => current ?? new ChatWorkspaceController(undefined, characters, onlineChat, memory, !!chatHistory, replySpeech));
+      setChatController(current => current ?? new ChatWorkspaceController(undefined, characters, onlineChat, memory, !!chatHistory));
     }).catch(() => { /* The lazy page surfaces load failures. */ });
   }
   async function refresh(command: 'snapshot' | 'probe') {
@@ -218,5 +200,5 @@ export function App() {
     void refresh('snapshot');
     return () => { mounted.current = false; sequence.current++; running.current = false; };
   }, [controller]);
-  return <WorkspaceView openWorkspaceData={window.petDesktop?.openWorkspaceData} migrateWorkspaceData={window.petDesktop?.migrateWorkspaceData} speech={window.petDesktop?.speech} voiceDraft={window.petDesktop?.voiceDraft} characters={window.petDesktop?.characters} modelController={modelController} chatState={chatState} chatController={chatController} chatHistory={window.petDesktop?.chatHistory} chatProjects={window.petDesktop?.chatProjects} onChatOpen={openChat} petState={petState} petController={controller} snapshot={snapshot} busy={busy} error={error} onRefresh={() => { void refresh('snapshot'); }} onProbe={() => { void refresh('probe'); }} />;
+  return <WorkspaceView openWorkspaceData={window.petDesktop?.openWorkspaceData} migrateWorkspaceData={window.petDesktop?.migrateWorkspaceData} speech={window.petDesktop?.speech} liveStage={window.petDesktop?.liveStage} voiceDraft={window.petDesktop?.voiceDraft} characters={window.petDesktop?.characters} modelController={modelController} chatState={chatState} chatController={chatController} chatHistory={window.petDesktop?.chatHistory} chatProjects={window.petDesktop?.chatProjects} onChatOpen={openChat} petState={petState} petController={controller} snapshot={snapshot} busy={busy} error={error} onRefresh={() => { void refresh('snapshot'); }} onProbe={() => { void refresh('probe'); }} />;
 }

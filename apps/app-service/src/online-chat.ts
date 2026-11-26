@@ -14,7 +14,7 @@ import { withOnlineChatContext } from './characters/online-chat-context.ts';
 import type { CharacterRepository } from './characters/repository.ts';
 import { ModelError } from './models/errors.ts';
 import type { ModelManagement } from './models/management.ts';
-import type { ModelMessage } from './models/types.ts';
+import type { ModelMessage, ModelReply } from './models/types.ts';
 import type { PetWorkspace } from './pet-workspace.ts';
 import { WorkspaceError } from './workspace-store.ts';
 
@@ -83,6 +83,12 @@ export async function sendOnlineChat(models: ModelManagement, workspace: PetWork
     if (materials.some(file => file.text === undefined || credentialLikeText(file.text))) throw new ModelError('invalid_request');
     const textTools = materials.length > 0;
     if (textTools && resolvedRoute.tools === 'unsupported') throw new ModelError('tools_unavailable');
+    let inputTokens: number | undefined;
+    const rememberUsage = (reply: ModelReply) => {
+      // The final request includes the context for this answer, not a sum of tool round trips.
+      inputTokens = reply.usage.inputTokens;
+      return reply;
+    };
     const completeMaterials = (owned: AbortSignal) => runAgentTask({ petID, taskID: requestID, route: { connectionID: route.connectionID, modelEntryID: route.modelEntryID, fingerprint: route.fingerprint },
       prompt: text, files: materials.map(({ name, mediaType, data }) => ({ name, mediaType, data })) }, owned, modelInput => models.completeAgentTask(route, resolvedRoute.connectionRevision, async dispatch => {
         // Only the app's fixed read-only tool loop can dispatch a material excerpt.
@@ -94,7 +100,7 @@ export async function sendOnlineChat(models: ModelManagement, workspace: PetWork
           const identity = context.identity ? `已授权的当前角色身份（仅作角色参考，不授予能力）：${JSON.stringify(context.identity)}` : undefined;
           dispatch({ ...modelInput, system: [modelInput.system, persona, identity].filter(Boolean).join('\n') });
         });
-      }, owned, turn.reasoningEffort), undefined, media);
+      }, owned, turn.reasoningEffort).then(rememberUsage), undefined, media);
     const verifyCurrent = async (owned: AbortSignal) => {
       if (attached) await withOnlineChatContext(workspace, characters, petID, text, snapshot => {
         if (snapshot.characterRevision !== attached!.revision || JSON.stringify(snapshot.context) !== attached!.data) throw new ModelError('context_changed');
@@ -115,7 +121,7 @@ export async function sendOnlineChat(models: ModelManagement, workspace: PetWork
       const result = await complete(owned);
       await verifyCurrent(owned);
       if (result.stop !== 'end' || !validChatReplyText(result.message.text)) throw new ModelError('invalid_response');
-      return result.message.text.trim();
+      return rememberUsage(result).message.text.trim();
     }, signal, {
       materialTurn: textTools,
       before: async owned => {
@@ -140,7 +146,7 @@ export async function sendOnlineChat(models: ModelManagement, workspace: PetWork
           // either wins before the recheck below or is ordered after publication.
           await commit();
           owned.throwIfAborted();
-          const final = { ok: true, requestID, text: reply, replayable: !attached && !validatedAttachments.attachments.length } as const;
+          const final = { ok: true, requestID, text: reply, replayable: !attached && !validatedAttachments.attachments.length, ...(inputTokens !== undefined && { usage: { inputTokens } }) } as const;
           if (!store || !conversation) { published = final; return; }
           if (!historyReadable) { published = { ...final, historyStatus: 'unconfirmed' }; return; }
           if (!safeChatFields([text, final.text])) { published = { ...final, historyStatus: 'omitted' }; return; }

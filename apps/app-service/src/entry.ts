@@ -1,3 +1,4 @@
+import { LiveProfileStore } from './live/profile.ts';
 import { AgentTaskStore } from './agent/task-store.ts';
 import { WorkspaceVideoClient } from './workspace-video-client.ts';
 import { CodexTaskFollowing } from './codex-task-following.ts';
@@ -5,6 +6,7 @@ import { CodexTaskReaderProcess } from './codex-task-reader-process.ts';
 import { readCodexPresence } from './codex-presence.ts';
 import { ChatHistory } from './chat-history.ts';
 import { CharacterRepository } from "./characters/repository.ts";
+import { SpeechProfileStore } from './speech/profile-store.ts';
 import { BubbleSpeech } from "./speech/bubble-speech.ts";
 import { isSpeechRuntimeConfig, LocalBubbleSpeechBackend } from "./speech/process-backend.ts";
 /** 由 Electron utility process 或测试 Node fork 引导；不提供公共 CLI 服务。 */
@@ -108,14 +110,6 @@ function message(value: unknown) {
   clearTimeout(bootstrapTimer);
   const { token, workerPath, guardianPath, python } = input;
   booting = (async () => {
-    const speech = process.platform === 'darwin' && process.arch === 'arm64' && isSpeechRuntimeConfig(input.speech)
-      ? new BubbleSpeech(new LocalBubbleSpeechBackend({ ...input.speech, guardian: guardianPath })) : undefined;
-    let workspace: PetWorkspace | undefined;
-    const playerSpeech = speech && {
-      offer: (source: symbol, text: string, eligible: () => boolean) => speech.offer(source, text, () => workspace?.canStartOwnedPlayer() === true && eligible()),
-      cancelSource: (source: symbol) => speech.cancelSource(source),
-    };
-    if (input.workspaceVideo === true) video = new WorkspaceVideoClient(send, undefined, playerSpeech);
     const workspaceOptions = input.workspace as WorkspaceBootstrap | undefined;
     const businessRoot = input.businessRoot;
     if (businessRoot !== undefined) {
@@ -123,6 +117,16 @@ function message(value: unknown) {
         workspaceOptions?.root !== join(businessRoot, 'workspace') || input.modelsRoot !== join(businessRoot, 'models')) throw new Error('invalid_data_root');
       await new PrivateDirectory(businessRoot, false).ready();
     }
+    const speech = process.platform === 'darwin' && process.arch === 'arm64' && isSpeechRuntimeConfig(input.speech)
+      ? new BubbleSpeech(new LocalBubbleSpeechBackend({ ...input.speech, guardian: guardianPath }),
+        typeof businessRoot === 'string' ? new SpeechProfileStore(join(businessRoot, 'speech')) : undefined) : undefined;
+    let workspace: PetWorkspace | undefined;
+    const playerSpeech = speech && {
+      offer: (...[source, text, eligible, report]: Parameters<BubbleSpeech['offer']>) =>
+        speech.offer(source, text, () => workspace?.canStartOwnedPlayer() === true && eligible(), report),
+      cancelSource: (source: symbol) => speech.cancelSource(source),
+    };
+    if (input.workspaceVideo === true) video = new WorkspaceVideoClient(send, undefined, playerSpeech);
     workspace = workspaceOptions ? await (async () => {
       const packageImporter = workspaceOptions.packageToolPath ? new PetPackageImporter({
         root: workspaceOptions.packageProfileRoot ?? workspaceOptions.root, scriptPath: workspaceOptions.packageToolPath, python: python as string | undefined,
@@ -172,6 +176,7 @@ function message(value: unknown) {
       agentTasks: models && workspace && typeof businessRoot === 'string' ? new AgentTaskStore(businessRoot) : undefined,
       chatHistory: typeof businessRoot === 'string' ? new ChatHistory(businessRoot) : undefined,
       agentState,
+      liveProfile: workspace && typeof businessRoot === 'string' ? new LiveProfileStore(join(businessRoot, 'live')) : undefined,
       chatRuntime: models && createPiTextRuntime(),
       speech,
       characters: process.platform === "darwin" && workspaceOptions ? new CharacterRepository(join(workspaceOptions.root, "characters")) : undefined,
@@ -184,6 +189,7 @@ function message(value: unknown) {
     });
     // Workspace owns the cross-process lease. Do not initialize the ledger until the lease is held.
     if (businessRoot && !(await workspace?.list())?.ok) throw new Error('workspace_storage_unavailable');
+    await speech?.restoreProfile();
     await agentState?.ready();
     await service.listen({ host: "127.0.0.1", port: 0 });
     const address = service.server.address();

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createElement } from 'react';
 import { WorkspaceView } from '../src/App.tsx';
+import { LiveDanmaku } from '../src/pages/LiveDanmaku.tsx';
 
 const props = { busy: false, error: '', onRefresh() {}, onProbe() {}, onStartPlayer() {}, onStopPlayer() {} };
 const view = (initialPage: NonNullable<Parameters<typeof WorkspaceView>[0]['initialPage']>) =>
@@ -38,34 +39,163 @@ test('speech matches the reference setup flow without enabling playback on rende
   const html = await view('speech');
   const page = html.slice(html.indexOf('<main'));
   assert.match(page, /<header class="interaction-heading">[\s\S]*?<h1>语音互动<\/h1>[\s\S]*?class="theme-toggle"/);
-  assert.match(page, /气泡播报[\s\S]*?设置参考音色[\s\S]*?参考音频[\s\S]*?音频逐字稿[\s\S]*?启用气泡播报[\s\S]*?隐私与功能范围/);
+  assert.match(page, /气泡播报[\s\S]*?设置参考音色[\s\S]*?参考音频[\s\S]*?音频逐字稿/);
   assert.match(page, /<img[^>]*src="pet-app:[^"]*longmei[^"]*"[^>]*draggable="false"/);
   assert.match(page, /<label for="speech-transcript">[\s\S]*?音频逐字稿<\/label>/);
   assert.match(page, /<textarea[^>]*id="speech-transcript"[^>]*maxlength="4096"/i);
   assert.match(page, /<output[^>]*for="speech-transcript"[^>]*>0 \/ 4096 字节<\/output>/);
-  for (const action of ['选择参考音频', '启用气泡播报'])
+  for (const action of ['选择参考音频', '试听一句', '启用气泡播报'])
     assert.ok([...page.matchAll(/<button[^>]*disabled=""[^>]*>([\s\S]*?)<\/button>/g)].some(([, body]) => body!.replace(/<[^>]*>/g, '') === action), action);
-  assert.match(page, /<details[^>]*><summary>[\s\S]*?隐私与功能范围[\s\S]*?<\/summary>/);
-  assert.match(page, /type="checkbox"[^>]*disabled=""[^>]*\/> 同时播报当前聊天的新回复（仅本次会话）/);
-  assert.doesNotMatch(page, /type="checkbox"[^>]*checked|type="file"|选择麦克风|试听|预览状态/);
-  assert.match(page, /历史、附件和参考资料回合不会播报/);
+  assert.doesNotMatch(page, /播报新聊天回复|interaction-reply-option|type="checkbox"/);
+  assert.doesNotMatch(page, /type="checkbox"[^>]*checked|type="file"|选择麦克风|预览状态/);
+  const setup = page.slice(page.indexOf('aria-labelledby="speech-setup"'));
+  const footer = setup.match(/<div class="interaction-card-footer">([\s\S]*?)<\/section>/)?.[1] ?? '';
+  const labels = [...footer.matchAll(/<button[^>]*>([\s\S]*?)<\/button>/g)].map(([, body]) => body!.replace(/<[^>]*>/g, ''));
+  assert.deepEqual(labels, ['试听一句', '启用气泡播报']);
+  assert.doesNotMatch(page, /本机试听|停止试听|停止播放/);
+  assert.doesNotMatch(page, /如何验证语音互动|隐私与功能范围|准备一段参考音频|准备后可试听|这是本机语音试听/);
 });
 
-test('live exposes the two local drafts and only informational platform capabilities', async () => {
+
+test('speech transcript autosave coalesces edits and flushes the latest draft before leaving', async () => {
+  const { createSpeechTranscriptSaver } = await import('../src/pages/speech-transcript-save.ts');
+  const saved: string[] = [];
+  const saver = createSpeechTranscriptSaver(async value => { saved.push(value); }, 60_000);
+  saver.schedule('可');
+  saver.schedule('可莉');
+  await saver.flush();
+  assert.deepEqual(saved, ['可莉']);
+});
+
+test('speech transcript flush waits for an active write and then persists the newest edit', async () => {
+  const { createSpeechTranscriptSaver } = await import('../src/pages/speech-transcript-save.ts');
+  const saved: string[] = [];
+  let began!: () => void, release!: () => void;
+  const started = new Promise<void>(resolve => { began = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const saver = createSpeechTranscriptSaver(async value => {
+    if (value === '旧稿') { began(); await held; }
+    saved.push(value);
+  }, 60_000);
+  saver.schedule('旧稿');
+  const first = saver.flush();
+  await started;
+  saver.schedule('最新稿');
+  const latest = saver.flush();
+  release();
+  await Promise.all([first, latest]);
+  assert.deepEqual(saved, ['旧稿', '最新稿']);
+});
+
+test('failed speech autosave cannot silently flush without writing the latest transcript', async () => {
+  const { createSpeechTranscriptSaver } = await import('../src/pages/speech-transcript-save.ts');
+  const attempted: string[] = [];
+  const saver = createSpeechTranscriptSaver(async value => {
+    attempted.push(value);
+    if (attempted.length <= 2) throw new Error('temporary failure');
+  }, 60_000);
+  saver.schedule('尚未保存的合成稿');
+  await assert.rejects(saver.flush(), /temporary failure/);
+  await assert.rejects(saver.flush(), /temporary failure/);
+  await saver.flush();
+  assert.deepEqual(attempted, Array(3).fill('尚未保存的合成稿'));
+});
+
+test('a failed in-flight speech autosave never overwrites newer edits or resurrects a cancelled draft', async () => {
+  const { createSpeechTranscriptSaver } = await import('../src/pages/speech-transcript-save.ts');
+  for (const cancel of [false, true]) {
+    let rejectFirst!: (reason: Error) => void;
+    const attempted: string[] = [];
+    const saver = createSpeechTranscriptSaver(value => {
+      attempted.push(value);
+      return attempted.length === 1 ? new Promise<void>((_resolve, reject) => { rejectFirst = reject; }) : Promise.resolve();
+    }, 60_000);
+    saver.schedule('旧合成稿');
+    const first = saver.flush();
+    if (cancel) saver.cancel();
+    else saver.schedule('新合成稿');
+    rejectFirst(new Error('temporary failure'));
+    await assert.rejects(first, /temporary failure/);
+    await saver.flush();
+    assert.deepEqual(attempted, cancel ? ['旧合成稿'] : ['旧合成稿', '新合成稿']);
+  }
+});
+
+test('live puts output first, offers the two roles, and keeps offline controls disabled', async () => {
   const html = await view('live');
   const page = html.slice(html.indexOf('<main'));
-  assert.match(page, /<header class="interaction-heading">[\s\S]*?<h1>直播管理<\/h1>[\s\S]*?class="theme-toggle"/);
-  assert.match(page, /平台尚未接入[\s\S]*?仅支持草稿[\s\S]*?房间草稿[\s\S]*?平台能力/);
-  assert.match(page, /<img[^>]*src="pet-app:[^"]*dafeiyu[^"]*"[^>]*draggable="false"/);
-  assert.equal((page.match(/type="radio"/g) ?? []).length, 2);
-  for (const text of ['B 站', '抖音', '直播间号或房间标识', '当前平台还没有填写内容']) assert.ok(page.includes(text), text);
-  for (const text of ['平台授权', '连接直播间', '收发弹幕']) assert.match(page, new RegExp(`<li><span>[\\s\\S]*?${text}</span><span[^>]*>未接入</span></li>`));
-  assert.equal((page.match(/<button\b/g) ?? []).length, 1, 'empty live page has just the shared appearance button');
-  assert.doesNotMatch(page, /<form|type="password"|type="file"|预览状态/);
+  assert.match(page, /<header class="interaction-heading">[\s\S]*?<h1>直播管理<\/h1>[\s\S]*?aria-label="直播桌宠"[\s\S]*?class="theme-toggle"/);
+  const composer = page.match(/<div class="live-danmaku-controls">([\s\S]*?)<\/div>/)?.[1] ?? '';
+  assert.deepEqual([...composer.matchAll(/<button[^>]*aria-label="([^"]+)"/g)].map(match => match[1]), ['发送演练弹幕']);
+  assert.match(page, /舞台输出[\s\S]*?布景与摆位[\s\S]*?主播互动[\s\S]*?打招呼[\s\S]*?开心一下[\s\S]*?比个心[\s\S]*?弹幕演练/);
+  for (const text of ['暮色小屋', '雨夜阁楼', '云海露台', '蓝天草原', '森林篝火', '录音棚', '未连接桌面工作区', '1920 × 1080', '静音']) assert.ok(page.includes(text), text);
+  assert.match(page, /<select[^>]*aria-label="直播桌宠"[^>]*>[\s\S]*?龙妹<\/option>[\s\S]*?鲸鱼妹 · 暂不支持直播<\/option>/);
+  for (const text of ['保存布景', '开启直播台', '预览舞台', '复制 OBS 地址', '打招呼', '开心一下', '比个心']) {
+    assert.match(buttonWithText(page, text), /disabled=""/, text);
+  }
+  for (const text of ['LOCAL OUTPUT', '选择布景、触发动作，向 OBS 提供本机画面。', '开启本机节目源，不会推流。',
+    '点布景卡选景，点右上角图标预览。', '手动动作和对应台词只送上舞台。', '「预览舞台」会在独立窗口打开节目画面。',
+    '当前布景已保存。', '开启直播台后可以演练。', '停止演练', '启用龙妹声音', '停止龙妹声音']) {
+    assert.ok(!page.includes(text), `obsolete copy: ${text}`);
+  }
+  assert.match(page, /<button(?=[^>]*aria-label="发送演练弹幕")(?=[^>]*aria-keyshortcuts="Enter")(?=[^>]*disabled="")[^>]*>/);
+  assert.doesNotMatch(page, /live-danmaku-conversation|<kbd>Enter<\/kbd>|0 \/ 120/);
+  assert.doesNotMatch(page, /live-danmaku-steps|演练进度/);
+  assert.doesNotMatch(page, /模拟一次|模拟问候|晨光书房|已开播|已连接平台|live-stage-hero|布景示意|房间草稿|平台能力|关闭直播台|<iframe|type="password"|type="file"/);
+  assert.equal((page.match(/type="radio"/g) ?? []).length, 6);
+  assert.equal((page.match(/-cover\.webp/g) ?? []).length, 6);
+  for (const scene of ['暮色小屋', '雨夜阁楼', '云海露台', '蓝天草原', '森林篝火', '录音棚']) {
+    const preview = page.match(new RegExp(`<button[^>]*aria-label="预览布景：${scene}"[^>]*>`))?.[0];
+    assert.ok(preview, scene);
+    assert.doesNotMatch(preview, /disabled/);
+    assert.match(preview, /aria-haspopup="dialog"/);
+  }
+  const sceneChoices = [...page.matchAll(/<label class="live-scene-choice">([\s\S]*?)<\/label>(<button[^>]*class="live-scene-preview"[^>]*>)/g)];
+  assert.equal(sceneChoices.length, 6, 'each card has a separate preview button');
+  for (const [, choice, preview] of sceneChoices) {
+    assert.ok(choice && preview);
+
+    assert.match(choice, /type="radio"/);
+    assert.match(choice, /<img [^>]*-cover\.webp/);
+    assert.doesNotMatch(choice, /<button/);
+    assert.match(preview, /aria-haspopup="dialog"/);
+  }
+  assert.match(page, /<div class="live-scene-controls"><fieldset class="live-scenes">[\s\S]*?<\/fieldset><div class="live-adjustments">[\s\S]*?角色位置与大小[\s\S]*?保存布景[\s\S]*?<p class="live-hint live-scene-status" role="status">[\s\S]*?<\/p><\/div><\/div>/);
+  assert.doesNotMatch(page, /<fieldset class="live-scenes" disabled|type="range"/);
+  assert.match(page, /<fieldset class="live-placement" disabled=""/);
+  for (const label of ['横向位置', '角色大小']) {
+    assert.match(page, new RegExp(`aria-label="减少${label}"`));
+    assert.match(page, new RegExp(`aria-label="增加${label}"`));
+  }
+  assert.match(page, /<input(?=[^>]*type="number")(?=[^>]*min="25")(?=[^>]*max="75")[^>]*>/);
+  assert.match(page, /<input(?=[^>]*type="number")(?=[^>]*min="75")(?=[^>]*max="125")[^>]*>/);
+  assert.equal((page.match(/<input[^>]*type="radio"[^>]*disabled/g) ?? []).length, 6);
+
+});
+
+test('live rehearsal stays composer-only and keeps processing and failure feedback', async () => {
+  const props = { notice: '', available: true, locked: false, unavailableHint: '', onSend: async () => true };
+  for (const [state, feedback] of [
+    [{ phase: 'generating' }, '龙妹正在读弹幕、组织回复。'],
+    [{ phase: 'synthesizing' }, '正在用本机音色生成节目语音。'],
+    [{ phase: 'published', text: '合成回复' }, ''],
+    [{ phase: 'failed', error: 'model-failed' }, '没收到可播的回复'],
+    [{ phase: 'stopped' }, ''],
+  ] as const) {
+    const html = await renderWorkspace(createElement(LiveDanmaku, { ...props, state }));
+    assert.match(html, /<textarea[^>]*maxLength="120"/i);
+    assert.match(html, /<label[^>]*>观众弹幕<\/label>/);
+    assert.doesNotMatch(html, /测试输入|第一个已保存服务商的默认模型，可能计费|不连接直播平台|<textarea[^>]*aria-describedby=/);
+    assert.match(html, /aria-keyshortcuts="Enter"/);
+    assert.doesNotMatch(html, /live-danmaku-conversation|合成回复|已送上舞台|<kbd>Enter<\/kbd>|0 \/ 120/);
+    if (feedback) assert.match(html, new RegExp(`role="status"[^>]*>${feedback}`));
+    else assert.doesNotMatch(html, /role="status"/);
+    assert.doesNotMatch(html, /停止演练|live-danmaku-footer/);
+  }
 });
 
 const buttonWithText = (html: string, label: string) => {
-  const found = [...html.matchAll(/<button\b[^>]*>([\s\S]*?)<\/button>/g)].find(([, body]) => body!.replace(/<[^>]*>/g, '') === label);
+  const found = [...html.matchAll(/<button\b[^>]*>([\s\S]*?)<\/button>/g)].find(([, body]) => body!.replace(/<(?:span|small)[^>]*aria-hidden="true"[^>]*>[^<]*<\/(?:span|small)>/g, '').replace(/<[^>]*>/g, '') === label);
   assert.ok(found, label);
   return found[0];
 };

@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 
 const stylesheet = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
 const baseStyles = stylesheet('../src/style.css');
+const nookStyles = stylesheet('../src/pet-nook.css');
 const moduleStyles = stylesheet('../src/pages/pages.css');
 const interactionStyles = stylesheet('../src/pages/interaction-pages.css');
 const modelStyles = stylesheet('../src/models.css');
@@ -29,6 +30,7 @@ test('chat composer uses its border, not a focus-within shadow ring', () => {
 
 test('keyboard focus rings remain available to non-text controls', () => {
   assert.match(baseStyles, /:focus-visible\s*\{\s*outline:\s*3px solid var\(--focus\);/);
-  assert.match(interactionStyles, /\.interaction-platforms input:focus-visible \+ span\s*\{\s*outline:\s*2px solid var\(--focus\);/);
+  assert.match(interactionStyles, /\.live-scene-option:has\(input:focus-visible\)\s*\{\s*outline:\s*2px solid var\(--focus\);/);
+  assert.match(nookStyles, /\.pet-role-picker:has\(select:focus-visible\)\s*\{\s*outline:\s*2px solid var\(--focus\);/);
   assert.match(moduleStyles, /input\[type="checkbox"\]/);
 });

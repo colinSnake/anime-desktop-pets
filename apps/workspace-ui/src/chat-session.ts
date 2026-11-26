@@ -1,4 +1,3 @@
-import type { ReplySpeechBridge } from '../../../packages/contracts/src/speech.ts';
 import { validVoiceDraft } from '../../../packages/contracts/src/voice-draft.ts';
 import { chatHistoryTitle, isHistoryDetail, validChatProjectName, type ChatHistoryDetail } from '../../../packages/contracts/src/chat-history.ts';
 import { emptyChatState } from './empty-chat.ts';
@@ -18,12 +17,14 @@ export type LocalChatShortcut = '查看本机身份' | '查看目标进度' | '�
 export type ChatCharacter = { id: string; name: string };
 export type ChatModel = { id: string; name: string; modelName?: string; providerName?: string; reasoningLevels?: ReasoningEffort[]; reasoningEffort?: ReasoningEffort; ready?: boolean; isDefault?: boolean; inputModalities?: InputModality[]; taskRoute?: Omit<ChatRoute, 'useDefault'>; taskToolsUnverified?: boolean };
 export type ChatAdapter = { models: ChatModel[]; reply(request: ChatRequest, signal: AbortSignal): Promise<string> };
-export type ChatSession = { draft: string; draftSnapshot: ChatDraft; turns: ChatTurn[]; attachments: Pick<ChatAttachment, 'name' | 'mediaType'>[]; awaitingApproval?: boolean; fullyAllowed?: boolean; materialPermissionKey?: string; projectID?: string; projectName?: string; pending: boolean; failed: boolean; status: string; model?: string; reasoningEffort?: ReasoningEffort; confirmingClear: boolean; editorKey?: string; title?: string; hasEarlier?: boolean; savedTurnID?: string; canReturnToCurrent?: boolean };
+export type ChatContextUsage = { inputTokens?: number; contextWindow?: number };
+export type ChatSession = { draft: string; draftSnapshot: ChatDraft; turns: ChatTurn[]; attachments: Pick<ChatAttachment, 'name' | 'mediaType'>[]; awaitingApproval?: boolean; fullyAllowed?: boolean; materialPermissionKey?: string; projectID?: string; projectName?: string; pending: boolean; failed: boolean; status: string; model?: string; reasoningEffort?: ReasoningEffort; contextUsage?: ChatContextUsage; confirmingClear: boolean; editorKey?: string; title?: string; hasEarlier?: boolean; savedTurnID?: string; canReturnToCurrent?: boolean };
 export type ChatWorkspaceState = { characters: ChatCharacter[]; selectedId?: string; models: ChatModel[]; available: boolean; localAvailable: boolean; memoryAvailable?: boolean; online?: boolean; materialApproval?: boolean; persistentConversations?: boolean; historyEpoch?: number; canRetry?: boolean; detachedDrafts: { id: string; label: string; enabled: boolean }[]; session: ChatSession };
 type Attempt = { draft: ChatDraft; userTurn: ChatTurn; history: ChatTurn[]; local?: LocalChatInput; model?: string; route?: ChatRoute; reasoningEffort?: ReasoningEffort; exchanges?: ChatExchange[]; transmitted?: true; attachmentsUsed?: true };
-type Session = Omit<ChatSession, 'draft' | 'editorKey' | 'attachments' | 'materialPermissionKey'> & { attachments: ChatAttachment[]; editorKey: string; attempt?: Attempt; active?: { abort: AbortController; draftAtStart: ChatDraft }; conversation?: ChatConversation; lastSavedRequestID?: string; chooseModel?: true; reasoningChoice?: { route: string; effort: ReasoningEffort }; detachedFrom?: string; approvalRoute?: string; approvalRevision?: number; navigationDraft?: true };
+type Session = Omit<ChatSession, 'draft' | 'editorKey' | 'attachments' | 'materialPermissionKey' | 'contextUsage'> & { usageByRoute?: Map<string, number>; attachments: ChatAttachment[]; editorKey: string; attempt?: Attempt; active?: { abort: AbortController; draftAtStart: ChatDraft }; conversation?: ChatConversation; lastSavedRequestID?: string; chooseModel?: true; reasoningChoice?: { route: string; effort: ReasoningEffort }; detachedFrom?: string; approvalRoute?: string; approvalRevision?: number; navigationDraft?: true };
 type PetSessions = { base: Session; current: Session; historyEpoch?: number; cached: Map<string, Session> };
 const maxCachedConversations = 12;
+const maxUsageRoutes = 32;
 const segmenter = new Intl.Segmenter('zh', { granularity: 'grapheme' });
 export const characterCount = (text: string): number => [...segmenter.segment(text)].length;
 const prefix = (text: string, limit: number): string => [...segmenter.segment(text)].slice(0, limit).map(item => item.segment).join('');
@@ -76,7 +77,7 @@ export class ChatWorkspaceController {
  private options: ChatOption[] = [];
  private refreshing?: Promise<void>;
  private durable = false;
- constructor(private readonly adapter?: ChatAdapter, private readonly local?: LocalChatBridge, private readonly online?: OnlineChatBridge, private readonly memory?: ChatMemoryBridge, private readonly hasHistoryBridge = false, private readonly replySpeech?: ReplySpeechBridge) { this.models = structuredClone(adapter?.models ?? []); }
+ constructor(private readonly adapter?: ChatAdapter, private readonly local?: LocalChatBridge, private readonly online?: OnlineChatBridge, private readonly memory?: ChatMemoryBridge, private readonly hasHistoryBridge = false) { this.models = structuredClone(adapter?.models ?? []); }
  refreshModels() {
   if (!this.online) return Promise.resolve();
   if (this.refreshing) return this.refreshing;
@@ -94,7 +95,7 @@ export class ChatWorkspaceController {
  private selectedOption(own: Session) {
   if (own.chooseModel) return;
   const explicit = own.model ? this.options.find(option => option.ready && routeID(option.route) === own.model) : undefined;
-  return explicit ?? this.options.find(option => option.ready && option.isDefault) ?? this.options.find(option => option.ready);
+  return explicit ?? this.options.find(option => option.ready && option.isDefault);
  }
  private route(own: Session): ChatRoute | undefined {
   const selected = this.selectedOption(own);
@@ -244,6 +245,7 @@ export class ChatWorkspaceController {
  }
  private detach(own: Session) {
   this.resetApproval(own);
+  own.usageByRoute = undefined;
   own.conversation = undefined; own.title = undefined; own.lastSavedRequestID = undefined; own.hasEarlier = false;
   // A retry of an erased online turn must not try to recover the deleted history.
   if (own.attempt?.route) { own.attempt = undefined; own.failed = false; own.status = ''; }
@@ -255,15 +257,15 @@ export class ChatWorkspaceController {
   const selection = own && this.selectedOption(own);
   const route = own && this.route(own);
   const reasoningEffort = own && this.reasoning(own);
+  const contextUsage = own && route && selection && { inputTokens: own.usageByRoute?.get(routeID(route)), contextWindow: selection.contextWindow };
   // Stable across unrelated state publications, but not across approval-scope changes.
   const materialPermissionKey = own && JSON.stringify([own.editorKey, own.approvalRevision ?? 0, route && routeID(route), route?.useDefault, reasoningEffort]);
-  const session: ChatSession = own ? { draft: own.draftSnapshot.text, draftSnapshot: own.draftSnapshot, turns: own.turns, attachments: own.attachments.map(({ name, mediaType }) => ({ name, mediaType })), awaitingApproval: own.awaitingApproval, fullyAllowed: own.fullyAllowed, materialPermissionKey, projectID: own.projectID, projectName: own.projectName, pending: own.pending, failed: own.failed, status: own.status, model: this.online ? selection && routeID(selection.route) : own.model, reasoningEffort, confirmingClear: own.confirmingClear, editorKey: own.editorKey, title: own.title, savedTurnID: own.lastSavedRequestID, hasEarlier: own.hasEarlier,
+  const session: ChatSession = own ? { draft: own.draftSnapshot.text, draftSnapshot: own.draftSnapshot, turns: own.turns, attachments: own.attachments.map(({ name, mediaType }) => ({ name, mediaType })), awaitingApproval: own.awaitingApproval, fullyAllowed: own.fullyAllowed, materialPermissionKey, projectID: own.projectID, projectName: own.projectName, pending: own.pending, failed: own.failed, status: own.status, model: this.online ? selection && routeID(selection.route) : own.model, reasoningEffort, contextUsage, confirmingClear: own.confirmingClear, editorKey: own.editorKey, title: own.title, savedTurnID: own.lastSavedRequestID, hasEarlier: own.hasEarlier,
    canReturnToCurrent: !!entry && own !== entry.base && this.canPark(entry) } : emptyChatState.session;
   const canOpenDraft = !!entry && !entry.current.pending && this.canPark(entry);
   const detachedDrafts = entry ? [...entry.cached].flatMap(([id, parked]) =>
    parked !== own && parked.detachedFrom && parked.draftSnapshot.text ? [{ id, label: parked.detachedFrom, enabled: canOpenDraft }] : []) : [];
   const models = this.online ? this.options.map(option => ({ id: routeID(option.route), name: `${option.modelName} · ${option.connectionName}`, modelName: option.modelName, providerName: option.connectionName, reasoningLevels: option.reasoningLevels, reasoningEffort: option.reasoningEffort, ready: option.ready, isDefault: option.isDefault, inputModalities: option.inputModalities, ...(option.taskTools && { taskRoute: { ...option.route }, ...(option.taskTools === 'unverified' && { taskToolsUnverified: true }) }) })) : this.models;
-  if (this.state.selectedId !== this.selectedId || this.state.session.editorKey !== own?.editorKey) this.stopReplySpeech();
   this.state = { characters: this.characters, selectedId: this.selectedId, models, available: this.online ? !!route : !!this.adapter && !!models.length,
    localAvailable: !!this.local, memoryAvailable: !!this.memory, online: !!this.online, materialApproval: !!this.online?.approveMaterials, persistentConversations: this.durable,
    historyEpoch: entry?.historyEpoch, canRetry: own ? this.retryable(own) : false, detachedDrafts, session };
@@ -505,15 +507,14 @@ export class ChatWorkspaceController {
   return this.perform(own, own.attempt, this.selectedId!);
  }
  private async perform(own: Session, attempt: Attempt, id: string, attachments: ChatAttachment[] = []): Promise<boolean> {
-  this.stopReplySpeech();
   const active = { abort: new AbortController(), draftAtStart: own.draftSnapshot };
-  let displayedReply: string | undefined;
   this.resetApproval(own);
   if (attachments.length) own.attachments = [];
   own.active = active; own.attempt = attempt; own.pending = true; own.failed = false; own.status = ''; own.confirmingClear = false;
   this.publish();
   try {
    let raw: string, replayable = false, historyNotice = '';
+   let latestUsage: { route: ChatRoute; inputTokens?: number } | undefined;
    if (attempt.local) {
     const response = await this.local!.localChatContext(attempt.local);
     if (!isLocalChatResult(response, id) || !response.ok) throw new Error('local_context_unavailable');
@@ -542,7 +543,7 @@ export class ChatWorkspaceController {
      const result = await this.online.send(materialGrant ? { ...request, materialGrant } : request);
      if (!isChatSendResult(result, requestID)) throw new ChatFailure('invalid_response');
      if (!result.ok) throw new ChatFailure(result.error);
-     if (result.replayable && !result.recovered && result.historyStatus !== 'omitted' && !attachments.length) displayedReply = requestID;
+     if (!result.recovered) latestUsage = { route: attempt.route, inputTokens: result.usage?.inputTokens };
      raw = result.text; replayable = result.replayable && !result.recovered && !attachments.length;
      if (own.active === active && conversation && !result.historyStatus) {
       own.conversation = { ...conversation, mode: 'resume' };
@@ -560,6 +561,15 @@ export class ChatWorkspaceController {
    if (own.active !== active) return false;
    if (typeof raw !== 'string' || !raw.trim() || raw.length > 256_000) throw new Error('invalid_reply');
    own.turns = trimTranscript([...own.turns, { id: crypto.randomUUID(), role: 'assistant', text: raw.trim(), createdAt: Date.now(), ...(attempt.local ? { localOnly: true } : {}), ...(attempt.route && replayable ? { replayRoute: routeID(attempt.route), replyTo: attempt.userTurn.id } : {}) }]);
+   if (latestUsage) {
+    const key = routeID(latestUsage.route);
+    own.usageByRoute?.delete(key);
+    if (latestUsage.inputTokens !== undefined) {
+     const usage = own.usageByRoute ??= new Map();
+     usage.set(key, latestUsage.inputTokens);
+     if (usage.size > maxUsageRoutes) usage.delete(usage.keys().next().value!);
+    }
+   }
    own.attempt = undefined;
    own.status = historyNotice;
    return true;
@@ -574,13 +584,10 @@ export class ChatWorkspaceController {
   } finally {
    if (own.active === active) {
     own.active = undefined; own.pending = false; this.publish();
-    if (!own.failed && displayedReply && this.current() === own) void this.replySpeech?.displayed(displayedReply).catch(() => {});
    }
   }
  }
- private stopReplySpeech() { void this.replySpeech?.stop().catch(() => {}); }
  cancel() {
-  this.stopReplySpeech();
   const own = this.current(); if (!own) return;
   this.resetApproval(own);
   if (own.attachments.length) own.attachments = [];
@@ -601,7 +608,6 @@ export class ChatWorkspaceController {
  cancelClear() { const own = this.current(); if (own) { own.confirmingClear = false; this.publish(); } }
  confirmClear(): boolean {
   const own = this.current(); if (!own?.confirmingClear || own.pending) return false;
-  this.stopReplySpeech();
   const entry = this.currentSet();
   if (!own.detachedFrom || !own.draftSnapshot.text) entry?.cached.delete(own.editorKey);
   this.detach(own);

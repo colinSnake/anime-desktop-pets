@@ -8,6 +8,14 @@ import { textReply, toolReply } from './fixtures/model-replies.ts';
 import { validateChatAttachments } from '../../../packages/contracts/src/chat-attachments.ts';
 const input:ModelInput={system:'已授权的合成上下文',messages:[{role:'user',text:'合成问题'}],tools:[{name:'weather',description:'仅合成工具声明，不执行',parameters:{type:'object',properties:{city:{type:'string'}},required:['city']}}]};
 const route=(p:ModelProtocol)=>{const x=configuration(p);x.connections[0]!.models[0]!.capabilities.tools.status='supported';return resolveRoute(x,undefined,'text-chat');};
+test('Anthropic input usage includes cached reads and writes without counting output', () => {
+ const result = (usage: Record<string, unknown>) => adapters.anthropic.decode(route('anthropic'), { ...textReply('anthropic') as Record<string, unknown>, usage }).usage;
+ assert.deepEqual(result({ input_tokens: 10, cache_read_input_tokens: 20, cache_creation_input_tokens: 30, output_tokens: 5 }), { inputTokens: 60, outputTokens: 5 });
+ assert.deepEqual(result({ input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: null }), { inputTokens: 0 });
+ assert.deepEqual(result({ output_tokens: 5 }), { outputTokens: 5 });
+ assert.throws(() => result({ input_tokens: 10, cache_read_input_tokens: '20' }), /invalid_response/);
+ assert.throws(() => result({ input_tokens: Number.MAX_SAFE_INTEGER, cache_creation_input_tokens: 1 }), /invalid_response/);
+});
 for(const protocol of MODEL_PROTOCOLS) {
  test(`${protocol}: explicit path, native fields, fixed headers and no cross-protocol request keys`,()=>{
   const request=adapters[protocol].encode(route(protocol),input);

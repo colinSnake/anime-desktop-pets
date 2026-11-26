@@ -1,5 +1,5 @@
 import { textDraft } from '../src/chat-draft.ts';
-import type { OnlineChatInput, ChatSendResult } from '../../../packages/contracts/src/online-chat.ts';
+import type { OnlineChatInput, ChatOption, ChatSendResult } from '../../../packages/contracts/src/online-chat.ts';
 import type { ChatAttachment } from '../../../packages/contracts/src/chat-attachments.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -196,7 +196,7 @@ const onlineOptions = [
  { route: { connectionID: 'first', modelEntryID: 'one', fingerprint: 'a'.repeat(64) }, connectionName: '服务甲', modelName: '同名模型', ready: true, isDefault: true },
  { route: { connectionID: 'second', modelEntryID: 'one', fingerprint: 'b'.repeat(64) }, connectionName: '服务乙', modelName: '同名模型', ready: true, isDefault: false },
 ];
-test('when no global default exists, the first ready configured model becomes the default route', async () => {
+test('without a service-marked default, chat does not silently select an arbitrary online route', async () => {
  const options = [
   { route: { connectionID: 'first', modelEntryID: 'three', fingerprint: 'a'.repeat(64) }, connectionName: '服务甲', modelName: '模型三', ready: true, isDefault: false },
   { route: { connectionID: 'second', modelEntryID: 'one', fingerprint: 'b'.repeat(64) }, connectionName: '服务乙', modelName: '模型一', ready: true, isDefault: false },
@@ -207,8 +207,9 @@ test('when no global default exists, the first ready configured model becomes th
   send: async input => { sent.push(input); return { ok: true, requestID: input.requestID, text: '默认回复', replayable: false }; },
  });
  c.syncCharacters(characters); await c.refreshModels();
- assert.equal(c.getSnapshot().session.model, 'first/three/' + 'a'.repeat(64));
- c.edit('使用第一个服务商的模型三'); assert.equal(await c.send(), true);
+ c.edit('不要自动使用不匹配的服务商'); assert.equal(await c.send(), false);
+ assert.equal(sent.length, 0);
+ c.selectModel(c.getSnapshot().models[0]!.id); assert.equal(await c.send(), true);
  assert.deepEqual(sent[0]?.route, options[0]!.route);
 });
 
@@ -759,48 +760,60 @@ test('voice transcription fills only its unchanged empty local draft and never s
  assert.equal(c.getSnapshot().session.turns.length, 0);
 });
 
-test('reply speech acknowledges only a fresh plain result accepted in the current chat', async () => {
- const displayed: string[] = [];
- let stops = 0, lastRequest!: OnlineChatInput;
- let next = deferred<ChatSendResult>();
+test('input usage follows the live pet, conversation and frozen model route, and clears with the conversation', async () => {
+ const a = { ...onlineOptions[0]!, contextWindow: 258_000 };
+ let options: ChatOption[] = [a, onlineOptions[1]!];
+ let count = 151_000;
  const c = new ChatWorkspaceController(undefined, undefined, {
-  list: async () => ({ ok: true, models: onlineOptions }), cancel: async () => {},
-  approveMaterials: async () => ({ ok: true, grant: crypto.randomUUID() }),
-  send: input => { lastRequest = input; return next.promise; },
- }, undefined, false, {
-  displayed: async id => {
-   assert.equal(c.getSnapshot().session.pending, false);
-   assert.equal(c.getSnapshot().session.turns.at(-1)?.text, '新收到的普通回复');
-   displayed.push(id);
-  },
-  stop: async () => { stops++; },
- });
+  list: async () => ({ ok: true, models: options, persistentConversations: true }), cancel: async () => {},
+  send: async input => ({ ok: true, requestID: input.requestID, text: '合成回复', replayable: true, usage: { inputTokens: count } }),
+ }, undefined, true);
+ const usage = () => c.getSnapshot().session.contextUsage;
+ const send = async () => { c.edit('合成问题'); assert.equal(await c.send(), true); };
  c.syncCharacters(characters); await c.refreshModels();
- const send = () => { next = deferred(); c.edit('合成测试问题'); return c.send(); };
- const reply = (text: string) => ({ ok: true, requestID: lastRequest.requestID, text, replayable: true } as const);
- let pending = send();
- assert.deepEqual(displayed, []);
- next.resolve(reply('新收到的普通回复'));
- assert.equal(await pending, true);
- assert.deepEqual(displayed, [lastRequest.requestID]);
- for (const privateResult of [{ recovered: true }, { replayable: false }, { historyStatus: 'omitted' }] as const) {
-  pending = send(); next.resolve({ ...reply('不应承诺播报'), ...privateResult });
-  assert.equal(await pending, true);
- }
- pending = send(); next.resolve({ ok: false, error: 'unavailable' }); assert.equal(await pending, false);
- next = deferred(); c.edit('合成附件');
- const editor = c.getSnapshot().session.editorKey;
- c.setAttachments('pet-one', [{ name: 'synthetic.txt', data: '5L2g5aW9', mediaType: 'text/plain' }], editor);
- assert.equal(c.setMaterialPermission(true, editor), true);
- pending = c.send(); await Promise.resolve();
- assert.ok(lastRequest.attachments?.length);
- next.resolve(reply('即使服务误标也不播报附件回复'));
- assert.equal(await pending, true);
- pending = send();
- const beforeSwitch = stops;
- c.selectCharacter('pet-two');
- assert.ok(stops > beforeSwitch);
- next.resolve(reply('切会话后迟到的回复'));
- assert.equal(await pending, false);
- assert.equal(displayed.length, 1);
+ const [first, second] = c.getSnapshot().models;
+ assert.equal(usage()?.inputTokens, undefined);
+ await send();
+ assert.deepEqual(usage(), { inputTokens: 151_000, contextWindow: 258_000 });
+ c.selectModel(second!.id);
+ assert.equal(usage()?.inputTokens, undefined);
+ count = 0; await send();
+ assert.equal(usage()?.inputTokens, 0);
+ assert.equal(usage()?.contextWindow, undefined);
+ c.selectModel(first!.id);
+ assert.equal(usage()?.inputTokens, 151_000);
+ options = [{ ...a, contextWindow: 260_000 }, onlineOptions[1]!];
+ await c.refreshModels();
+ assert.deepEqual(usage(), { inputTokens: 151_000, contextWindow: 260_000 });
+ c.selectCharacter('pet-two'); assert.equal(usage()?.inputTokens, undefined);
+ c.selectCharacter('pet-one'); assert.equal(usage()?.inputTokens, 151_000);
+ assert.equal(c.newConversation(), true); assert.equal(usage()?.inputTokens, undefined);
+ count = 12; await send(); assert.equal(usage()?.inputTokens, 12);
+ assert.equal(c.returnToCurrentChat(), true); assert.equal(usage()?.inputTokens, 151_000);
+ count = 23; await send(); assert.equal(usage()?.inputTokens, 23);
+ options = [{ ...a, route: { ...a.route, fingerprint: 'c'.repeat(64) } }, onlineOptions[1]!];
+ await c.refreshModels(); assert.equal(usage()?.inputTokens, undefined);
+ options = [a, onlineOptions[1]!]; await c.refreshModels(); assert.equal(usage()?.inputTokens, 23);
+ c.requestClear(); assert.equal(c.confirmClear(), true); assert.equal(usage()?.inputTokens, undefined);
+});
+
+test('local, failed, cancelled and recovered replies do not overwrite current usage; a fresh reply without usage does', async () => {
+ let answer: (input: OnlineChatInput) => Promise<ChatSendResult> = async input => ({ ok: true, requestID: input.requestID, text: '合成回复', replayable: true, usage: { inputTokens: 42 } });
+ const c = new ChatWorkspaceController(undefined, { localChatContext: async ({ petID }) => ({ ok: true, petID, text: '本机角色' }) }, {
+  list: async () => ({ ok: true, models: onlineOptions, persistentConversations: true }), cancel: async () => {}, send: input => answer(input),
+ }, undefined, true);
+ c.syncCharacters(characters); await c.refreshModels();
+ const usage = () => c.getSnapshot().session.contextUsage?.inputTokens;
+ c.edit('第一问'); assert.equal(await c.send(), true);
+ c.edit('查看本机身份'); assert.equal(await c.send(), true); assert.equal(usage(), 42);
+ answer = async () => ({ ok: false, error: 'rate_limited' });
+ c.edit('第二问'); assert.equal(await c.send(), false); assert.equal(usage(), 42);
+ answer = async input => ({ ok: true, requestID: input.requestID, text: '恢复的合成回复', replayable: true, recovered: true });
+ assert.equal(await c.retry(), true); assert.equal(usage(), 42);
+ const late = deferred<void>();
+ answer = async input => { await late.promise; return { ok: true, requestID: input.requestID, text: '迟到回复', replayable: true, usage: { inputTokens: 999 } }; };
+ c.edit('第三问'); const pending = c.send(); c.cancel(); late.resolve();
+ assert.equal(await pending, false); assert.equal(usage(), 42);
+ answer = async input => ({ ok: true, requestID: input.requestID, text: '无统计回复', replayable: true });
+ c.edit('第四问'); assert.equal(await c.send(), true); assert.equal(usage(), undefined);
 });

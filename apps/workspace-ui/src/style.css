@@ -70,15 +70,7 @@ small { font-size: 11px; }
 .nav-icon { display: grid; place-items: center; width: 17px; flex: none; }
 .content { min-width: 0; padding: 25px clamp(22px, 3.5vw, 56px) 40px; }
 .content:focus { outline: none; }
-.workspace-topline { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 24px; }
-.workspace-breadcrumb { min-width: 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
-.workspace-breadcrumb ol, .workspace-breadcrumb li { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.workspace-breadcrumb ol { list-style: none; padding: 0; margin: 0; }
-.workspace-crumb-root { flex-shrink: 0; white-space: nowrap; font-weight: 500; }
-.workspace-crumb-root svg { width: 15px; }
-.workspace-crumb-page svg { width: 12px; }
-.workspace-breadcrumb svg { display: block; flex: none; }
-.workspace-crumb-current { min-width: 0; padding: 5px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--brand-selection-gradient); color: var(--accent-text); font-weight: 650; overflow-wrap: anywhere; }
+.workspace-module-tools { display: flex; margin-bottom: 12px; }
 .workspace-topline-actions { display: flex; align-items: center; gap: 14px; margin-left: auto; flex-shrink: 0; }
 .theme-toggle { display: grid; place-items: center; width: 36px; height: 36px; flex-shrink: 0; padding: 0; border: 0; border-radius: 8px; background: var(--transparent); color: var(--muted); }
 .theme-toggle > svg { display: block; width: 20px; height: 20px; }
@@ -207,7 +199,6 @@ input[type="range"] { display: block; width: 100%; margin: 14px 0 9px; accent-co
 }
 @media (max-width: 600px) {
   .content { padding: 20px 18px 35px; }
-  .workspace-topline { margin-bottom: 28px; }
   .page-heading { gap: 15px; align-items: flex-start; }
   h1 { font-size: 30px; }
   .page-heading .muted { font-size: 11px; }

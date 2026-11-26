@@ -125,7 +125,8 @@ def prepare(archive, out, expected_bytes, expected_sha256, *, verify_catalog=Fal
                 with bundle.open(PREFIX + source) as payload:
                     if payload.read(4) != b'\x1a\x45\xdf\xa3':
                         raise ValueError('预览素材缺少 WebM 头')
-                    with (out / target).open('xb') as dest:
+                    # The live-stage loader accepts only owner-private clip copies.
+                    with open(out / target, 'xb', opener=lambda path, flags: os.open(path, flags, 0o600)) as dest:
                         dest.write(b'\x1a\x45\xdf\xa3')
                         shutil.copyfileobj(payload, dest, length=1024 * 1024)
             if rows is not None:

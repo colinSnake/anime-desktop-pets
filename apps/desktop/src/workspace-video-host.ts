@@ -1,9 +1,9 @@
-import { videoCommand, videoCue, videoMenu, videoPosition, type VideoMenuIntent, type VideoCommand, type VideoDisplay, type VideoMessage, type VideoPosition, type VideoReply, type VideoResult } from '../../app-service/src/workspace-video-protocol.ts';
+import { videoCommand, videoCue, videoMenu, videoPosition, type VideoMenuIntent, type VideoCaptionSpeech, type VideoCommand, type VideoDisplay, type VideoMessage, type VideoPosition, type VideoReply, type VideoResult } from '../../app-service/src/workspace-video-protocol.ts';
 
 import type { BehaviorPreferences } from '../../../packages/contracts/src/pets.ts';
 import type { TaskAnimation } from '../../app-service/src/task-animation.ts';
 
-export type OwnedVideoWindow = { ready: Promise<boolean>; stop(): boolean; applyDisplay?(value: VideoDisplay): boolean; applyBehavior?(value: BehaviorPreferences): boolean; setVisible?(value: boolean): boolean; applyTaskAnimation?(value: TaskAnimation): boolean };
+export type OwnedVideoWindow = { ready: Promise<boolean>; stop(): boolean; applyDisplay?(value: VideoDisplay): boolean; applyBehavior?(value: BehaviorPreferences): boolean; setVisible?(value: boolean): boolean; applyTaskAnimation?(value: TaskAnimation): boolean; applyCaptionSpeech?(value: VideoCaptionSpeech): void };
 type Start = Extract<VideoCommand, { op: 'start' }>;
 type End = 'stopped' | 'failed';
 type Own = { slot: number; epoch: number; window?: OwnedVideoWindow; opening: boolean; stopping: boolean; dispatched: boolean; timer?: ReturnType<typeof setTimeout> };
@@ -29,9 +29,12 @@ export class WorkspaceVideoHost {
       reply(!current || this.stop(input.id, current) ? 'stopped' : 'failed');
       return true;
     }
-    if (input.op === 'task') {
+    if (input.op === 'task' || input.op === 'caption-speech') {
       if (this.active && allowStart && current?.dispatched && !current.stopping && current.epoch === input.epoch) {
-        try { current.window?.applyTaskAnimation?.(input.value); } catch { /* The prior lease expires independently. */ }
+        try {
+          if (input.op === 'task') current.window?.applyTaskAnimation?.(input.value);
+          else current.window?.applyCaptionSpeech?.(input.value);
+        } catch { /* The prior lease expires independently. */ }
       }
       return true;
     }

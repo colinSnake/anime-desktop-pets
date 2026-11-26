@@ -18,11 +18,6 @@
 }
 .chat-control:hover:not(:disabled), .chat-toolbar-actions .theme-toggle:hover:not(:disabled) { background: var(--surface-soft); color: var(--text); }
 .chat-control .pet-nook-icon, .chat-toolbar-actions .theme-toggle > svg { width: 15px; height: 15px; }
-.chat-role.chat-control { min-height: 36px; min-width: 0; max-width: min(35vw, 220px); padding: 3px 7px 3px 4px; justify-content: flex-start; position: relative; color: var(--text); }
-.chat-role-name { font-weight: 620; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chat-role > .pet-nook-icon { width: 12px; height: 12px; color: var(--muted); }
-.chat-role select { position: absolute; inset: 0; width: 100%; opacity: 0; }
-.chat-role:has(select:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
 .chat-options { flex: none; position: relative; }
 .chat-options summary { cursor: pointer; width: 34px; padding: 0; list-style: none; }
 .chat-options summary::-webkit-details-marker { display: none; }
@@ -59,8 +54,6 @@
 .chat-message { display: flex; gap: 10px; min-width: 0; overflow-wrap: anywhere; }
 .chat-avatar { display: grid; place-items: center; width: 32px; height: 32px; flex: none; border-radius: 10px; background: var(--pet-art-avatar); overflow: hidden; }
 .chat-avatar .pet-cover { width: 30px; height: 30px; padding: 0; background: var(--transparent); }
-.chat-role .chat-avatar { width: 26px; height: 26px; border-radius: 7px; }
-.chat-role .chat-avatar .pet-cover { width: 24px; height: 24px; }
 .chat-avatar .pet-cover-placeholder > img { min-width: 0; width: 72%; }
 .chat-reply { min-width: 0; max-width: 58ch; padding-top: 1px; }
 .chat-message-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; margin-bottom: 4px; color: var(--nook-quiet); font-size: 11px; }
@@ -108,13 +101,49 @@
 .chat-draft-editor > p { margin: 0; }
 .chat-draft-editor[data-empty="true"]:not(:focus)::before { content: attr(data-placeholder); position: absolute; color: var(--chat-composer-faint); pointer-events: none; }
 .chat-draft-editor[aria-readonly="true"] { cursor: default; }
-.chat-composer-footer { display: flex; align-items: center; gap: 8px; padding: 0 clamp(10px, 3.6vw, 16px) 8px; }
+.chat-composer-footer { display: flex; align-items: center; gap: 8px; padding: 5px clamp(10px, 3.6vw, 16px) 3px; }
 .chat-composer-permission { flex: none; min-height: 32px; padding: 0 8px; border: 0; border-radius: 999px; background: var(--transparent); color: var(--chat-composer-muted); font-size: 13px; white-space: nowrap; }
 .chat-composer-permission:hover:enabled { background: var(--chat-composer-hover); }
 .chat-composer-permission:disabled { opacity: 1; }
 .chat-composer-actions { display: flex; align-items: center; min-width: 0; gap: 8px; margin-inline-start: auto; }
 .chat-composer-ring { display: grid; place-items: center; flex: none; width: 28px; }
 .chat-composer-ring::before { content: ""; box-sizing: border-box; width: 13px; height: 13px; border: 2px solid var(--chat-composer-ring-line); border-radius: 50%; }
+.chat-usage-trigger { height: 28px; border-radius: 50%; anchor-name: --chat-usage-ring; }
+.chat-usage-trigger:focus-visible { outline-offset: -2px; }
+.chat-usage-trigger::before { content: none; }
+.chat-usage-trigger svg { width: 14px; height: 14px; fill: none; stroke: var(--chat-composer-ring-line); stroke-width: 2; }
+.chat-usage-trigger .chat-usage-progress { stroke: var(--chat-usage-ring); }
+.chat-context-usage {
+  --chat-usage-width: min(180px, calc(100% - 20px));
+  position: absolute; z-index: 2; inset-block-end: 39px; inset-inline-end: 10px; width: var(--chat-usage-width); pointer-events: none;
+  border: 1px solid var(--chat-usage-border); border-radius: 16px; padding: 5px 8px;
+  background: var(--chat-usage-surface); color: var(--chat-usage-muted); box-shadow: 0 3px 9px var(--shadow-popover-ink);
+  font-size: 13px; line-height: 20px; text-align: center; overflow-wrap: anywhere;
+}
+@supports (left: anchor(center)) {
+  .chat-context-usage {
+    anchor-name: --chat-usage-popup;
+    /* The visible ring is inset 7px inside the focus target. */
+    inset-block-end: calc(anchor(--chat-usage-ring top, 38px) + 1px);
+    inset-inline-end: auto;
+    inset-inline-start: clamp(10px, calc(anchor(--chat-usage-ring center) - var(--chat-usage-width) / 2), calc(100% - var(--chat-usage-width) - 10px));
+  }
+  /* Only the part above the composer needs a hover target. The bubble itself lets editor clicks through. */
+  .chat-composer:has(.chat-context-usage)::after {
+    content: ""; position: absolute; z-index: 2;
+    top: min(0px, anchor(--chat-usage-popup top, 0px)); bottom: 100%;
+    left: anchor(--chat-usage-popup left, 0px); right: anchor(--chat-usage-popup right, 100%);
+  }
+}
+.chat-context-usage, .chat-composer:has(.chat-context-usage)::after {
+  visibility: var(--chat-usage-visibility, hidden); transition: visibility 0s linear var(--chat-usage-delay, 120ms);
+}
+.chat-context-usage-detail { color: var(--chat-usage-text); }
+.chat-composer:is([data-usage-dismissed], :has([aria-expanded="true"], .chat-content-options[open])) { --chat-usage-delay: 0s; }
+.chat-composer:not([data-usage-dismissed], :has([aria-expanded="true"], .chat-content-options[open])):has(.chat-usage-trigger:focus-visible) { --chat-usage-visibility: visible; --chat-usage-delay: 0s; }
+@media (hover: hover) {
+  .chat-composer:hover:not([data-usage-dismissed], :has([aria-expanded="true"], .chat-content-options[open])) { --chat-usage-visibility: visible; --chat-usage-delay: 0s; }
+}
 .chat-composer-limits { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px 8px; padding: 0 12px 6px; }
 .chat-composer > :is(.chat-status, .chat-draft-preview, .chat-attachments, .chat-drop-hint) { margin-inline: 12px; }
 .chat-content-options { position: relative; flex: none; }

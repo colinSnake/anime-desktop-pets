@@ -285,6 +285,15 @@ class ProtocolTests(unittest.TestCase):
 
 
 class ServiceLoopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_public_stdio_cannot_capture_stage_reply(self):
+        events, player = [], FakePlayer()
+        line = '{"type":"capture-stage-reply","text":"临时节目回应"}\n'
+        await serve(FakeBackend(), player, stdin=io.StringIO(line + '{"type":"shutdown"}\n'),
+                    stdout_emit=lambda kind, **fields: events.append({"type": kind, **fields}))
+        self.assertIn({"type": "error", "reason": "invalid_command"}, events)
+        self.assertNotIn("临时节目回应", repr(events))
+        self.assertFalse(player.chunks)
+
     async def test_transcribes_local_audio_without_echoing_path_or_contents(self):
         with tempfile.TemporaryDirectory() as directory:
             audio = Path(directory) / "voice.wav"

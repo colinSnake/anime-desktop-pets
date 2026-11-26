@@ -1,3 +1,5 @@
+import { liveVoiceClipLimit, liveVoiceWireLimit, parseLiveVoice, stageVoiceDuration, type LiveVoiceResult } from '../../../packages/contracts/src/live-voice.ts';
+import { isLiveDanmakuReply, isLiveProfile, type LiveDanmakuError, type LiveScene, type LiveProfile, type LiveProfileResult } from '../../../packages/contracts/src/live-stage.ts';
 import type { AgentTaskInputs, AgentTaskMethod, AgentTaskResults } from '../../../packages/contracts/src/agent-tasks.ts';
 import { requestAgentTask } from './agent-task-transport.ts';
 import { taskUnavailable } from './agent-task-ipc.ts';
@@ -32,6 +34,26 @@ export interface ServiceTransport {
   onExit(handler: (code?: number) => void): void;
   terminate(): void;
 }
+async function readProgramResponse(response: Response, max: number, type: string): Promise<Buffer | undefined> {
+  const length = Number(response.headers.get('content-length'));
+  if (response.status !== 200 || response.headers.get('content-type')?.split(';')[0] !== type ||
+      !Number.isSafeInteger(length) || length <= 0 || length > max || !response.body) {
+    await response.body?.cancel(); return;
+  }
+  const bytes = Buffer.alloc(length);
+  const reader = response.body.getReader();
+  let offset = 0;
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      if (chunk.value.length > length - offset) { await reader.cancel(); return; }
+      bytes.set(chunk.value,offset); offset += chunk.value.length;
+    }
+  } finally { reader.releaseLock(); }
+  if (offset === length) return bytes;
+}
+
 export class ServiceProcess {
   private readonly token = randomBytes(32).toString("hex");
   private transport?: ServiceTransport;
@@ -52,6 +74,7 @@ export class ServiceProcess {
       businessRoot?: string;
       taskFollowingHome?: string;
       onTaskFollowingState?: (state: TaskFollowingState) => void;
+      onExit?: () => void;
       speech?: { python: string; model: string; worker: string };
       videoHost?: WorkspaceVideoHost;
       workspace?: { root: string; catalog: CatalogEntry[]; packageToolPath?: string; packageProfileRoot?: string };
@@ -96,6 +119,7 @@ export class ServiceProcess {
         this.port = undefined;
         this.videoCleanupFailed = this.options.videoHost?.close() === false;
         this.publishTaskFollowing('off');
+        this.options.onExit?.();
         fail();
         didExit();
       });
@@ -239,7 +263,72 @@ export class ServiceProcess {
     const result = await requestOnlineChat({ port, token: this.token }, input, signal);
     return this.closed || this.port !== port ? chatUnavailable : result;
   }
-  async speechRequest(method: 'status' | 'reference' | 'clear-reference' | 'enable' | 'disable' | 'chat-reply', data?: unknown): Promise<SpeechResult> {
+  async liveProfile(profile?: LiveProfile): Promise<LiveProfileResult> {
+    const unavailable = { ok: false, error: 'unavailable' } as const;
+    const port = this.port;
+    if (this.closed || !port) return unavailable;
+    if (!this.options.businessRoot) return {ok:false,error:'migration'};
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/v1/live/stage-profile`, {
+        method: profile ? 'POST' : 'GET', redirect: 'error', signal: AbortSignal.timeout(6500),
+        headers: { authorization: `Bearer ${this.token}`, ...(profile && {'content-type':'application/json'}) },
+        body: profile ? JSON.stringify(profile) : undefined,
+      });
+      if (!response.ok || this.closed || this.port !== port) return unavailable;
+      const data = await response.json();
+      if (this.closed || this.port !== port) return unavailable;
+      if (data?.ok === true && isLiveProfile(data.profile)) return {ok:true,profile:data.profile};
+      if (data?.ok === false && (data.error === 'storage' || data.error === 'busy')) return {ok:false,error:data.error};
+      return unavailable;
+    } catch { return unavailable; }
+  }
+  async liveVoice(signal: AbortSignal): Promise<LiveVoiceResult> {
+    const port = this.port;
+    const failed = {ok:false,error:'voice-failed'} as const;
+    if (this.closed || !port || !this.options.businessRoot || !this.options.speech || signal.aborted) return failed;
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/v1/live/voice`, {
+        method:'POST', body:'{}', redirect:'error', signal:AbortSignal.any([signal, AbortSignal.timeout(66_000)]),
+        headers:{authorization:`Bearer ${this.token}`,'content-type':'application/json'},
+      });
+      if (response.status === 409) return {ok:false,error:'voice-busy'};
+      if (response.status === 422) return {ok:false,error:'reference-required'};
+      const bytes = await readProgramResponse(response,liveVoiceWireLimit,'application/octet-stream');
+      if (this.closed || this.port !== port || signal.aborted || !bytes) return failed;
+      const clips = parseLiveVoice(bytes);
+      return clips ? {ok:true,clips} : failed;
+    } catch { return failed; }
+  }
+
+  async liveDanmaku(text: string, scene: LiveScene, signal: AbortSignal, synthesizing: () => void): Promise<
+    {ok:true; text:string; audio:Buffer} | {ok:false; error:LiveDanmakuError}> {
+    const port = this.port;
+    const current = () => !this.closed && this.port === port && !signal.aborted;
+    let error: LiveDanmakuError = 'model-failed';
+    if (!port || !this.options.businessRoot || !this.options.speech || !current()) return {ok:false,error};
+    const post = (phase: 'reply' | 'audio', data: object, timeout: number) => fetch(`http://127.0.0.1:${port}/v1/live/danmaku/${phase}`, {
+      method:'POST', body:JSON.stringify(data), redirect:'error', signal:AbortSignal.any([signal,AbortSignal.timeout(timeout)]),
+      headers:{authorization:`Bearer ${this.token}`,'content-type':'application/json'},
+    });
+    try {
+      const response = await post('reply',{text,scene},42_000);
+      if (response.status === 412 || response.status === 429) {
+        await response.body?.cancel();
+        return {ok:false,error:response.status === 412 ? 'no-model' : 'rate-limit'};
+      }
+      const bytes = await readProgramResponse(response,1024,'application/json');
+      if (!bytes || !current()) return {ok:false,error};
+      const result = JSON.parse(bytes.toString('utf8'));
+      if (!result || Object.keys(result).length !== 2 || !isLiveDanmakuReply(result.text) ||
+          typeof result.ticket !== 'string' || !/^[a-f0-9]{48}$/.test(result.ticket)) return {ok:false,error};
+      error = 'speech-failed';
+      synthesizing();
+      const audio = await readProgramResponse(await post('audio',{ticket:result.ticket},64_000),liveVoiceClipLimit,'application/octet-stream');
+      return current() && audio && stageVoiceDuration(audio) ? {ok:true,text:result.text,audio} : {ok:false,error};
+    } catch { return {ok:false,error}; }
+  }
+
+  async speechRequest(method: 'status' | 'reference' | 'clear-reference' | 'transcript' | 'enable' | 'disable' | 'preview' | 'suspend' | 'resume', data?: unknown): Promise<SpeechResult> {
     const unavailable = { ok: false, error: 'unavailable' } as const;
     if (this.closed || !this.port) return unavailable;
     const url = `http://127.0.0.1:${this.port}/v1/speech/bubbles${method === 'status' ? '' : `/${method}`}`;

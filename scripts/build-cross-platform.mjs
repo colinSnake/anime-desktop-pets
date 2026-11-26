@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { stageStartupVideo } from './stage-startup-video.mjs';
+import { stageLiveUI } from './stage-live-ui.mjs';
 import { stageVideoUI } from './stage-video-ui.mjs';
 
 const approvedLongmeiCovers = new Set([
@@ -83,6 +84,7 @@ export async function buildCrossPlatform(root, tools = { bundle, buildUI }) {
       }
       await stageStartupVideo(root, join(desktop, 'startup'));
       await stageVideoUI(root, join(desktop, 'video'), tools.bundle);
+      await stageLiveUI(root, join(desktop, 'live-stage'), tools.bundle);
       for (const name of ['task_reader.py', 'task_reader_worker.py']) {
         await copyFile(join(root, 'apps/runtime-bridge', name), join(desktop, 'runtime', name));
       }

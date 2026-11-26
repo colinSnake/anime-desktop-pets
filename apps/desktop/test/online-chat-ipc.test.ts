@@ -1,7 +1,5 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ChatReplySpeech } from '../src/chat-reply-speech.ts';
-import type { ReplySpeechCommand } from '../../../packages/contracts/src/speech.ts';
 import { ChatIPC } from '../src/chat-ipc.ts';
 import type { OnlineChatInput, ChatSendResult } from '../../../packages/contracts/src/online-chat.ts';
 
@@ -112,36 +110,13 @@ test('chat IPC accepts only current-turn attachment bytes, never paths or histor
   assert.deepEqual(sent[0]?.attachments, attachments);
 });
 
-
-test('chat IPC gives speech only a new validated no-material result, never a cancelled result', async () => {
-  const commands: ReplySpeechCommand[] = [];
-  const speech = new ChatReplySpeech(async command => { commands.push(command); return true; });
-  speech.setEnabled(true);
-  const late = deferred<ChatSendResult>();
-  const reply = { ok: true, requestID: input.requestID, text: '合成的普通回复', replayable: true } as const;
-  const grant = crypto.randomUUID();
-  let result: Promise<ChatSendResult> = late.promise;
-  const chat = new ChatIPC({ listChatModels: async () => ({ ok: true, models: [] }),
-    sendOnlineChat: () => result, approveChatMaterials: async () => ({ ok: true, grant }) }, speech);
-  const pending = chat.invoke('send', true, [input]);
-  chat.cancel();
-  late.resolve(reply);
-  assert.deepEqual(await pending, { ok: false, error: 'cancelled' });
-  assert.equal(speech.displayed(input.requestID), false);
-
-  result = Promise.resolve({ ...reply, requestID: crypto.randomUUID() });
-  assert.deepEqual(await chat.invoke('send', true, [input]), { ok: false, error: 'unavailable' });
-  assert.equal(speech.displayed(input.requestID), false);
-
-  const withFile = { ...input, attachments: [{ name: 'synthetic.txt', mediaType: 'text/plain', data: '5L2g5aW9' }] };
-  assert.deepEqual(await chat.approveMaterials(() => true, [withFile]), { ok: true, grant });
-  result = Promise.resolve(reply);
-  assert.deepEqual(await chat.invoke('send', true, [{ ...withFile, materialGrant: grant }]), reply);
-  assert.equal(speech.displayed(input.requestID), false);
-
-  assert.deepEqual(await chat.invoke('send', true, [input]), reply);
-  assert.deepEqual(commands, [], 'no playback before the matching renderer acknowledgement');
-  assert.equal(speech.displayed(input.requestID), true);
-  assert.deepEqual(commands, [{ revision: 1, text: reply.text }]);
-  await speech.stop();
+test('existing chat IPC only passes the approved context window and fresh numeric usage', async () => {
+  const reply = { ok: true, requestID: input.requestID, text: '合成回复', replayable: true, usage: { inputTokens: 0 } } as const;
+  let result: ChatSendResult = reply;
+  const listed = { ok: true, models: [{ route: input.route, connectionName: '连接', modelName: '模型', ready: true, isDefault: true, contextWindow: 258_000 }] } as const;
+  const bridge = new ChatIPC({ listChatModels: async () => ({ ...listed, models: [...listed.models] }), sendOnlineChat: async () => result });
+  assert.deepEqual(await bridge.invoke('list', true, []), listed);
+  assert.deepEqual(await bridge.invoke('send', true, [input]), reply);
+  result = { ...reply, recovered: true };
+  assert.deepEqual(await bridge.invoke('send', true, [input]), { ok: false, error: 'unavailable' });
 });

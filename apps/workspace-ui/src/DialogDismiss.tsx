@@ -17,22 +17,22 @@ function isBackdrop(event: { currentTarget: HTMLDialogElement; target: EventTarg
 }
 
 /** Dismiss on a complete backdrop click, never on a drag into or out of the dialog. */
-export function useDialogDismiss(onClose: () => void, locked = false, onEscape = onClose): Pick<
+export function useDialogDismiss(onClose: () => void, locked = false, onEscape = onClose, isBlank = isBackdrop): Pick<
   DialogHTMLAttributes<HTMLDialogElement>, 'onPointerDown' | 'onPointerMove' | 'onPointerUp' | 'onPointerCancel' | 'onClick' | 'onCancel'
 > {
   const press = useRef<{ id: number; x: number; y: number; released: boolean } | null>(null);
   return {
     onPointerDown: event => {
-      press.current = !locked && event.isPrimary && event.button === 0 && isBackdrop(event)
+      press.current = !locked && event.isPrimary && event.button === 0 && isBlank(event)
         ? { id: event.pointerId, x: event.clientX, y: event.clientY, released: false } : null;
     },
     onPointerMove: event => {
       const start = press.current;
-      if (start?.id === event.pointerId && (!isBackdrop(event) || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 8)) press.current = null;
+      if (start?.id === event.pointerId && (!isBlank(event) || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 8)) press.current = null;
     },
     onPointerUp: event => {
       const start = press.current;
-      if (!locked && start && start.id === event.pointerId && isBackdrop(event) &&
+      if (!locked && start && start.id === event.pointerId && isBlank(event) &&
           Math.hypot(event.clientX - start.x, event.clientY - start.y) <= 8) start.released = true;
       else press.current = null;
     },
@@ -40,7 +40,7 @@ export function useDialogDismiss(onClose: () => void, locked = false, onEscape =
     onClick: event => {
       const start = press.current;
       press.current = null;
-      if (!locked && start?.released && event.detail > 0 && isBackdrop(event)) onClose();
+      if (!locked && start?.released && event.detail > 0 && isBlank(event)) onClose();
     },
     onCancel: event => {
       event.preventDefault();

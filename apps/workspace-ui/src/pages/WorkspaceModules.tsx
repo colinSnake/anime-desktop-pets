@@ -8,11 +8,12 @@ import { AdvancedPage } from './AdvancedPage.tsx';
 import { GoalsPage, type GoalMode } from './GoalsPage.tsx';
 import { IdentityPage } from './IdentityPage.tsx';
 import { emptyIdentity, IdentityWorkspace } from './identity-editor.ts';
-import { LivePage, emptyLive } from './LivePage.tsx';
+import { LivePage } from './LivePage.tsx';
 import { MemoryPage } from './MemoryPage.tsx';
 import { createGoalSession, createMemorySession, emptyGoal, emptyMemory, type MemoryMode } from './character-record-editors.ts';
 import { RecordWorkspace } from './record-session.ts';
 import { SpeechPage, emptySpeech } from './SpeechPage.tsx';
+import { useBubbleSpeech } from './useBubbleSpeech.ts';
 import { PetAgentPanel, type AgentMemoryView, type CharacterPage } from './CharacterDataDialog.tsx';
 import type { AgentChatAvailability } from './pet-agent-overview.ts';
 import type { Draft } from './WorkspacePanels.tsx';
@@ -24,7 +25,7 @@ function useDraft<T>(initial: T): Draft<T> {
 }
 
 /** Remains mounted across navigation; renders only the active module. */
-export function WorkspaceModules({ page, workspace, diagnostics, speech, appearance, characters, selectedInstance, openWorkspaceData, migrateWorkspaceData, agent }: { agent?: { name: string; opener: HTMLElement; chat: AgentChatAvailability; onClose(): void }; page: Module | null; workspace?: WorkspaceData; diagnostics: DiagnosticProps; speech?: SpeechBridge; appearance?: ReactNode; characters?: CharactersBridge; openWorkspaceData?: DesktopBridge['openWorkspaceData']; migrateWorkspaceData?: DesktopBridge['migrateWorkspaceData']; selectedInstance?: Pick<PetDefinition, 'id' | 'displayName' | 'package'> }) {
+export function WorkspaceModules({ page, workspace, diagnostics, speech, liveStage, appearance, characters, selectedInstance, openWorkspaceData, migrateWorkspaceData, agent }: { agent?: { name: string; opener: HTMLElement; chat: AgentChatAvailability; onClose(): void }; page: Module | null; workspace?: WorkspaceData; diagnostics: DiagnosticProps; speech?: SpeechBridge; liveStage?: DesktopBridge['liveStage']; appearance?: ReactNode; characters?: CharactersBridge; openWorkspaceData?: DesktopBridge['openWorkspaceData']; migrateWorkspaceData?: DesktopBridge['migrateWorkspaceData']; selectedInstance?: Pick<PetDefinition, 'id' | 'displayName' | 'package'> }) {
   const identity = useDraft(emptyIdentity);
   const identityWorkspace = useMemo(() => characters ? new IdentityWorkspace(characters) : undefined, [characters]);
   const memoryWorkspace = useMemo(() => characters ? new RecordWorkspace(id => createMemorySession(characters, id)) : undefined, [characters]);
@@ -41,7 +42,7 @@ export function WorkspaceModules({ page, workspace, diagnostics, speech, appeara
   const goal = useDraft(emptyGoal);
   const [goalMode, setGoalMode] = useState<GoalMode>('capabilities');
   const speechDraft = useDraft(emptySpeech);
-  const live = useDraft(emptyLive);
+  const speechSession = useBubbleSpeech(speech, page === 'speech');
   const dataPage = (section: CharacterPage, agentMemoryView?: AgentMemoryView) => {
     switch (section) {
     case 'identity': return <IdentityPage key={selectedInstance?.id} draft={identity} connected={!!characters} instance={selectedInstance}
@@ -57,8 +58,8 @@ export function WorkspaceModules({ page, workspace, diagnostics, speech, appeara
       identity={identityWorkspace?.forPet(selectedInstance.id)} memory={memoryWorkspace?.forPet(selectedInstance.id)}
       goals={goalsWorkspace?.forPet(selectedInstance.id)} renderDetail={dataPage} /> : null;
     case 'identity': case 'memory': case 'goals': return dataPage(page);
-    case 'speech': return <SpeechPage draft={speechDraft} bridge={speech} appearance={appearance} />;
-    case 'live': return <LivePage draft={live} appearance={appearance} />;
+    case 'speech': return <SpeechPage draft={speechDraft} session={speechSession} bridge={speech} appearance={appearance} />;
+    case 'live': return <LivePage appearance={appearance} bridge={liveStage} paused={!!workspace && workspace.linkage !== 'active'} />;
     case 'advanced': return <AdvancedPage appearance={appearance} openWorkspaceData={openWorkspaceData} migrateWorkspaceData={migrateWorkspaceData} diagnostics={diagnostics} />;
     case null: return null;
   }

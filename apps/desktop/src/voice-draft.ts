@@ -8,6 +8,8 @@ const error = (code: VoiceDraftError): Failure => ({ ok: false, error: code });
 const maxOutput = 4096;
 const maxPendingReads = 2;
 type Selection = { canceled: boolean; filePaths: string[] };
+type TranscriptionRelease = () => Promise<unknown>;
+type BeforeTranscribe = () => Promise<TranscriptionRelease | undefined>;
 
 export class VoiceDraftPicker {
   private active?: { abort: AbortController; worker?: Promise<VoiceDraftResult> };
@@ -32,7 +34,7 @@ export class VoiceDraftPicker {
     })().finally(() => { onAbort[Symbol.dispose](); this.active = undefined; });
   }
 
-  select(choose: () => Promise<Selection>, current: () => boolean): Promise<VoiceDraftResult> {
+  select(choose: () => Promise<Selection>, current: () => boolean, beforeTranscribe?: BeforeTranscribe): Promise<VoiceDraftResult> {
     if (this.active || this.pendingReads >= maxPendingReads) return Promise.resolve(error('busy'));
     if (!current()) return Promise.resolve(error('unavailable'));
     const abort = new AbortController();
@@ -40,6 +42,7 @@ export class VoiceDraftPicker {
     const operation: NonNullable<VoiceDraftPicker['active']> = { abort };
     this.active = operation;
     return (async () => {
+      let release: TranscriptionRelease | undefined;
       try {
         const { canceled, filePaths } = await choose();
         if (!eligible() || canceled) return error('cancelled');
@@ -47,10 +50,19 @@ export class VoiceDraftPicker {
         const audio = await this.read(filePaths[0], abort.signal);
         if (!eligible()) return error('cancelled');
         if (!Buffer.isBuffer(audio)) return audio;
+        if (beforeTranscribe) {
+          release = await beforeTranscribe();
+          if (!release) return error('unavailable');
+          if (!eligible()) return error('cancelled');
+        }
         const result = await (operation.worker = this.transcribe(audio, abort.signal));
         return eligible() ? result : error('cancelled');
       } catch { return eligible() ? error('failed') : error('cancelled'); }
-    })().finally(() => { this.active = undefined; });
+      finally {
+        try { await release?.(); } catch { /* Releasing TTS must not replace the ASR result. */ }
+        this.active = undefined;
+      }
+    })();
   }
 
   private async read(path: string, signal: AbortSignal): Promise<Buffer | Failure> {
@@ -114,4 +126,40 @@ export function runVoiceTranscription(executable: string, args: string[], audio:
     });
     child.stdin.end(audio);
   });
+}
+
+/** Prevent ASR and the MLX TTS worker from holding both models at once. */
+export class VoiceDraftSpeechGate {
+  private lease?: symbol;
+  constructor(private readonly suspend: () => Promise<boolean>, private readonly resume: (preload: boolean) => Promise<boolean>) {}
+
+  get busy() { return this.lease !== undefined; }
+
+  async acquire(): Promise<((preload: boolean) => Promise<boolean>) | undefined> {
+    if (this.lease) return;
+    const lease = this.lease = Symbol('voice-draft-speech');
+    let acquired = false;
+    try {
+      if (!await this.suspend()) {
+        await this.resume(false).catch(() => false);
+        return;
+      }
+      acquired = true;
+      let releaseResult: Promise<boolean> | undefined;
+      return async preload => {
+        if (releaseResult) return releaseResult;
+        releaseResult = (async () => {
+          try { return await this.resume(preload); }
+          catch { return false; }
+          finally { if (this.lease === lease) this.lease = undefined; }
+        })();
+        return releaseResult;
+      };
+    } catch {
+      await this.resume(false).catch(() => false);
+      return;
+    } finally {
+      if (!acquired && this.lease === lease) this.lease = undefined;
+    }
+  }
 }

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import hashlib
 import json
+import os
 from pathlib import Path
 import runpy
 import tempfile
@@ -46,7 +47,14 @@ class PreviewAssetTests(unittest.TestCase):
                 MODULE['prepare'](archive, out, archive.stat().st_size, '0' * 64)
             self.assertEqual(list(out.iterdir()), [])
             digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-            MODULE['prepare'](archive, out, archive.stat().st_size, digest)
+            previous_umask = os.umask(0o022)
+            try:
+                MODULE['prepare'](archive, out, archive.stat().st_size, digest)
+            finally:
+                os.umask(previous_umask)
+            if os.name == 'posix':
+                for clip in out.iterdir():
+                    self.assertEqual(clip.stat().st_mode & 0o777, 0o600, clip.name)
             self.assertEqual(len(MODULE['FILES']), 35)
             self.assertEqual({p.name for p in out.iterdir()}, set(MODULE['FILES']))
             self.assertFalse((root / 'outside.txt').exists())

@@ -1,4 +1,4 @@
-import { replySpeechIPC } from '../../../packages/contracts/src/speech.ts';
+import { liveChannel } from '../../../packages/contracts/src/live-stage.ts';
 import { contextBridge, ipcRenderer } from "electron";
 import { microphoneIPC, voiceDraftIPC } from '../../../packages/contracts/src/voice-draft.ts';
 import type { DesktopBridge } from "../../../packages/contracts/src/index.ts";
@@ -47,6 +47,18 @@ const bridge: DesktopBridge = Object.freeze({
     deleteGoal: input => ipcRenderer.invoke('pet:characters-deleteGoal', input),
     setGoalChatShare: input => ipcRenderer.invoke('pet:characters-setGoalChatShare', input),
   } satisfies NonNullable<DesktopBridge['characters']>) } : {}),
+  ...(process.platform === 'darwin' ? { liveStage: Object.freeze({
+    read: () => ipcRenderer.invoke(liveChannel('read')),
+    save: profile => ipcRenderer.invoke(liveChannel('save'), profile),
+    switchScene: scene => ipcRenderer.invoke(liveChannel('switchScene'), scene),
+    start: () => ipcRenderer.invoke(liveChannel('start')),
+    stop: () => ipcRenderer.invoke(liveChannel('stop')),
+    preview: () => ipcRenderer.invoke(liveChannel('preview')),
+    copy: () => ipcRenderer.invoke(liveChannel('copy')),
+    trigger: action => ipcRenderer.invoke(liveChannel('trigger'), action),
+    submitDanmaku: text => ipcRenderer.invoke(liveChannel('submitDanmaku'),text),
+    stopDanmaku: () => ipcRenderer.invoke(liveChannel('stopDanmaku')),
+  } satisfies NonNullable<DesktopBridge['liveStage']>) } : {}),
   ...(process.platform === 'darwin' ? { agentTasks: Object.freeze({
     list: input => ipcRenderer.invoke('pet:agent-tasks-list', input),
     read: input => ipcRenderer.invoke('pet:agent-tasks-read', input),
@@ -88,14 +100,13 @@ const bridge: DesktopBridge = Object.freeze({
       cancel: () => microphone.cancel(),
     }),
   } satisfies NonNullable<DesktopBridge['voiceDraft']>) } : {}),
-  ...(microphone ? { replySpeech: Object.freeze({
-    displayed: async requestID => { await ipcRenderer.invoke(replySpeechIPC.displayed, requestID); },
-    stop: async () => { await ipcRenderer.invoke(replySpeechIPC.stop); },
-  } satisfies NonNullable<DesktopBridge['replySpeech']>) } : {}),
   ...(process.platform === 'darwin' && process.arch === 'arm64' ? { speech: Object.freeze({
+    preview: () => ipcRenderer.invoke('pet:speech-preview'),
+    stopPreview: () => ipcRenderer.invoke('pet:speech-stopPreview'),
     status: () => ipcRenderer.invoke('pet:speech-status'),
     selectReference: () => ipcRenderer.invoke('pet:speech-selectReference'),
     clearReference: () => ipcRenderer.invoke('pet:speech-clearReference'),
+    saveTranscript: input => ipcRenderer.invoke('pet:speech-saveTranscript', input),
     enable: input => ipcRenderer.invoke('pet:speech-enable', input),
     disable: () => ipcRenderer.invoke('pet:speech-disable'),
   } satisfies NonNullable<DesktopBridge['speech']>) } : {}),

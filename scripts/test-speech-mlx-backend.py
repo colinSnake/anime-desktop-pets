@@ -34,9 +34,11 @@ class LocalSpeechBackendTests(unittest.TestCase):
             def __mul__(self, _value): mark(); return self
             def astype(self, *_args, **_kwargs): mark(); return self
             def tobytes(self): mark(); return b"\x10\x00"
+        intervals = []
         class TTS:
             sample_rate = 24000
-            def generate(self, **_kwargs):
+            def generate(self, **kwargs):
+                intervals.append(kwargs["streaming_interval"])
                 mark()
                 yield Result()
         class MX:
@@ -54,6 +56,7 @@ class LocalSpeechBackendTests(unittest.TestCase):
             backend = LocalMLXBackend(TTS(), None, MX(), NP())
             return [chunk async for chunk in backend.synthesize("合成测试", Path("/synthetic/reference.wav"), "合成参考")]
         self.assertEqual(asyncio.run(synthesize()), [b"\x10\x00"])
+        self.assertEqual(intervals, [0.32])
         self.assertTrue(worker_threads)
         self.assertTrue(all(thread != loop_thread for thread in worker_threads))
 

@@ -42,19 +42,21 @@ test('workspace document uses only the product name, not the old title banner', 
   assert.match(html, /<title>桌边小崽<\/title>/);
 });
 
-test('every page shows a read-only breadcrumb with the current page marked', async () => {
+test('every workspace page keeps its title and theme control without a breadcrumb', async () => {
   const pages = [
     ['pets', '桌宠'], ['chat', '聊天'], ['identity', '身份'], ['memory', '记忆'], ['goals', '能力与目标'],
     ['models', '模型管理'], ['speech', '语音互动'], ['live', '直播管理'], ['advanced', '高级'],
   ] as const;
   for (const [initialPage, label] of pages) {
     const html = await renderWorkspace(createElement(WorkspaceView, { ...diagnostics, initialPage }));
-    const breadcrumb = html.match(/<nav[^>]+aria-label="当前位置"[^>]*>[\s\S]*?<\/nav>/)?.[0];
-    assert.ok(breadcrumb, `${initialPage} should render a breadcrumb`);
-    assert.match(breadcrumb, /<ol\b/);
-    assert.match(breadcrumb, />工作区<\//);
-    assert.match(breadcrumb, new RegExp(`aria-current="page">${label}</span>`));
-    assert.doesNotMatch(breadcrumb, /<(?:button|a)\b/);
+    assert.doesNotMatch(html, /workspace-breadcrumb|workspace-crumb-|aria-label="当前位置"/);
+    assert.match(html, new RegExp(`<h1[^>]*>${label}</h1>`));
+    assert.equal((html.match(/class="theme-toggle"/g) ?? []).length, 1);
+    assert.match(html, /<main id="main"[^>]+tabindex="-1"/i);
+    if (!['identity', 'memory', 'goals'].includes(initialPage)) {
+      assert.match(html, new RegExp(`<button class="nav-item" aria-current="page">[\\s\\S]*?${label}</button>`));
+      assert.equal((html.match(/aria-current="page"/g) ?? []).length, 1);
+    }
   }
 });
 

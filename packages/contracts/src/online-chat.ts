@@ -12,7 +12,7 @@ export const chatRequestBytes = 64 * 1024;
 export const chatListBytes = 1_250 * 1024;
 export const chatReplyBytes = 50 * 1024;
 export type ChatRoute = { connectionID: string; modelEntryID: string; fingerprint: string; useDefault?: true };
-export type ChatOption = { route: Omit<ChatRoute, 'useDefault'>; connectionName: string; modelName: string; ready: boolean; isDefault: boolean; inputModalities?: InputModality[]; taskTools?: true | 'unverified'; reasoningLevels?: ReasoningEffort[]; reasoningEffort?: ReasoningEffort };
+export type ChatOption = { route: Omit<ChatRoute, 'useDefault'>; connectionName: string; modelName: string; ready: boolean; isDefault: boolean; contextWindow?: number; inputModalities?: InputModality[]; taskTools?: true | 'unverified'; reasoningLevels?: ReasoningEffort[]; reasoningEffort?: ReasoningEffort };
 export type ChatExchange = { user: string; assistant: string };
 export type ChatConversation = { id: string; mode: 'new' | 'resume'; projectID?: string };
 export type OnlineChatInput = { requestID: string; petID: string; route: ChatRoute; text: string; history: ChatExchange[]; conversation?: ChatConversation; turnID?: string; attachments?: ChatAttachment[]; reasoningEffort?: ReasoningEffort; materialGrant?: string };
@@ -24,7 +24,8 @@ export const chatStatus = {
 export type ChatErrorCode = keyof typeof chatStatus;
 export type ChatError = { ok: false; error: ChatErrorCode };
 export type ChatListResult = { ok: true; models: ChatOption[]; persistentConversations?: true } | ChatError;
-export type ChatSendResult = { ok: true; requestID: string; text: string; replayable: boolean; recovered?: true; historyStatus?: 'unconfirmed' | 'omitted' } | ChatError;
+export type ChatUsage = { inputTokens: number };
+export type ChatSendResult = { ok: true; requestID: string; text: string; replayable: boolean; recovered?: true; usage?: ChatUsage; historyStatus?: 'unconfirmed' | 'omitted' } | ChatError;
 export interface OnlineChatBridge {
   list(): Promise<ChatListResult>;
   approveMaterials?(input: OnlineChatInput): Promise<ChatMaterialApprovalResult>;
@@ -70,11 +71,12 @@ export function isChatListResult(value: unknown): value is ChatListResult {
   let defaults = 0;
   const seen = new Set<string>();
   return value.models.every(item => {
-    if (!shape(item, ['route', 'connectionName', 'modelName', 'ready', 'isDefault', 'inputModalities', 'taskTools', 'reasoningLevels', 'reasoningEffort']) || !validRoute(item.route, false) || !label(item.connectionName) ||
+    if (!shape(item, ['route', 'connectionName', 'modelName', 'ready', 'isDefault', 'contextWindow', 'inputModalities', 'taskTools', 'reasoningLevels', 'reasoningEffort']) || !validRoute(item.route, false) || !label(item.connectionName) ||
         !label(item.modelName) || typeof item.ready !== 'boolean' || typeof item.isDefault !== 'boolean' || item.isDefault && ++defaults > 1 ||
         item.taskTools !== undefined && item.taskTools !== true && item.taskTools !== 'unverified' || item.inputModalities !== undefined && (!Array.isArray(item.inputModalities) || item.inputModalities.length > 2 ||
           item.inputModalities.some(value => value !== 'image' && value !== 'pdf') || new Set(item.inputModalities).size !== item.inputModalities.length ||
           item.inputModalities.includes('pdf') && !item.inputModalities.includes('image'))) return false;
+    if (item.contextWindow !== undefined && (!Number.isInteger(item.contextWindow) || Number(item.contextWindow) < 1 || Number(item.contextWindow) > 2_147_483_647)) return false;
     if (item.reasoningLevels !== undefined && (!Array.isArray(item.reasoningLevels) || !item.reasoningLevels.length ||
         item.reasoningLevels.length > REASONING_EFFORTS.length || item.reasoningLevels.some(level => !REASONING_EFFORTS.includes(level)) ||
         new Set(item.reasoningLevels).size !== item.reasoningLevels.length)) return false;
@@ -85,9 +87,10 @@ export function isChatListResult(value: unknown): value is ChatListResult {
   });
 }
 export function isChatSendResult(value: unknown, requestID: string): value is ChatSendResult {
-  return isError(value) || shape(value, ['ok', 'requestID', 'text', 'replayable', 'historyStatus', 'recovered']) && value.ok === true && value.requestID === requestID &&
+  return isError(value) || shape(value, ['ok', 'requestID', 'text', 'replayable', 'historyStatus', 'recovered', 'usage']) && value.ok === true && value.requestID === requestID &&
     validChatReplyText(value.text) && typeof value.replayable === 'boolean' &&
-    (value.recovered === undefined || value.recovered === true && value.historyStatus === undefined) &&
+    (value.recovered === undefined || value.recovered === true && value.historyStatus === undefined && value.usage === undefined) &&
+    (value.usage === undefined || shape(value.usage, ['inputTokens']) && Number.isSafeInteger(value.usage.inputTokens) && Number(value.usage.inputTokens) >= 0) &&
     (value.historyStatus === undefined || value.historyStatus === 'unconfirmed' || value.historyStatus === 'omitted');
 }
 

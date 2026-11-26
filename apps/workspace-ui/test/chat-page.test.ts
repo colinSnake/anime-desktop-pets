@@ -1,6 +1,7 @@
 import { dafeiyu, longmei } from '../../../packages/contracts/src/built-in-pets.ts';
 import { renderWorkspace } from './render-workspace.ts';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -79,6 +80,12 @@ test('chat explains unavailable online sending without hiding an unsaved draft',
  assert.match(html, /<button[^>]*disabled=""[^>]*aria-label="发送消息"/);
 });
 
+test('the composer footer shifts all controls down 5px without growing the composer',()=>{
+ const css = readFileSync(new URL('../src/chat.css', import.meta.url), 'utf8');
+ const footer = css.match(/\.chat-composer-footer\s*\{([^}]*)\}/)?.[1];
+ assert.ok(footer);
+ assert.match(footer, /padding:\s*5px clamp\(10px, 3\.6vw, 16px\) 3px;/);
+});
 test('composer follows the reference action order without displaying keyboard instructions', () => {
  const c = create();
  const footer = render(c).match(/<div class="chat-composer-footer">([\s\S]+)<\/footer>/)?.[1];
@@ -143,7 +150,7 @@ test('the selected pet gets the confirmed welcome scene and only a multi-instanc
  const view = () => renderToStaticMarkup(createElement(ChatPage, { state: c.getSnapshot(), controller: c, reference: dafeiyu }));
  c.syncCharacters([{ id: 'fish', name: '大肥鱼' }]);
  assert.match(view(), /<h1>聊天<\/h1>[\s\S]*和桌边的伙伴说说话/);
- assert.match(view(), /chat-role[\s\S]*pet-app:\/\/workspace\/covers\/local\.community\.dafeiyu/);
+ assert.match(view(), /pet-role-picker[\s\S]*pet-app:\/\/workspace\/covers\/local\.community\.dafeiyu/);
  assert.match(view(), /data-pet-art="dafeiyu"/);
  assert.match(view(), /class="chat-portrait"/);
  assert.doesNotMatch(view(), /<select[^>]*aria-label="聊天角色"|本机查询快捷短句|chat-welcome-mark/);
@@ -270,4 +277,32 @@ test('voice-to-text is a separate local action, available only with its bridge a
  c.edit('用户的草稿');
  assert.match(html(), /<button type="button" disabled=""[^>]*>语音转文字（本机）<\/button>/);
  assert.match(html(), /<button type="button" class="chat-add chat-microphone" disabled=""/);
+});
+
+test('context usage tooltip follows the ring rather than the changing composer height', () => {
+ const css = readFileSync(new URL('../src/chat.css', import.meta.url), 'utf8');
+ assert.match(css, /inset-block-end:[^;]*anchor\(--chat-usage-ring top[,)]/);
+ assert.match(css, /anchor\(--chat-usage-ring center\) - var\(--chat-usage-width\) \/ 2/);
+});
+
+test('online composer provides an associated context usage tooltip with optional capacity', async () => {
+ for (const contextWindow of [258_000, undefined]) {
+  let calls = 0;
+  const c = new ChatWorkspaceController(undefined, undefined, {
+   list: async () => ({ ok: true, models: [{ route: { connectionID: 'first', modelEntryID: 'one', fingerprint: 'a'.repeat(64) }, connectionName: '合成连接', modelName: '合成模型', ready: true, isDefault: true, contextWindow }] }),
+   send: async ({ requestID }) => { calls++; return { ok: true, requestID, text: '合成回复', replayable: true, usage: { inputTokens: 151_000 } }; }, cancel: async () => {},
+  });
+  c.syncCharacters([{ id: 'pet-one', name: '龙妹' }]); await c.refreshModels();
+  assert.match(render(c), /暂无用量数据/);
+  assert.equal(calls, 0);
+  c.edit('合成问题'); assert.equal(await c.send(), true);
+  const html = render(c);
+  const id = html.match(/aria-label="上下文用量" aria-describedby="([^"]+)"/)?.[1];
+  assert.ok(id);
+  assert.ok(html.includes(`id="${id}" role="tooltip"`));
+  assert.match(html, /上下文窗口/);
+  if (contextWindow) assert.match(html, /58% 已用[\s\S]*已用 151k Token，共 258k/);
+  else { assert.match(html, /已用 151k Token/); assert.doesNotMatch(html, /% 已用|共 258k/); }
+  assert.equal(calls, 1);
+ }
 });

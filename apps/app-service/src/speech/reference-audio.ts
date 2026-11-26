@@ -2,11 +2,11 @@ import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { extname, isAbsolute } from 'node:path';
 
-const maxBytes = 6 * 1024 * 1024;
+export const referenceAudioLimit = 6 * 1024 * 1024;
 const invalid = () => new Error('invalid_reference_audio');
 
-function pcmWave(bytes: Buffer): boolean {
-  if (bytes.length < 44 || bytes.toString('latin1', 0, 4) !== 'RIFF' || bytes.toString('latin1', 8, 12) !== 'WAVE' || bytes.readUInt32LE(4) !== bytes.length - 8) return false;
+export function isReferenceAudio(bytes: Buffer): boolean {
+  if (bytes.length > referenceAudioLimit || bytes.length < 44 || bytes.toString('latin1', 0, 4) !== 'RIFF' || bytes.toString('latin1', 8, 12) !== 'WAVE' || bytes.readUInt32LE(4) !== bytes.length - 8) return false;
   let format: { rate: number; align: number } | undefined;
   let audio: number | undefined;
   let offset = 12;
@@ -36,7 +36,7 @@ export async function readReferenceAudio(path: string): Promise<Buffer> {
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const info = await handle.stat();
-    if (!info.isFile() || info.size < 44 || info.size > maxBytes) throw invalid();
+    if (!info.isFile() || info.size < 44 || info.size > referenceAudioLimit) throw invalid();
     const bytes = Buffer.alloc(info.size + 1);
     let size = 0;
     while (size < bytes.length) {
@@ -46,7 +46,7 @@ export async function readReferenceAudio(path: string): Promise<Buffer> {
     }
     const after = await handle.stat();
     const data = bytes.subarray(0, size);
-    if (size !== info.size || after.size !== size || after.mtimeMs !== info.mtimeMs || after.ctimeMs !== info.ctimeMs || !pcmWave(data)) throw invalid();
+    if (size !== info.size || after.size !== size || after.mtimeMs !== info.mtimeMs || after.ctimeMs !== info.ctimeMs || !isReferenceAudio(data)) throw invalid();
     return data;
   } finally { await handle.close(); }
 }

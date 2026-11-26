@@ -210,7 +210,7 @@ def parse_args():
     return parser.parse_args()
 
 
-async def serve(backend, player, reference_audio=None, reference_text=None, stdin=None, stdout_emit=emit):
+async def serve(backend, player, reference_audio=None, reference_text=None, stdin=None, stdout_emit=emit, capture_stage=None):
     stdin = stdin or sys.stdin
     command_stream = getattr(stdin, "buffer", stdin)
     queue = BoundedMessageQueue()
@@ -308,6 +308,14 @@ async def serve(backend, player, reference_audio=None, reference_text=None, stdi
                 decoded_line = raw_line.decode("utf-8")
             except UnicodeDecodeError:
                 stdout_emit("error", reason="invalid_encoding")
+                continue
+            # Only the private TTS worker supplies this callback. The public
+            # stdio command decoder does not grant a file or capture capability.
+            if capture_stage is not None and decoded_line == '{"type":"capture-stage"}\n':
+                await capture_stage()
+                continue
+            if capture_stage is not None and decoded_line.startswith('{"type":"capture-stage-reply",'):
+                await capture_stage(decoded_line)
                 continue
             command, error = decode_command(decoded_line)
             if error:

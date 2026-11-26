@@ -1,4 +1,5 @@
 import { isCue } from '../../../app-service/src/speech/cue.ts';
+import type { VideoSpeechState } from '../../../app-service/src/workspace-video-protocol.ts';
 import { activityVariants } from './activity-schedule';
 
 export const workCaptions = {
@@ -21,15 +22,19 @@ export function parseVideoLines(value: unknown): VideoLines | undefined {
 
 export type CaptionState = { token: number; text: string };
 type Kind = 'task' | 'interaction' | 'greeting';
+// Fail-safe for a lost terminal event: one pending turn plus one worker run (180 s each), and cleanup.
+const maxSpeechHold = 370_000;
+const speechTail = 700;
 
 /** Caption is a native window decision; renderer only acknowledges the token it painted. */
 export class CaptionSchedule {
   private serial = 0;
-  private active?: CaptionState & { kind: Kind; expiresAt: number; confirmed: boolean };
+  private active?: CaptionState & { kind: Kind; expiresAt: number; confirmed: boolean; speechUntil?: number; speechEnd?: 'drained' | 'released' };
   constructor(private readonly publish: (state: CaptionState | undefined) => void,
     private readonly offer: (text: string | undefined, token: number) => void) {}
 
   get kind() { return this.active?.kind; }
+  get speechProtected() { return this.active?.speechUntil !== undefined || this.active?.speechEnd === 'drained'; }
   show(kind: Kind, text: string, now: number) {
     if (!isCue(text)) return;
     this.clear();
@@ -46,8 +51,22 @@ export class CaptionSchedule {
     this.offer(active.text, active.token);
     return true;
   }
+  speech(token: number, state: VideoSpeechState, now: number) {
+    const active = this.active;
+    if (!active?.confirmed || active.token !== token || active.speechEnd) return false;
+    if (state === 'held') {
+      if (active.speechUntil !== undefined || now >= active.expiresAt) return false;
+      active.speechUntil = now + maxSpeechHold;
+    } else {
+      if (active.speechUntil === undefined || now >= active.speechUntil) return false;
+      active.speechUntil = undefined;
+      active.speechEnd = state;
+      if (state === 'drained') active.expiresAt = Math.max(active.expiresAt, now + speechTail);
+    }
+    return true;
+  }
   expire(now: number) {
-    if (!this.active || now < this.active.expiresAt) return false;
+    if (!this.active || now < (this.active.speechUntil ?? this.active.expiresAt)) return false;
     this.clear();
     return true;
   }

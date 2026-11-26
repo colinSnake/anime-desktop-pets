@@ -1039,10 +1039,34 @@ test('owned workspace windows reveal only after their current idle frame and cle
   assert.deepEqual(cues, []);
   ipcMain.emit('pet-video:caption-shown', owner(pet), token);
   assert.deepEqual(cues, [[text, token]]);
+  const lastCaption = () => pet.messages.filter(([channel]) => channel === 'pet-video:caption').at(-1);
+  fourth.applyCaptionSpeech({ cue: token, state: 'held' });
+  ipcMain.emit('pet-video:frame', owner(pet), 'ended', 'work', 2);
+  frame(pet, 'work02', 3); // A new automatic pose cannot replace a speaking caption.
+  fourth.applyTaskAnimation({ state: 'idle', startSerial: 0, expiresAt: 0 });
+  now += 11_000; tick();
+  assert.deepEqual(lastCaption(), caption);
+  assert.deepEqual(cues, [[text, token]]);
+  fourth.applyCaptionSpeech({ cue: token + 1, state: 'drained' });
+  now += 1000; tick();
+  assert.deepEqual(lastCaption(), caption);
+  fourth.applyCaptionSpeech({ cue: token, state: 'drained' });
+  now += 699; tick();
+  assert.deepEqual(lastCaption(), caption);
+  now += 1; tick();
+  assert.deepEqual(lastCaption(), ['pet-video:caption', null, null]);
+  assert.deepEqual(cues, [[text, token], [undefined, token]]);
+  fourth.applyTaskAnimation(task(2));
+  const next = pet.messages.filter(([channel]) => channel === 'pet-video:action').at(-1);
+  frame(pet, next[1], next[2]);
+  const [, nextToken, nextText] = lastCaption();
+  assert.ok(nextToken > token);
+  ipcMain.emit('pet-video:caption-shown', owner(pet), nextToken);
+  fourth.applyCaptionSpeech({ cue: nextToken, state: 'held' });
   const quotaMenu = openMenu(pet);
   quotaMenu.options.callback(); // Some native backends report dismissal before click.
   item(quotaMenu.items, '查询额度').click();
-  assert.deepEqual(cues, [[text, token], [undefined, token]]);
+  assert.deepEqual(cues, [[text, token], [undefined, token], [nextText, nextToken], [undefined, nextToken]]);
   assert.ok(pet.messages.some(([channel, clip]) => channel === 'pet-video:action' && clip === 'quota'));
   assert.equal(fourth.setVisible(false), true);
   assert.equal(cancelled, 1);

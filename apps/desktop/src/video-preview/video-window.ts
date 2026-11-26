@@ -1,4 +1,4 @@
-import type { VideoDisplay, VideoMenuIntent } from '../../../app-service/src/workspace-video-protocol.ts';
+import type { VideoCaptionSpeech, VideoDisplay, VideoMenuIntent } from '../../../app-service/src/workspace-video-protocol.ts';
 import { BrowserWindow, ipcMain, Menu, screen, type IpcMainEvent, type Session } from 'electron';
 import { join } from 'node:path';
 import { windowColors } from '../window-colors';
@@ -119,7 +119,7 @@ export function createVideoWindow(options: {
     if (!companionRole && isCompanionTravel(next)) return;
     automatic = undefined;
     cueForFrame = undefined;
-    if (captions.kind === 'task') captions.clear();
+    if (captions.kind === 'task' && !captions.speechProtected) captions.clear();
     clip = next;
     poseOwner = owner;
     workFinished = false;
@@ -264,7 +264,7 @@ export function createVideoWindow(options: {
   });
   function stopActivity(now: number) {
     if (!automatic) return;
-    if (captions.kind === 'interaction') captions.clear();
+    if (captions.kind === 'interaction' && !captions.speechProtected) captions.clear();
     activity.defer(now);
     action('idle');
   }
@@ -282,7 +282,7 @@ export function createVideoWindow(options: {
     captions.expire(now);
     if (poseOwner === 'manual' && (!win.isVisible() || reduced || now >= manualUntil) && schedule.yieldSettledPose()) action('idle');
     const gate = activityGate(now);
-    if (captions.kind === 'task' && (!gate.task || reduced || !gate.visible)) captions.clear();
+    if (captions.kind === 'task' && !captions.speechProtected && (!gate.task || reduced || !gate.visible)) captions.clear();
     schedule.setTaskActive(gate.task);
     if (automatic && (!allowsActivity(automatic, gate) || now - automatic.lastAt > (automatic.plan.kind === 'travel' ? 5000 : 15_000))) {
       stopActivity(now);
@@ -291,7 +291,7 @@ export function createVideoWindow(options: {
       reduced, showingWork: poseOwner === 'task', playingOpening: poseOwner === 'task' && clip === 'work', finished: workFinished });
     if (next && schedule.yieldSettledPose()) {
       action(next, next === 'idle' ? 'base' : 'task');
-      if (next !== 'idle' && options.lines) cueForFrame = { generation, kind: 'task', text: workCaptions[next] };
+      if (next !== 'idle' && options.lines && !captions.speechProtected) cueForFrame = { generation, kind: 'task', text: workCaptions[next] };
     }
     const activityDue = (!companionRole || !reduced) && activity.due(now);
     if (activityDue || options.lines && activity.enabled && greetings.due(now)) {
@@ -478,7 +478,7 @@ export function createVideoWindow(options: {
         cueForFrame = undefined;
         const now = performance.now();
         if (win.isVisible() && !menuOpen && !quotaOpen && !schedule.protectsPlay &&
-            (pending.kind !== 'task' || (task.active(now) && !reduced))) {
+            (pending.kind !== 'task' || (!captions.speechProtected && task.active(now) && !reduced))) {
           captions.show(pending.kind, pending.text, now);
           tickPresentation();
         }
@@ -610,5 +610,8 @@ export function createVideoWindow(options: {
     action('idle');
   }).catch(failWindow);
   const previewClip = (next: Clip) => { if (!preferences && schedule.yieldSettledPose()) action(next); };
-  return { ready, stop, work, idle, previewClip, setVisible, applyDisplay, applyBehavior, applyTaskAnimation };
+  function applyCaptionSpeech({ cue, state }: VideoCaptionSpeech) {
+    if (!win.isDestroyed() && win.isVisible()) captions.speech(cue, state, performance.now());
+  }
+  return { ready, stop, work, idle, previewClip, setVisible, applyDisplay, applyBehavior, applyTaskAnimation, applyCaptionSpeech };
 }

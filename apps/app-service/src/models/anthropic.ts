@@ -1,6 +1,19 @@
 import { modelUserText, array, call, discoveryItems, discovered, discoveryPath, invalidResponse, object, recalled, reply, snapshotInput, string, token, usage } from './common.ts';
 import type { JsonObject, ProtocolAdapter, ToolCall } from './types.ts';
 const headers = { 'anthropic-version': '2023-06-01' };
+function messageUsage(raw: unknown) {
+  const result = usage(raw, 'input_tokens', 'output_tokens');
+  // Anthropic reports uncached input separately from cache reads and writes.
+  if (result.inputTokens === undefined) return result;
+  const fields = object(raw);
+  for (const key of ['cache_read_input_tokens', 'cache_creation_input_tokens'] as const) {
+    const count = fields[key] ?? 0;
+    if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0) return invalidResponse();
+    result.inputTokens += count;
+    if (!Number.isSafeInteger(result.inputTokens)) return invalidResponse();
+  }
+  return result;
+}
 export const anthropic: ProtocolAdapter = {
   encode(route, original) {
     const input = snapshotInput(route, original), messages: Array<{ role: string; content: JsonObject[] }> = [];
@@ -28,7 +41,7 @@ export const anthropic: ProtocolAdapter = {
       else if (p.type === 'redacted_thinking') replay.push({ type: 'redacted_thinking', data: token(p.data, 65_536) });
       else return invalidResponse();
     }
-    return reply(route, text, calls, root.stop_reason === 'max_tokens' ? 'length' : root.stop_reason === 'refusal' ? 'refused' : root.stop_reason === 'tool_use' ? 'tools' : 'end', usage(root.usage, 'input_tokens', 'output_tokens'), replay);
+    return reply(route, text, calls, root.stop_reason === 'max_tokens' ? 'length' : root.stop_reason === 'refusal' ? 'refused' : root.stop_reason === 'tool_use' ? 'tools' : 'end', messageUsage(root.usage), replay);
   },
   discovery(cursor) { return { path: discoveryPath('/models', cursor, 'after_id', 'limit=100'), headers: { ...headers } }; },
   decodeDiscovery(raw, firstPage) { const root = object(raw), { items, truncated } = discoveryItems(root.data, firstPage);

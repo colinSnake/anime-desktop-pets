@@ -1,4 +1,3 @@
-import type { ChatReplySpeech } from './chat-reply-speech.ts';
 import { isHistoryInput, isHistoryResult, type ChatHistoryMethod } from '../../../packages/contracts/src/chat-history.ts';
 import { isChatListResult, isChatSendResult, isMaterialApprovalInput, isMaterialApprovalResult, type ChatMaterialApprovalResult, validChatRequestID, validOnlineChatInput, type ChatListResult, type ChatSendResult, type OnlineChatInput } from '../../../packages/contracts/src/online-chat.ts';
 
@@ -16,9 +15,8 @@ export class ChatIPC {
     approveChatMaterials?(input: OnlineChatInput, signal: AbortSignal): Promise<ChatMaterialApprovalResult>;
     listChatModels(): Promise<ChatListResult>;
     sendOnlineChat(input: OnlineChatInput, signal: AbortSignal): Promise<ChatSendResult>;
-  }, private readonly speech?: Pick<ChatReplySpeech, 'begin' | 'receive' | 'stop'>) {}
+  }) {}
   cancel() {
-    void this.speech?.stop();
     const active = this.active;
     this.active = undefined;
     active?.abort.abort();
@@ -79,14 +77,12 @@ export class ChatIPC {
     if (this.active || this.approving) return { ok: false, error: 'busy' } as const;
     if (input.attachments?.length && (!this.permit || this.permit.id !== input.requestID || this.permit.grant !== input.materialGrant)) return { ok: false, error: 'approval_required' } as const;
     this.permit = undefined;
-    const speechGeneration = this.speech?.begin();
     const active = { id: input.requestID, abort: new AbortController() };
     this.active = active;
     try {
       const result = await this.service.sendOnlineChat(input, active.abort.signal);
       if (this.active !== active) return cancelled;
       if (!isChatSendResult(result, active.id)) return unavailable;
-      if (speechGeneration !== undefined && !input.attachments?.length) this.speech?.receive(speechGeneration, result);
       return result;
     } catch { return active.abort.signal.aborted ? cancelled : unavailable; }
     finally { if (this.active === active) this.active = undefined; }

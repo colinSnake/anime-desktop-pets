@@ -5,7 +5,8 @@ import type { PackageReference } from '../../../packages/contracts/src/pets.ts';
 import type { ChatHistoryBridge, ChatHistoryDetail as SavedChatDetail } from '../../../packages/contracts/src/chat-history.ts';
 import { ChatHistoryDialog } from './ChatHistoryDialog.tsx';
 import { ChatHistoryDetail } from './ChatHistoryDetail.tsx';
-import { ChatAvatar, ChatMessage } from './ChatMessage.tsx';
+import { ChatMessage } from './ChatMessage.tsx';
+import { PetRolePicker } from './PetRolePicker.tsx';
 import { ChatMemoryCard } from './ChatMemoryCard.tsx';
 import { ChatComposer } from './ChatComposer.tsx';
 import { PetCover, petArt } from './PetCover.tsx';
@@ -81,15 +82,8 @@ export function ChatPage({ state, controller, history, voiceDraft, reference, ap
   <header className="chat-toolbar">
    <div><h1>{session.title ?? '聊天'}</h1><p className={session.projectID ? 'chat-project-current' : undefined}>{session.projectID ? `项目 · ${session.projectName ?? '项目会话'}` : session.title === '新会话' ? '从一句话开始。' : session.title ? '继续与桌边的伙伴聊天。' : '和桌边的伙伴说说话。'}</p></div>
    <div className="chat-toolbar-actions">
-    {character && <div className="chat-role chat-control">
-     <ChatAvatar reference={reference} />
-     {state.characters.length > 1 ? <>
-      <span className="chat-role-name" aria-hidden="true">{character.name}</span><PetNookIcon name="down" />
-      <select aria-label="聊天角色" title={character.name} value={character.id} disabled={!controller} onChange={event => controller?.selectCharacter(event.target.value)}>
-       {state.characters.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}
-      </select>
-     </> : <span className="chat-role-name">{character.name}</span>}
-    </div>}
+    {character && <PetRolePicker label="聊天角色" options={state.characters} selected={character} reference={reference}
+     onChange={controller ? id => controller.selectCharacter(id) : undefined} />}
     {appearance}
     {character && <details className="chat-options" ref={options} onKeyDown={event => {
      if (event.key === 'Escape' && event.currentTarget.open) {

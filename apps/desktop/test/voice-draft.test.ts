@@ -31,6 +31,29 @@ test('voice picker sends only validated audio bytes, never paths, and returns on
   assert.equal(calls, 1);
 });
 
+test('file transcription suspends TTS only after selection and WAV validation, then resumes after ASR', async () => {
+  const events: string[] = [];
+  const picker = new VoiceDraftPicker(async () => {
+    events.push('asr');
+    return { ok: true, text: '本机转写' };
+  }, { readAudio: async path => {
+    events.push(`read:${path}`);
+    if (path === '/invalid.wav') throw new Error('invalid');
+    return wav();
+  } });
+  const lease = async () => {
+    events.push('suspend-tts');
+    return async () => { events.push('resume-tts'); };
+  };
+
+  assert.deepEqual(await picker.select(async () => ({ canceled: true, filePaths: [] }), () => true, lease), { ok: false, error: 'cancelled' });
+  assert.deepEqual(events, [], 'canceling the native picker must leave the warm TTS session alone');
+  assert.deepEqual(await picker.select(chosen('/invalid.wav'), () => true, lease), { ok: false, error: 'invalid-file' });
+  assert.deepEqual(events, ['read:/invalid.wav'], 'invalid WAV must not unload TTS');
+  assert.deepEqual(await picker.select(chosen('/valid.wav'), () => true, lease), { ok: true, text: '本机转写' });
+  assert.deepEqual(events, ['read:/invalid.wav', 'read:/valid.wav', 'suspend-tts', 'asr', 'resume-tts']);
+});
+
 test('cancelled selection never starts ASR or opens a second picker before the first settles', async () => {
   const picker = new VoiceDraftPicker(async () => { assert.fail('must not start'); });
   let resolve!: (value: { canceled: boolean; filePaths: string[] }) => void;
@@ -117,4 +140,58 @@ test('microphone and file transcriptions share a single slot even while cancella
   const file = picker.select(open, () => true);
   assert.deepEqual(await picker.record(wav(), new AbortController().signal, () => true), { ok: false, error: 'busy' });
   assert.deepEqual(await file, { ok: false, error: 'cancelled' });
+});
+
+test('voice draft resource lease serializes ASR against TTS and resumes exactly once', async () => {
+  const gateFactory = (await import('../src/voice-draft.ts')) as typeof import('../src/voice-draft.ts') & {
+    VoiceDraftSpeechGate?: new (suspend: () => Promise<boolean>, resume: (preload: boolean) => Promise<boolean>) => {
+      acquire(): Promise<((preload: boolean) => Promise<boolean>) | undefined>;
+    };
+  };
+  assert.equal(typeof gateFactory.VoiceDraftSpeechGate, 'function');
+  const events: string[] = [];
+  const gate = new gateFactory.VoiceDraftSpeechGate!(
+    async () => { events.push('suspend'); return true; },
+    async preload => { events.push(`resume:${preload}`); return true; },
+  );
+  const release = await gate.acquire();
+  assert.equal(typeof release, 'function');
+  assert.deepEqual(events, ['suspend']);
+  assert.equal(await gate.acquire(), undefined, 'a second ASR task cannot overlap the TTS suspension lease');
+  assert.equal(await release!(true), true);
+  assert.equal(await release!(false), true, 'release is idempotent');
+  assert.deepEqual(events, ['suspend', 'resume:true']);
+  const next = await gate.acquire();
+  assert.equal(typeof next, 'function', 'a later ASR task can acquire after resume');
+  assert.equal(await next!(false), true);
+});
+
+test('failed TTS suspension resumes defensively and does not admit ASR', async () => {
+  const gateFactory = (await import('../src/voice-draft.ts')) as typeof import('../src/voice-draft.ts') & {
+    VoiceDraftSpeechGate?: new (suspend: () => Promise<boolean>, resume: (preload: boolean) => Promise<boolean>) => {
+      acquire(): Promise<((preload: boolean) => Promise<boolean>) | undefined>;
+    };
+  };
+  assert.equal(typeof gateFactory.VoiceDraftSpeechGate, 'function');
+  const events: string[] = [];
+  const gate = new gateFactory.VoiceDraftSpeechGate!(
+    async () => { events.push('suspend'); return false; },
+    async preload => { events.push(`resume:${preload}`); return true; },
+  );
+  assert.equal(await gate.acquire(), undefined);
+  assert.deepEqual(events, ['suspend', 'resume:false']);
+});
+
+test('voice draft lease keeps a failed resume result and still unlocks for recovery', async () => {
+  const gateFactory = (await import('../src/voice-draft.ts')) as typeof import('../src/voice-draft.ts') & {
+    VoiceDraftSpeechGate?: new (suspend: () => Promise<boolean>, resume: (preload: boolean) => Promise<boolean>) => {
+      busy: boolean;
+      acquire(): Promise<((preload: boolean) => Promise<boolean>) | undefined>;
+    };
+  };
+  const gate = new gateFactory.VoiceDraftSpeechGate!(async () => true, async () => false);
+  const release = await gate.acquire();
+  assert.equal(await release!(true), false);
+  assert.equal(await release!(false), false, 'a repeated release must not disguise the first failure');
+  assert.equal(gate.busy, false, 'a failed resume must not permanently block local ASR');
 });

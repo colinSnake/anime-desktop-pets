@@ -99,11 +99,8 @@ test('workspace acceptance: records survive service restart and chat uses only t
       credential: { kind: 'replace', key: fixtureKey(id) } });
     assert.ok(result.ok, JSON.stringify(result));
   }
-  const setDefault = async (connectionID: string, expectedRevision: number) => {
-    const result = await requestModelManagement(session, 'default', { expectedRevision, connectionID, entryID: 'entry-one' });
-    assert.ok(result.ok, JSON.stringify(result));
-  };
-  await setDefault('first', 2);
+  const legacyDefault = await requestModelManagement(session, 'default', { expectedRevision: 2, connectionID: 'second', entryID: 'entry-one' });
+  assert.ok(legacyDefault.ok, JSON.stringify(legacyDefault));
   assert.equal(sent.length, 0, 'local writes and queries never send a model request');
   await app!.close();
   session = await start();
@@ -145,8 +142,7 @@ test('workspace acceptance: records survive service restart and chat uses only t
   assert.doesNotMatch(sent.at(-1)!.body, /characterContext|青色标注|合成星图整理/);
 
   const beforeRejected = sent.length;
-  await setDefault('second', 3);
-  assert.deepEqual(await chat({ ...first.route, useDefault: true }), { ok: false, error: 'route_changed' });
+  assert.deepEqual(await chat({ ...second.route, useDefault: true }), { ok: false, error: 'route_changed' });
   assert.deepEqual(await chat(second.route, petID, '查看目标进度'), { ok: false, error: 'invalid_request' });
   assert.equal(sent.length, beforeRejected);
   assert.deepEqual(await requestCharacterRecords(session, 'deleteGoal', { petID, expectedRevision: progress.revision, id: goalID }),

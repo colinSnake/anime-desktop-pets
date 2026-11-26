@@ -52,7 +52,7 @@ class LocalMLXBackend:
                 ref_text=reference_text,
                 lang_code="chinese",
                 stream=True,
-                streaming_interval=0.5,
+                streaming_interval=0.32,  # Four Qwen codec frames; less first-PCM wait without 3-frame churn.
                 verbose=False,
             )
         )

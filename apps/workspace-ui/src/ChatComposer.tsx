@@ -9,6 +9,7 @@ import { Component, lazy, Suspense, useCallback, useEffect, useRef, useState, ty
 import { readChatFiles } from './chat-attachments.ts';
 import { ChatDraftEditor } from './ChatDraftEditor.tsx';
 import { PetNookIcon } from './PetNookIcon.tsx';
+import { ChatContextUsage } from './ChatContextUsage.tsx';
 import { ChatModelPicker } from './ChatModelPicker.tsx';
 import { ComposerKeyboard } from './chat-input.ts';
 import { characterCount, validatedMessage, type ChatWorkspaceController, type ChatWorkspaceState } from './chat-session.ts';
@@ -34,6 +35,19 @@ export function ChatComposer({ state, controller, name, input, voiceDraft }: {
  state: ChatWorkspaceState; controller?: ChatWorkspaceController; name: string; input: RefObject<HTMLDivElement | null>; voiceDraft?: VoiceDraftBridge;
 }) {
  const keyboard = useRef(new ComposerKeyboard());
+ const composer = useRef<HTMLDivElement>(null);
+ const [usageDismissed, setUsageDismissed] = useState(false);
+ const hasUsageTrigger = !!state.session.contextUsage;
+ useEffect(() => {
+  if (!hasUsageTrigger) return;
+  const dismiss = (event: KeyboardEvent) => {
+   if (event.key === 'Escape' && !event.defaultPrevented && composer.current?.matches(':is(:hover, :has(.chat-usage-trigger:focus-visible))')) {
+    setUsageDismissed(true);
+   }
+  };
+  window.addEventListener('keydown', dismiss);
+  return () => window.removeEventListener('keydown', dismiss);
+ }, [hasUsageTrigger]);
  const [composing, setComposing] = useState(false);
  const [editorIssue, setEditorIssue] = useState<'limit' | 'broken' | ''>('');
  const [previewing, setPreviewing] = useState(false);
@@ -192,7 +206,7 @@ export function ChatComposer({ state, controller, name, input, voiceDraft }: {
  {route && <div className="chat-delivery" id="chat-delivery" role="status">
   <strong><PetNookIcon name={route.icon} />{route.label}</strong><span>{route.description}</span>
  </div>}
- <div className="chat-composer" data-dragging={dragging || undefined} aria-label="消息输入区"
+ <div ref={composer} className="chat-composer" data-usage-dismissed={usageDismissed || undefined} onMouseEnter={() => setUsageDismissed(false)} data-dragging={dragging || undefined} aria-label="消息输入区"
   onKeyDown={event => { if (event.key === 'Escape' && voiceOperation.current?.kind === 'microphone') { event.preventDefault(); cancelMic(); } }}
   onDragEnter={event => {
    if (!event.dataTransfer.types.includes('Files')) return;
@@ -256,7 +270,7 @@ export function ChatComposer({ state, controller, name, input, voiceDraft }: {
     start={() => { void startMic(); }} stop={() => { void stopMic(); }} cancel={cancelMic} />}
    <ChatPermissionPicker name={name} session={session} controller={controller} />
    <div className="chat-composer-actions">
-    <span className="chat-composer-ring" aria-hidden="true" />
+    <ChatContextUsage usage={session.contextUsage} onFocus={() => setUsageDismissed(false)} />
     <ChatModelPicker state={state} controller={controller} />
     {session.pending ? <button type="button" className="chat-send chat-send-stop" aria-label="停止等待回复" title="停止等待当前回复" onClick={() => controller?.cancel()}><PetNookIcon name="stop" /></button> :
      <button type="button" className="chat-send" disabled={!canSend} aria-label={sendLabel} title={sendLabel} onClick={send}><PetNookIcon name="send" /></button>}

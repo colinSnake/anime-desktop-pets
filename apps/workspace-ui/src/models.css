@@ -102,9 +102,6 @@
 .model-key-label { display: flex; align-items: center; gap: 6px; }
 .model-key .pet-nook-icon { width: 15px; height: 15px; }
 .model-key-state { margin-inline-start: auto; color: var(--muted); font-size: 11px; }
-.model-text-button { color: var(--accent-text); padding: 2px 3px; border: 0; border-radius: 4px; background: var(--transparent); font-size: 11px; }
-.model-text-button:hover:not(:disabled) { text-decoration: underline; }
-.model-default-options { margin-top: 7px; }
 .model-note, .model-alert { margin: 0; font-size: 12px; line-height: 1.55; }
 .model-note { color: var(--muted); }
 .model-alert { color: var(--danger); }

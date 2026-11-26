@@ -1,3 +1,6 @@
+import { registerLiveDanmaku } from './live/danmaku.ts';
+import { registerLiveProfile, registerLiveVoice } from './live/routes.ts';
+import type { LiveProfileStore } from './live/profile.ts';
 import type { AgentStateStore } from './agent/agent-state.ts';
 import { registerAgentTasks } from './agent/task-routes.ts';
 import type { AgentTaskStore } from './agent/task-store.ts';
@@ -32,6 +35,7 @@ export function createService({
   chatHistory,
   agentTasks,
   agentState,
+  liveProfile,
 }: {
   token: string;
   runtime: RuntimeController;
@@ -43,6 +47,7 @@ export function createService({
   chatHistory?: ChatHistory;
   agentTasks?: AgentTaskStore;
   agentState?: AgentStateStore;
+  liveProfile?: LiveProfileStore;
 }) {
   if (!/^[a-f0-9]{64}$/.test(token))
     throw new Error("Invalid session credential");
@@ -111,20 +116,24 @@ export function createService({
     },
   );
   registerPetRoutes(app, workspace);
+  registerLiveProfile(app, liveProfile, () => workspace?.canStartOwnedPlayer() === true);
+  registerLiveVoice(app, speech, () => !!liveProfile && workspace?.canStartOwnedPlayer() === true);
+  const danmaku = registerLiveDanmaku(app, models, speech, () => !!liveProfile && workspace?.canStartOwnedPlayer() === true);
   registerModelManagement(app, models);
   const chat = registerOnlineChat(app, models, workspace, characters, chatRuntime, chatHistory, agentState);
   const tasks = agentTasks && workspace && models ? registerAgentTasks(app, agentTasks, workspace, models) : undefined;
   registerSpeechRoutes(app, speech, () => workspace?.canStartOwnedPlayer() === true);
   registerCharacterRoutes(app, workspace, characters);
   app.addHook("preClose", async () => {
-    const chatCleanup = await Promise.allSettled([chat?.close(), tasks?.close()]);
-    const ledgerCleanup = await Promise.allSettled([agentState?.close()]);
+    const chatCleanup = await Promise.allSettled([chat?.close(), tasks?.close(), danmaku.close()]);
+    // Speech settings use the workspace writer lease. Drain accepted profile writes before releasing it.
+    const leaseCleanup = await Promise.allSettled([() => agentState?.close(), () => speech?.close(), () => liveProfile?.close()].map(close => Promise.resolve().then(close)));
     // Schedule each closer independently: a synchronous throw or rejection must not
     // interrupt another owner draining writes / releasing its lease before process.exit.
     const results = await Promise.allSettled([
-      () => runtime.close(), () => workspace?.close(), () => models?.close(), () => speech?.close(), () => characters?.close(),
+      () => runtime.close(), () => workspace?.close(), () => models?.close(), () => characters?.close(),
     ].map(close => Promise.resolve().then(close)));
-    if ([...chatCleanup, ...ledgerCleanup, ...results].some(result => result.status === "rejected")) throw new Error("service_cleanup_failed");
+    if ([...chatCleanup, ...leaseCleanup, ...results].some(result => result.status === "rejected")) throw new Error("service_cleanup_failed");
   });
   return app;
 }

@@ -1,7 +1,5 @@
 /* Role styling is scoped to the pets page; palette values live in theme.css. */
 .workspace-nook .content { padding: 25px clamp(18px, 3.35vw, 36px); }
-/* The title replaces the visual breadcrumb here; retain the landmark for assistive navigation. */
-.workspace-nook .workspace-topline { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip-path: inset(50%); }
 .pet-nook-icon { display: block; width: 17px; height: 17px; flex: none; }
 .pet-page-heading { margin-bottom: 19px; }
 .pet-page-heading h1 { font-size: 30px; font-weight: 710; line-height: 1.2; letter-spacing: -.045em; margin: 0 0 5px; }
@@ -124,3 +122,15 @@
   .pet-member[aria-pressed="true"] { border-color: var(--system-focus); }
   .pet-phase .status-dot { border: 1px solid currentColor; }
 }
+
+/* Shared character control for chat and live management. */
+.pet-role-picker { display: inline-flex; align-items: center; gap: 6px; position: relative; min-height: 36px; min-width: 0; max-width: min(35vw, 220px); padding: 3px 7px 3px 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text); font-size: 12px; line-height: 1.2; }
+.pet-role-picker:has(select:enabled):hover { background: var(--surface-soft); }
+.pet-role-name { font-weight: 620; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pet-role-picker > .pet-nook-icon { width: 12px; height: 12px; color: var(--muted); }
+.pet-role-picker select { position: absolute; inset: 0; width: 100%; opacity: 0; }
+.pet-role-picker select:enabled { cursor: pointer; }
+.pet-role-picker:has(select:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
+.pet-role-avatar { display: grid; place-items: center; width: 26px; height: 26px; flex: none; border-radius: 7px; background: var(--pet-art-avatar); overflow: hidden; }
+.pet-role-avatar .pet-cover { width: 24px; height: 24px; padding: 0; background: var(--transparent); }
+.pet-role-avatar .pet-cover-placeholder > img { min-width: 0; width: 72%; }

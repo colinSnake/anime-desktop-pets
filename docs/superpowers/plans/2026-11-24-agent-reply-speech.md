@@ -1,5 +1,7 @@
 # Agent 回复本机播报实施计划
 
+> **范围已退役（2026-11-25）：**用户确认移除普通聊天回复自动播报及对应 UI、IPC 与服务端链路。本计划仅保留为历史实现记录，不应继续执行；现行本机语音范围是桌宠互动气泡播报与固定短句试听。
+
 > **For agentic workers:** 使用 superpowers:test-driven-development 与 superpowers:verification-before-completion 逐步执行。
 
 **目标：** Apple 芯片 Mac 聊天可显式勾选本次会话自动播报，不改变文字回合、参考音色、服务商、直播或数据迁移。

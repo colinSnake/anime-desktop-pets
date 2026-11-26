@@ -12,7 +12,7 @@ import { PetLifecycle } from '../../app-service/src/pet-lifecycle.ts';
 import { defaultPreferences } from '../../app-service/src/pet-registry.ts';
 import type { PetDefinition } from '../../../packages/contracts/src/pets.ts';
 
-import type { VideoMenuIntent } from '../../app-service/src/workspace-video-protocol.ts';
+import type { VideoMenuIntent, VideoSpeechState } from '../../app-service/src/workspace-video-protocol.ts';
 
 const pet = (id: string): PetDefinition => ({ id, package: { id: 'local.development.longmei', version: '0.0.0-dev' },
   enabled: true, autoStartOnLaunch: false, preferences: defaultPreferences() });
@@ -223,16 +223,17 @@ test('video task projection is bounded, owned by the current start epoch and rev
 });
 
 test('owned caption cues wait for start, belong to one window epoch, and revoke on hide/stop', async () => {
-  const spoken: {text: string; eligible: () => boolean}[] = [];
+  const spoken: {text: string; eligible: () => boolean; report: (state: VideoSpeechState) => void}[] = [];
+  const nativeStates: unknown[] = [];
   let revoked = 0;
   let fire: (text: string | undefined, token: number) => void = () => {};
   let frame!: (result: boolean) => void;
   const host = new WorkspaceVideoHost((_input, ended, _slot, _drop, cue) => {
     fire = cue;
-    return { ready: new Promise(resolve => { frame = resolve; }), stop() { ended('stopped'); return true; }, setVisible: value => { if (!value) cue(undefined, 1); return true; } };
+    return { ready: new Promise(resolve => { frame = resolve; }), stop() { ended('stopped'); return true; }, setVisible: value => { if (!value) cue(undefined, 1); return true; }, applyCaptionSpeech: value => nativeStates.push(value) };
   });
   const client = new WorkspaceVideoClient(command => host.receive(command, event => client.receive(event)), 1000, {
-    offer: (_source, text, eligible) => spoken.push({text, eligible}),
+    offer: (_source, text, eligible, report) => { spoken.push({text, eligible, report}); return true; },
     cancelSource: async () => { revoked++; },
   });
   const controller = client.controller('pet-voice', pet('pet-voice').package);
@@ -243,6 +244,8 @@ test('owned caption cues wait for start, belong to one window epoch, and revoke 
   fire('已呈现。', 1); fire('重复。', 1);
   assert.equal(spoken.length, 1);
   assert.equal(spoken[0]!.eligible(), true);
+  spoken[0]!.report('held');
+  assert.deepEqual(nativeStates, [{ cue: 1, state: 'held' }]);
   assert.equal(await controller.setVisible(false), true);
   assert.equal(spoken[0]!.eligible(), false);
   assert.equal(revoked, 1);
@@ -253,6 +256,9 @@ test('owned caption cues wait for start, belong to one window epoch, and revoke 
   old('不是新窗口。', 2);
   fire('新的窗口。', 1);
   assert.deepEqual(spoken.map(v => v.text), ['已呈现。', '新的窗口。']);
+  spoken[0]!.report('drained'); // Old window used the same caption token.
+  spoken[1]!.report('held'); spoken[1]!.report('drained');
+  assert.deepEqual(nativeStates, [{ cue: 1, state: 'held' }, { cue: 1, state: 'held' }, { cue: 1, state: 'drained' }]);
   fire(undefined, 1);
   assert.equal(spoken[1]!.eligible(), false);
   assert.equal(revoked, 2);

@@ -1,9 +1,13 @@
-import { ChatReplySpeech } from './chat-reply-speech.ts';
-import { isSpeechEnableInput, replySpeechIPC } from '../../../packages/contracts/src/speech.ts';
-import { validChatRequestID } from '../../../packages/contracts/src/online-chat.ts';
+import { liveChannel, liveMethods, validLiveArgs } from '../../../packages/contracts/src/live-stage.ts';
+import { LiveStageController } from './live-stage/controller.ts';
+import { loadStageAssets, stageArtworkName } from './live-stage/assets.ts';
+import { openStageOutput } from './live-stage/output.ts';
+import { LiveStagePreview } from './live-stage/preview.ts';
+import { SpeechPreview } from './speech-preview.ts';
+import { isSpeechEnableInput } from '../../../packages/contracts/src/speech.ts';
 import { MicrophoneGate, isMicrophonePermission } from './microphone-gate.ts';
 import { validMicWav } from './microphone-capture.ts';
-import { VoiceDraftPicker, runVoiceTranscription } from './voice-draft.ts';
+import { VoiceDraftPicker, VoiceDraftSpeechGate, runVoiceTranscription } from './voice-draft.ts';
 import { microphoneIPC, voiceDraftIPC } from '../../../packages/contracts/src/voice-draft.ts';
 import { chatProjectIPC, isHistoryInput, isProjectListResult } from '../../../packages/contracts/src/chat-history.ts';
 import { createChatProject } from './chat-project-directory.ts';
@@ -22,6 +26,7 @@ import { identityWriteActions, isIdentityWriteInput, validIdentityInput } from '
 import {
   app,
   BrowserWindow,
+  clipboard,
   Menu,
   dialog,
   ipcMain,
@@ -106,10 +111,20 @@ let placementBaseline: WorkspaceBounds | undefined;
 let placementAtClose: WorkspaceBounds | undefined;
 let stopWorkspaceDisplayWatch: (() => void) | undefined;
 let service: ServiceProcess | undefined;
+let liveStage: LiveStageController | undefined;
+let livePausing = 0;
+async function pauseLiveStage() { await liveStage?.stop(); }
 let covers: PetCoverProvider | undefined;
 let models: ModelIPC | undefined;
 let chat: ChatIPC | undefined;
-let replySpeech: ChatReplySpeech | undefined;
+let speechPreview: SpeechPreview | undefined;
+let speechPreviewEpoch = 0;
+const stopSpeechPreview = () => { speechPreviewEpoch++; return speechPreview?.stop() ?? Promise.resolve(true); };
+let voiceDraftSpeechGate: VoiceDraftSpeechGate | undefined;
+const speechForVoiceDraft = () => voiceDraftSpeechGate ??= new VoiceDraftSpeechGate(
+  async () => await stopSpeechPreview() && (await service?.speechRequest('suspend'))?.ok === true,
+  async preload => (await service?.speechRequest('resume', { preload }))?.ok === true,
+);
 let taskIPC: AgentTaskIPC | undefined;
 let voiceDraft: VoiceDraftPicker | undefined;
 let microphone: MicrophoneGate | undefined;
@@ -214,8 +229,14 @@ async function start() {
   const taskFollowingHome = process.platform === 'darwin' ? app.getPath('home') : undefined;
   workspaceStatus = installWorkspaceTray(join(__dirname, "branding", "petStatusTemplate.png"), {
     list: () => service!.petRequest("list"),
-    linkage: (action, expectedRevision) => !exiting && service
-      ? service.petRequest(action, { expectedRevision }) : Promise.resolve({ ok: false, error: 'unavailable' }),
+    linkage: async (action, expectedRevision) => {
+      if (exiting || !service) return { ok: false, error: 'unavailable' };
+      if (!await stopSpeechPreview() && action === 'resume') return { ok: false, error: 'apply-failed' };
+      if (action !== 'pause') return service.petRequest(action, { expectedRevision });
+      livePausing++;
+      try { await pauseLiveStage(); return await service.petRequest(action, { expectedRevision }); }
+      finally { livePausing--; }
+    },
     readCodex: () => readCodexPresence(__dirname),
     launchCodex: requestCodexLaunch,
     taskFollowing: taskFollowingHome ? {
@@ -236,6 +257,12 @@ async function start() {
   protocol.handle("pet-app", async (request) => {
     const cover = await covers?.response(request.url, request.method);
     if (cover) return cover;
+    const stageArtwork = process.platform === 'darwin' && request.method === 'GET' && stageArtworkName(request.url);
+    if (stageArtwork) {
+      try { return new Response(await readFile(join(__dirname, 'live-stage', stageArtwork)), { headers: {
+        'content-type':'image/webp', 'content-security-policy':CONTENT_SECURITY_POLICY, 'x-content-type-options':'nosniff',
+      }}); } catch { return new Response(null,{status:404}); }
+    }
     const relative = assetPath(request.url);
     if (workspaceHmr && relative !== "assets/app-icon.svg" && relative !== MICROPHONE_WORKLET_ASSET) return workspaceDevResponse(workspaceHmr, request);
     if (request.method !== "GET" || !relative)
@@ -277,6 +304,7 @@ async function start() {
       videoHost: video?.host,
       taskFollowingHome,
       onTaskFollowingState: state => { taskState = state; workspaceStatus?.render(); },
+      onExit: () => { void liveStage?.close().catch(() => {}); },
       modelsRoot: process.platform === "darwin" ? join(data.root, "models") : undefined,
       businessRoot: data.kind === 'adpets' ? data.root : undefined,
       workspace: {
@@ -358,10 +386,12 @@ async function start() {
       { role: 'windowMenu' },
     ]));
     models = new ModelIPC(service);
-    if (process.arch === 'arm64') replySpeech = new ChatReplySpeech(async command => (await service!.speechRequest('chat-reply', command)).ok);
-    chat = new ChatIPC(service, replySpeech);
+    if (process.arch === 'arm64') {
+      speechPreview = new SpeechPreview(command => service!.speechRequest('preview', command));
+    }
+    chat = new ChatIPC(service);
     const tasks = taskIPC = new AgentTaskIPC(service.agentTask.bind(service));
-    const cancelWorkspaceRequests = () => { microphone?.revoke(); models?.cancel(); chat?.cancel(); void voiceDraft?.cancel(); };
+    const cancelWorkspaceRequests = () => { liveStage?.cancelDanmaku(); void stopSpeechPreview(); microphone?.revoke(); models?.cancel(); chat?.cancel(); void voiceDraft?.cancel(); };
     workspace.on('hide', cancelWorkspaceRequests);
     workspace.on('minimize', cancelWorkspaceRequests);
     workspace.webContents.on('did-start-navigation', cancelWorkspaceRequests);
@@ -376,24 +406,26 @@ async function start() {
       tasks.invoke(method, () => trustedModelFrame(event, args) && isWorkspaceVisible() && !workspace!.isMinimized(), args));
     const owner = workspace;
     if (process.arch === 'arm64') {
+      let micSpeechLease: { id: string; release: (preload: boolean) => Promise<boolean> } | undefined;
       const mic = microphone = new MicrophoneGate(id => {
         if (!owner.isDestroyed() && !owner.webContents.isDestroyed()) {
           try { owner.webContents.send(microphoneIPC.revoked, id); } catch { /* Frame may already be gone. */ }
         }
+        if (micSpeechLease?.id === id) {
+          const lease = micSpeechLease;
+          micSpeechLease = undefined;
+          void (async () => {
+            await voiceDraft?.cancel().catch(() => {});
+            await lease.release(visibleMicrophoneOwner(owner));
+          })();
+        }
       });
-      owner.on('blur', () => { mic.revoke(); void replySpeech?.stop(); });
-      ipcMain.handle(replySpeechIPC.displayed, (event, ...args: unknown[]) => {
-        if (args.length !== 1 || !validChatRequestID(args[0])) return;
-        replySpeech?.displayed(args[0], () => currentMic(event, args) && !mic.busy && !micSystemPrompt);
-      });
-      ipcMain.handle(replySpeechIPC.stop, (event, ...args: unknown[]) => {
-        if (!args.length && trustedModelFrame(event, args)) void replySpeech?.stop();
-      });
+      owner.on('blur', () => { mic.revoke(); void stopSpeechPreview(); });
       const currentMic = (event: Electron.IpcMainInvokeEvent, args: unknown[]) =>
         visibleMicrophoneOwner(owner) && trustedModelFrame(event, args);
       ipcMain.handle(microphoneIPC.authorize, async (event, ...args: unknown[]) => {
         if (args.length || !voiceDraft || !currentMic(event, args)) return { ok: false, error: 'unavailable' };
-        if (mic.busy || micSystemPrompt || voiceDraft.busy) return { ok: false, error: 'busy' };
+        if (mic.busy || micSystemPrompt || voiceDraft.busy || speechForVoiceDraft().busy) return { ok: false, error: 'busy' };
         switch (systemPreferences.getMediaAccessStatus('microphone')) {
           case 'granted': return { ok: true };
           case 'not-determined': break;
@@ -409,12 +441,23 @@ async function start() {
       });
       ipcMain.handle(microphoneIPC.arm, async (event, ...args: unknown[]) => {
         if (args.length || !voiceDraft || !currentMic(event, args)) return { ok: false, error: 'unavailable' };
-        if (mic.busy || micSystemPrompt || voiceDraft.busy) return { ok: false, error: 'busy' };
+        const speechGate = speechForVoiceDraft();
+        if (mic.busy || micSystemPrompt || voiceDraft.busy || speechGate.busy) return { ok: false, error: 'busy' };
         const status = systemPreferences.getMediaAccessStatus('microphone');
         if (status !== 'granted') return { ok: false, error: status === 'not-determined' ? 'permission-required' : 'permission-denied' };
-        const id = await mic.armAfter(() => replySpeech?.stop() ?? Promise.resolve(true),
-          () => currentMic(event, args) && !voiceDraft?.busy && !micSystemPrompt);
-        return id ? { ok: true, id } : { ok: false, error: 'unavailable' };
+        const release = await speechGate.acquire();
+        if (!release) return { ok: false, error: speechGate.busy ? 'busy' : 'unavailable' };
+        let retained = false;
+        try {
+          const id = await mic.armAfter(async () => true,
+            () => currentMic(event, args) && !voiceDraft?.busy && !micSystemPrompt);
+          if (!id) return { ok: false, error: 'unavailable' };
+          micSpeechLease = { id, release };
+          retained = true;
+          return { ok: true, id };
+        } finally {
+          if (!retained) await release(visibleMicrophoneOwner(owner));
+        }
       });
       ipcMain.handle(microphoneIPC.started, (event, ...args: unknown[]) => args.length === 1 && currentMic(event, args) && mic.started(args[0]));
       ipcMain.handle(microphoneIPC.finish, async (event, ...args: unknown[]) => {
@@ -425,19 +468,30 @@ async function start() {
         const signal = mic.finish(id);
         if (!signal) return { ok: false, error: 'cancelled' };
         try { return await voiceDraft.record(Buffer.from(audio), signal, () => currentMic(event, args)); }
-        finally { mic.release(id); }
+        finally {
+          mic.release(id);
+          if (micSpeechLease?.id === id) {
+            const lease = micSpeechLease;
+            micSpeechLease = undefined;
+            await lease.release(visibleMicrophoneOwner(owner));
+          }
+        }
       });
       ipcMain.handle(microphoneIPC.cancel, (event, ...args: unknown[]) => {
         if (args.length === 1 && owner === workspace && trustedModelFrame(event, args) && typeof args[0] === 'string') mic.revoke(args[0]);
       });
-      ipcMain.handle(voiceDraftIPC.select, (event, ...args: unknown[]) => {
+      ipcMain.handle(voiceDraftIPC.select, async (event, ...args: unknown[]) => {
         const current = () => owner === workspace && trustedModelFrame(event, args) && isWorkspaceVisible() && !owner.isMinimized();
         if (args.length || !voiceDraft || !current()) return { ok: false, error: 'unavailable' };
-        if (mic.busy || micSystemPrompt) return { ok: false, error: 'busy' };
+        const speechGate = speechForVoiceDraft();
+        if (mic.busy || micSystemPrompt || speechGate.busy || voiceDraft.busy) return { ok: false, error: 'busy' };
         return voiceDraft.select(() => dialog.showOpenDialog(owner, {
           title: '选择语音 WAV（仅本机转写）', properties: ['openFile', 'noResolveAliases', 'dontAddToRecent'],
           filters: [{ name: 'PCM WAV', extensions: ['wav'] }],
-        }), current);
+        }), current, async () => {
+          const release = await speechGate.acquire();
+          return release ? () => release(visibleMicrophoneOwner(owner)) : undefined;
+        });
       });
       ipcMain.handle(voiceDraftIPC.cancel, (event, ...args: unknown[]) => {
         if (!args.length && owner === workspace && trustedModelFrame(event, args)) void voiceDraft?.cancel();
@@ -516,6 +570,33 @@ async function start() {
       return service!.request(command);
     });
   }
+  if (process.platform === 'darwin') {
+    const preview = new LiveStagePreview();
+    liveStage = new LiveStageController({
+      profile: input => service!.liveProfile(input),
+      ...(speech && data.kind === 'adpets' && {voice: signal => service!.liveVoice(signal), danmaku: (text,scene,signal,synthesizing) => service!.liveDanmaku(text,scene,signal,synthesizing)}),
+      allowed: async () => {
+        if (exiting || livePausing) return false;
+        const result = await service!.petRequest('list');
+        return !exiting && !livePausing && result.ok && result.workspace.linkage === 'active';
+      },
+      open: async (clock, current) => {
+        if (!workspaceVideoDirectory || !video?.longmeiReady) throw new Error('stage_media_unavailable');
+        const assets = await loadStageAssets(join(__dirname,'live-stage'), workspaceVideoDirectory);
+        if (!current()) throw new Error('stage_cancelled');
+        return openStageOutput(clock, assets);
+      },
+      preview: url => preview.open(url), closePreview: () => preview.close(), copy: url => clipboard.writeText(url),
+    });
+    for (const method of liveMethods) ipcMain.handle(liveChannel(method), (event, ...args: unknown[]) => {
+      const eligible = () => !exiting && !!workspace && !workspace.isDestroyed() && isWorkspaceVisible() && trustedFrame({
+        senderId:event.sender.id, ownerId:workspace.webContents.id, senderFrame:event.senderFrame,
+        mainFrame:workspace.webContents.mainFrame, url:event.senderFrame?.url ?? '', args,
+      });
+      if (!eligible() || !validLiveArgs(method,args)) throw new Error('forbidden');
+      return liveStage!.run(method,args[0],eligible);
+    });
+  }
   const workspaceData = new WorkspaceDataFolder(appData, path => shell.openPath(path), data.kind === 'adpets' ? data.root : undefined);
   const dataCaller = (event: Electron.IpcMainInvokeEvent, args: unknown[]) => isWorkspaceVisible() && !!workspace && trustedCaller({
       senderId: event.sender.id, ownerId: workspace.webContents.id,
@@ -571,10 +652,15 @@ async function start() {
         senderFrame: event.senderFrame, mainFrame: workspace.webContents.mainFrame,
         url: event.senderFrame?.url ?? "", args,
       }) || !validPetArgs(method, args)) throw new Error("forbidden");
-      if (method === "pause" || method === "delete") void replySpeech?.stop();
+      if (method === "pause" || method === "delete") { void stopSpeechPreview(); }
       // Reopening the service gate must not admit an offer issued before pause.
-      if (method === "resume" && await replySpeech?.stop() === false) return { ok: false, error: 'apply-failed' };
-      const result = await service!.petRequest(method, args[0]);
+      if (method === "resume" && !await stopSpeechPreview()) return { ok: false, error: 'apply-failed' };
+      const result = await (async () => {
+        if (method !== 'pause') return service!.petRequest(method,args[0]);
+        livePausing++;
+        try { await pauseLiveStage(); return await service!.petRequest(method,args[0]); }
+        finally { livePausing--; }
+      })();
       if (method !== "list") void workspaceStatus?.refresh();
       return result;
     });
@@ -637,22 +723,30 @@ async function start() {
         senderFrame: event.senderFrame, mainFrame: owner.webContents.mainFrame, url: event.senderFrame?.url ?? '', args,
       }) || !validSpeechArgs(method, args)) throw new Error('forbidden');
       if (method === 'status') return service!.speechRequest(method);
+      if (method === 'stopPreview') {
+        if (!await stopSpeechPreview()) return { ok: false, error: 'unavailable' };
+        return service!.speechRequest('status');
+      }
+      if (method === 'preview') {
+        const epoch = speechPreviewEpoch;
+        const eligible = () => speechPreviewEpoch === epoch && visibleMicrophoneOwner(owner) && !speechChanging &&
+          !selectingReference && !microphone?.busy && !micSystemPrompt && !voiceDraft?.busy && !speechForVoiceDraft().busy;
+        return speechPreview?.play(eligible) ?? { ok: false, error: 'unavailable' };
+      }
       if (method === 'enable' || method === 'disable') {
         if (speechChanging) return { ok: false, error: 'busy' };
         if (method === 'enable' && (!isSpeechEnableInput(args[0]) || !isWorkspaceVisible() || !owner.isFocused())) return { ok: false, error: 'unavailable' };
         speechChanging = true;
         try {
-          if (method === 'disable') replySpeech?.setEnabled(false);
-          // Even if disable has returned, a previous offer may still be on another
-          // connection. Confirm its higher stop revision before re-enabling speech.
-          if (method === 'enable' && (await replySpeech?.stop() === false || !isWorkspaceVisible() || !owner.isFocused()))
+          if (method === 'disable') await stopSpeechPreview();
+          if (method === 'enable' && (!await stopSpeechPreview() || !isWorkspaceVisible() || !owner.isFocused()))
             return { ok: false, error: 'unavailable' };
           const result = await service!.speechRequest(method, args[0]);
-          if (method === 'enable' && result.ok) replySpeech?.setEnabled(result.speech.speakChatReplies === true);
           return result;
         } finally { speechChanging = false; }
       }
       if (method === 'clearReference') return service!.speechRequest('clear-reference');
+      if (method === 'saveTranscript') return service!.speechRequest('transcript', args[0]);
       if (selectingReference) return { ok: false, error: 'busy' };
       selectingReference = true;
       try {
@@ -701,11 +795,13 @@ app.on("before-quit", (event) => {
   taskIPC?.invalidateCreate();
   microphone?.revoke();
   const voiceCleanup = voiceDraft?.cancel();
+  const previewCleanup = stopSpeechPreview();
+  const liveCleanup = liveStage?.close();
   void (async () => {
     try {
       // Keep the service's workspace ownership until window placement has settled.
       await placementSave;
-      const results = await Promise.allSettled([trayCleanup, launchCleanup, voiceCleanup, service?.close()]);
+      const results = await Promise.allSettled([trayCleanup, launchCleanup, voiceCleanup, previewCleanup, liveCleanup, service?.close()]);
       if (results.some(result => result.status === 'rejected')) dialog.showErrorBox(
         "本地服务清理失败",
         "未确认本应用子进程已完全退出，没有开始迁移。",
@@ -730,7 +826,7 @@ else start().catch(async error => {
   const launchCleanup = startupLaunch?.dispose();
   if (exiting) return;
   microphone?.revoke();
-  await Promise.allSettled([trayCleanup, launchCleanup, voiceDraft?.cancel(), service?.close()]);
+  await Promise.allSettled([trayCleanup, launchCleanup, voiceDraft?.cancel(), liveStage?.close(), service?.close()]);
   dialog.showErrorBox(
     "桌边小崽启动失败",
     error instanceof Error && error.message === 'local_data_unavailable'
