@@ -46,7 +46,9 @@ test('live stage snapshots bind each action and voice cue to one presenter role'
   assert.equal(isLiveSnapshot({...base,role:'longmei',action:'01',remainingMs:2000}),true);
   assert.equal(isLiveSnapshot({...base,role:'dafeiyu',action:'01',remainingMs:2000}),false);
   assert.equal(isLiveSnapshot({...base,role:'longmei',action:'companion-wave',remainingMs:2000}),false);
-  assert.equal(isLiveSnapshot({...base,role:'dafeiyu',action:'companion-wave',remainingMs:2000,voice:true}),false);
+  assert.equal(isLiveSnapshot({...base,role:'dafeiyu',action:'companion-wave',remainingMs:2000,voice:true}),true);
+  assert.equal(isLiveSnapshot({...base,role:'dafeiyu',action:'companion-wave',remainingMs:2000,voice:true,reply:'一起看海吧。'}),true);
+  assert.equal(isLiveSnapshot({...base,role:'dafeiyu',action:'companion-jump',remainingMs:2000,voice:true,reply:'一起看海吧。'}),false);
   assert.equal(isLiveSnapshot({...base,role:'dafeiyu',voice:true}),false);
   assert.equal(isLiveSnapshot({...base,role:'longmei',voice:true}),false);
   assert.equal(isLiveSnapshot(base),false);

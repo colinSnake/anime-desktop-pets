@@ -1,5 +1,11 @@
+import { requestLiveVoiceProfile, type VoiceProfileMethod } from './live-voice-profile-transport.ts';
+import { requestCharacterLearning, type LearningInput, type LearningMethod, type LearningResult } from './character-learning-transport.ts';
+import { isCharacterLearningSecret } from '../../../packages/contracts/src/character-learning.ts';
+import type { LiveVoiceProfileMutation, LiveVoiceProfileResult } from '../../../packages/contracts/src/live-voice-profile.ts';
+import { requestLiveSharing } from './live-sharing-transport.ts';
+import type { LiveSharingInput, LiveSharingResult } from '../../../packages/contracts/src/live-sharing.ts';
 import { liveVoiceClipLimit, liveVoiceWireLimit, parseLiveVoice, stageVoiceDuration, type LiveVoiceResult } from '../../../packages/contracts/src/live-voice.ts';
-import { isLiveDanmakuReply, isLiveProfile, type LiveDanmakuError, type LiveScene, type LiveRoleId, type LiveProfile, type LiveProfileResult, isLiveBindingInput, isLiveBindingResult, type LiveBindingInput, type LiveBindingResult } from '../../../packages/contracts/src/live-stage.ts';
+import { isLiveDanmakuReply, isLiveProfile, type LiveDanmakuError, type LiveLearningHandle, type LiveScene, type LiveRoleId, type LiveProfile, type LiveProfileResult, isLiveBindingInput, isLiveBindingResult, type LiveBindingInput, type LiveBindingResult } from '../../../packages/contracts/src/live-stage.ts';
 import type { AgentTaskInputs, AgentTaskMethod, AgentTaskResults } from '../../../packages/contracts/src/agent-tasks.ts';
 import { requestAgentTask } from './agent-task-transport.ts';
 import { taskUnavailable } from './agent-task-ipc.ts';
@@ -282,18 +288,40 @@ export class ServiceProcess {
       return unavailable;
     } catch { return unavailable; }
   }
+  async liveSharing(role:LiveRoleId,input?:LiveSharingInput):Promise<LiveSharingResult>{
+    const unavailable={ok:false,error:'unavailable'} as const;const port=this.port;
+    if(this.closed||!port||!this.options.businessRoot)return unavailable;
+    const result=await requestLiveSharing({port,token:this.token},role,input);
+    return this.closed||this.port!==port?unavailable:result;
+  }
   async liveRoleBindings(input?:LiveBindingInput):Promise<LiveBindingResult>{
     const unavailable={ok:false,error:'unavailable'} as const;const port=this.port;
     if(this.closed||!port||!this.options.businessRoot|| (input&&!isLiveBindingInput(input)))return unavailable;
     try{const response=await fetch(`http://127.0.0.1:${port}/v1/live/role-bindings`,{method:input?'POST':'GET',redirect:'error',signal:AbortSignal.timeout(6500),headers:{authorization:`Bearer ${this.token}`,...(input&&{'content-type':'application/json'})},body:input?JSON.stringify(input):undefined});const data=await response.json();if(this.closed||this.port!==port||!isLiveBindingResult(data))return unavailable;return data;}catch{return unavailable;}
   }
-  async liveVoice(signal: AbortSignal): Promise<LiveVoiceResult> {
+  async characterLearning<M extends LearningMethod>(method:M,input:LearningInput<M>,signal?:AbortSignal):Promise<LearningResult<M>> {
+    const port=this.port;const unavailable={ok:false,error:'unavailable'} as const;
+    if(this.closed||!port||!this.options.businessRoot)return unavailable;
+    const result=await requestCharacterLearning({port,token:this.token},method,input,fetch,signal);
+    return this.closed||this.port!==port?unavailable:result;
+  }
+  async liveVoiceProfile(method:VoiceProfileMethod,input:unknown,path?:string,signal?:AbortSignal):Promise<LiveVoiceProfileResult> {
+    const port=this.port;const unavailable={ok:false,error:'unavailable'} as const;
+    if(this.closed||!port||!this.options.businessRoot||!this.options.speech||signal?.aborted)return unavailable;
+    const result=await requestLiveVoiceProfile({port,token:this.token},method,input,path,fetch,signal);
+    return this.closed||this.port!==port?unavailable:result;
+  }
+  async liveVoice(signal: AbortSignal,role:LiveRoleId): Promise<LiveVoiceResult & {scope?:LiveVoiceProfileMutation}> {
     const port = this.port;
     const failed = {ok:false,error:'voice-failed'} as const;
     if (this.closed || !port || !this.options.businessRoot || !this.options.speech || signal.aborted) return failed;
     try {
+      const bindings=await this.liveRoleBindings();
+      const petID=bindings.ok?bindings.bindings[role]:null;
+      if(!bindings.ok||!petID||signal.aborted)return failed;
+      const target={role,petID,bindingRevision:bindings.revision};
       const response = await fetch(`http://127.0.0.1:${port}/v1/live/voice`, {
-        method:'POST', body:'{}', redirect:'error', signal:AbortSignal.any([signal, AbortSignal.timeout(66_000)]),
+        method:'POST', body:JSON.stringify(target), redirect:'error', signal:AbortSignal.any([signal, AbortSignal.timeout(66_000)]),
         headers:{authorization:`Bearer ${this.token}`,'content-type':'application/json'},
       });
       if (response.status === 409) return {ok:false,error:'voice-busy'};
@@ -301,22 +329,24 @@ export class ServiceProcess {
       const bytes = await readProgramResponse(response,liveVoiceWireLimit,'application/octet-stream');
       if (this.closed || this.port !== port || signal.aborted || !bytes) return failed;
       const clips = parseLiveVoice(bytes);
-      return clips ? {ok:true,clips} : failed;
+      const revision=response.headers.get('x-adpets-live-voice-revision');
+      const expectedRevision=Number(revision);
+      return clips && revision!==null && Number.isSafeInteger(expectedRevision) && expectedRevision>=1 ? {ok:true,clips,scope:{...target,expectedRevision}} : failed;
     } catch { return failed; }
   }
 
-  async liveDanmaku(role:LiveRoleId,text: string, scene: LiveScene, signal: AbortSignal, synthesizing: () => void): Promise<
-    {ok:true; text:string; audio:Buffer} | {ok:false; error:LiveDanmakuError}> {
+  async liveDanmaku(role:LiveRoleId,text: string, scene: LiveScene, signal: AbortSignal, synthesizing: () => void, voice?:LiveVoiceProfileMutation): Promise<
+    {ok:true; text:string; audio:Buffer; learning?:LiveLearningHandle} | {ok:false; error:LiveDanmakuError}> {
     const port = this.port;
     const current = () => !this.closed && this.port === port && !signal.aborted;
     let error: LiveDanmakuError = 'model-failed';
-    if (!port || !this.options.businessRoot || !this.options.speech || !current()) return {ok:false,error};
+    if (!port || !this.options.businessRoot || !this.options.speech || !current() || !voice || voice.role!==role) return {ok:false,error};
     const post = (phase: 'reply' | 'audio', data: object, timeout: number) => fetch(`http://127.0.0.1:${port}/v1/live/danmaku/${phase}`, {
       method:'POST', body:JSON.stringify(data), redirect:'error', signal:AbortSignal.any([signal,AbortSignal.timeout(timeout)]),
       headers:{authorization:`Bearer ${this.token}`,'content-type':'application/json'},
     });
     try {
-      const response = await post('reply',{role,text,scene},42_000);
+      const response = await post('reply',{role,text,scene,voice},42_000);
       if (response.status === 412 || response.status === 429) {
         await response.body?.cancel();
         return {ok:false,error:response.status === 412 ? 'no-model' : 'rate-limit'};
@@ -328,8 +358,15 @@ export class ServiceProcess {
           typeof result.ticket !== 'string' || !/^[a-f0-9]{48}$/.test(result.ticket)) return {ok:false,error};
       error = 'speech-failed';
       synthesizing();
-      const audio = await readProgramResponse(await post('audio',{ticket:result.ticket},64_000),liveVoiceClipLimit,'application/octet-stream');
-      return current() && audio && stageVoiceDuration(audio) ? {ok:true,text:result.text,audio} : {ok:false,error};
+      const responseAudio=await post('audio',{ticket:result.ticket},64_000);
+      const ticket=responseAudio.headers.get('x-adpets-learning-ticket'),expiresAt=Number(responseAudio.headers.get('x-adpets-learning-expires'));
+      const learning=isCharacterLearningSecret(ticket)&&Number.isSafeInteger(expiresAt)&&expiresAt>Date.now()&&expiresAt<=Date.now()+65000?{petID:voice.petID,ticket,expiresAt}:undefined;
+      try {
+        const audio=await readProgramResponse(responseAudio,liveVoiceClipLimit,'application/octet-stream');
+        if(current()&&audio&&stageVoiceDuration(audio))return {ok:true,text:result.text,audio,...(learning&&{learning})};
+      } catch { /* Revoke an unused learning capability, even if audio transport was lost. */ }
+      if(learning)void this.characterLearning('cancel',{petID:learning.petID,ticket:learning.ticket});
+      return {ok:false,error};
     } catch { return {ok:false,error}; }
   }
 

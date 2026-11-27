@@ -1,4 +1,8 @@
-import { Fragment, useLayoutEffect, useRef, useState } from 'react';
+import type { DesktopBridge } from '../../../packages/contracts/src/index.ts';
+import type { CharacterLearningChatSelection } from '../../../packages/contracts/src/character-learning.ts';
+import { chatLearningSelection } from './chat-learning.ts';
+import { ChatLearning } from './ChatLearning.tsx';
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { chatHistoryTitle, isHistoryDetailResult, type ChatHistoryDetail as Detail, type ChatHistoryDetailResult } from '../../../packages/contracts/src/chat-history.ts';
 import type { PackageReference } from '../../../packages/contracts/src/pets.ts';
 import { ChatMessage } from './ChatMessage.tsx';
@@ -6,11 +10,20 @@ import { PetNookIcon } from './PetNookIcon.tsx';
 
 const date = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium' });
 
-export function ChatHistoryDetail({ entry, name, reference, pending, notice, readPage, onBack, onContinue }: {
+export function ChatHistoryDetail({ entry, name, reference, pending, notice, readPage, onBack, onContinue, petID, learning, characters }: {
   entry: Detail; name: string; reference?: PackageReference; pending: boolean; notice?: string;
   readPage?: (before: string) => Promise<ChatHistoryDetailResult>;
+  petID?:string; learning?:DesktopBridge['characterLearning'];characters?:DesktopBridge['characters'];
   onBack(): void; onContinue?: () => void;
 }) {
+  const [selected,setSelected]=useState<CharacterLearningChatSelection>();
+  const opener=useRef<HTMLButtonElement|null>(null);
+  const closeLearning=()=>{setSelected(undefined);opener.current?.focus();};
+  useEffect(() => {
+    const hidden = () => { if (document.hidden) setSelected(undefined); };
+    document.addEventListener('visibilitychange',hidden);
+    return () => document.removeEventListener('visibilitychange',hidden);
+  }, []);
   const back = useRef<HTMLButtonElement>(null);
   const scroll = useRef<HTMLDivElement>(null);
   const pageStatus = useRef<HTMLParagraphElement>(null);
@@ -29,6 +42,7 @@ export function ChatHistoryDetail({ entry, name, reference, pending, notice, rea
   }, [page]);
   async function flip(next: string[]) {
     if (reading.current || !readPage) return;
+    closeLearning();
     pageStatus.current?.focus({ preventScroll: true });
     setPageError(false);
     const before = next.at(-1);
@@ -58,6 +72,11 @@ export function ChatHistoryDetail({ entry, name, reference, pending, notice, rea
             <p className="chat-day"><time dateTime={new Date(turn.completedAt).toISOString()}>{date.format(turn.completedAt)}</time></p>}
           <ChatMessage turn={{ id: `${turn.requestID}-user`, role: 'user', text: turn.user, createdAt: turn.completedAt }} name={name} reference={reference} />
           <ChatMessage turn={{ id: `${turn.requestID}-assistant`, role: 'assistant', text: turn.assistant, createdAt: turn.completedAt }} name={name} reference={reference} />
+          {learning && petID && chatLearningSelection(petID,entry.session.id,turn) && <button type="button" className="chat-control chat-learn-turn" disabled={pending||busy||!!selected} onClick={event=>{
+            opener.current=event.currentTarget;setSelected(chatLearningSelection(petID,entry.session.id,turn));
+          }}>从这轮提议偏好</button>}
+          {learning && selected?.turnID===turn.requestID && <ChatLearning bridge={learning} selection={selected} characters={characters} locked={pending||busy} onClose={closeLearning} />}
+
         </Fragment>)}
       </div>
     </div>

@@ -1,3 +1,6 @@
+import type { LiveVoiceProfileTarget, LiveVoiceProfileMutation, LiveVoiceTranscriptInput, LiveVoiceProfileResult } from './live-voice-profile.ts';
+import type { CharacterLearningBridge, CharacterLearningInput, CharacterLearningTicket } from './character-learning.ts';
+import type { LiveSharingInput, LiveSharingResult } from './live-sharing.ts';
 /** Fixed values shared by the management surface and the isolated stage. */
 export const liveScenes = [
   { id: 'desk-room', name: '暮色小屋', detail: '月窗、暖灯和木桌', positionMin: 25, positionMax: 75, floorY: 900 },
@@ -99,9 +102,10 @@ export const isLiveDanmakuReply = (value: unknown): value is string => {
   return !/[<>`*_#\[\]{}]|(?:https?:|www\.)/iu.test(value);
 };
 export type LiveDanmakuError = 'no-model' | 'model-failed' | 'rate-limit' | 'speech-failed';
+export type LiveLearningHandle = CharacterLearningInput & CharacterLearningTicket;
 export type LiveDanmakuState = {phase:'generating' | 'synthesizing' | 'stopped'} |
-  {phase:'published';text:string} | {phase:'failed';error:LiveDanmakuError};
-export type LiveResult = { ok: true; profile: LiveProfile; running: boolean; voice?: LiveVoiceState; danmaku?: LiveDanmakuState } | { ok: false; error: LiveError };
+  {phase:'published';learning?:LiveLearningHandle} | {phase:'failed';error:LiveDanmakuError};
+export type LiveResult = { ok: true; profile: LiveProfile; running: boolean; activeRole?:LiveRoleId; voice?: LiveVoiceState; danmaku?: LiveDanmakuState } | { ok: false; error: LiveError };
 export interface LiveStageBridge {
   read(role:LiveRoleId): Promise<LiveResult>;
   save(profile: LiveProfile,role:LiveRoleId): Promise<LiveResult>;
@@ -113,6 +117,15 @@ export interface LiveStageBridge {
   trigger(action: LiveRoleActionId,role:LiveRoleId): Promise<LiveResult>;
   submitDanmaku?(text: string,role:LiveRoleId): Promise<LiveResult>;
   stopDanmaku?(role:LiveRoleId): Promise<LiveResult>;
+  learning?: Pick<CharacterLearningBridge,'preview'|'generate'|'cancel'>;
+  voiceProfile?: {
+    read(target:LiveVoiceProfileTarget):Promise<LiveVoiceProfileResult>;
+    selectReference(input:LiveVoiceProfileMutation):Promise<LiveVoiceProfileResult>;
+    saveTranscript(input:LiveVoiceTranscriptInput):Promise<LiveVoiceProfileResult>;
+    clearReference(input:LiveVoiceProfileMutation):Promise<LiveVoiceProfileResult>;
+  };
+  readShares?(role:LiveRoleId):Promise<LiveSharingResult>;
+  writeShares?(input:LiveSharingInput):Promise<LiveSharingResult>;
   readBindings?():Promise<LiveBindingResult>;
   writeBinding?(input:LiveBindingInput):Promise<LiveBindingResult>;
 }
@@ -124,6 +137,6 @@ export function isLiveSnapshot(value: unknown): value is LiveSnapshot {
   if (!(fields(value, ['protocol', 'role', 'scene', 'placement', 'generation']) || fields(value, ['protocol', 'role', 'scene', 'placement', 'generation', 'action', 'remainingMs']) || fields(value, ['protocol', 'role', 'scene', 'placement', 'generation', 'action', 'remainingMs', 'voice']) || fields(value, ['protocol', 'role', 'scene', 'placement', 'generation', 'action', 'remainingMs', 'voice', 'reply']))) return false;
   return value.protocol === 1 && isLiveRoleId(value.role) && isLiveScene(value.scene) && isLivePlacement(value.placement, value.scene) && validInt(value.generation, 0, Number.MAX_SAFE_INTEGER) &&
     (!Object.hasOwn(value, 'voice') || value.voice === true) &&
-    (!Object.hasOwn(value, 'reply') || (value.role === 'longmei' && value.action === '01' && value.voice === true && isLiveDanmakuReply(value.reply))) &&
-    (!Object.hasOwn(value, 'action') || (isLiveRoleAction(value.role, value.action) && (value.role === 'longmei' || value.voice !== true) && validInt(value.remainingMs, 1, liveVoiceMaxMs + liveVoiceStartBudgetMs)));
+    (!Object.hasOwn(value, 'reply') || (value.action === (value.role === 'longmei' ? '01' : 'companion-wave') && value.voice === true && isLiveDanmakuReply(value.reply))) &&
+    (!Object.hasOwn(value, 'action') || (isLiveRoleAction(value.role, value.action) && validInt(value.remainingMs, 1, liveVoiceMaxMs + liveVoiceStartBudgetMs)));
 }

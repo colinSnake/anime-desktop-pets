@@ -1,3 +1,4 @@
+import { LiveVoiceProfileStore } from '../src/live/voice-profiles.ts';
 import { AgentStateStore } from '../src/agent/agent-state.ts';
 import { createPiTextRuntime } from '../src/agent/pi-runtime.ts';
 import { randomUUID } from 'node:crypto';
@@ -48,7 +49,8 @@ async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, befo
   if (withHistory) await writeFile(historyFile, '', { mode: 0o600 });
   const chatHistory = withHistory ? new ChatHistory(root) : undefined;
   const agentState = withAgentState ? new AgentStateStore(root) : undefined;
-  const app = createService({ token, models, workspace, characters, ...(speech && {speech,liveProfile:new LiveProfileStore(join(root,'live'))}), ...(liveRoleBindings && {liveRoleBindings}), ...(liveShares && {liveShares}), chatHistory, agentState, chatRuntime: chatRuntime ?? undefined, runtime: { snapshot, probe: async () => snapshot(), close: async () => {} } });
+  const liveVoices=liveRoleBindings&&speech?new LiveVoiceProfileStore(join(root,'live'),{workspace,bindings:liveRoleBindings,shares:liveShares}):undefined;
+  const app = createService({ token, models, workspace, characters, liveVoices, ...(speech && {speech,liveProfile:new LiveProfileStore(join(root,'live'))}), ...(liveRoleBindings && {liveRoleBindings}), ...(liveShares && {liveShares}), chatHistory, agentState, chatRuntime: chatRuntime ?? undefined, runtime: { snapshot, probe: async () => snapshot(), close: async () => {} } });
   t.after(async () => { await app.close(); await rm(root, { recursive: true, force: true }); });
   const created = await workspace.mutate('add', { expectedRevision: 0, package: pkg });
   assert.ok(created.ok);
@@ -79,7 +81,7 @@ async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, befo
     await characters.apply(petID, 2, { type: 'setMemoryChatShare', id, enabled: true });
     return () => workspace.withRegisteredInstance(petID, registered => characters.apply(registered, 3, { type: 'setMemoryChatShare', id, enabled: false }));
   };
-  return { app, root, petID, workspace, models, characters, historyFile, agentState, reads: () => reads, write, defaultTo, list, routes, send, share };
+  return { app, root, petID, workspace, models, characters, liveVoices, historyFile, agentState, reads: () => reads, write, defaultTo, list, routes, send, share };
 }
 
 test('online chat returns reported input usage and the saved capacity without an extra provider call', use, async t => {
@@ -942,10 +944,11 @@ test('rehearsal uses the real Pi text dispatch with only a public persona and on
     return completion(answers[inputs.indexOf(body.messages[1].content)]);
   },undefined,null,true,true,speech,true);
   const reference = join(f.root,'reference.wav'); await writeFile(reference,wav);
-  assert.ok((await speech.select(reference)).ok);
-  assert.ok((await speech.saveTranscriptDraft('合成测试音色，不出站')).ok);
+  const target={role:'longmei',petID:f.petID,bindingRevision:1} as const;
+  assert.ok((await f.liveVoices!.selectReference({...target,expectedRevision:0},reference)).ok);
+  assert.ok((await f.liveVoices!.saveTranscript({...target,expectedRevision:1,referenceTranscript:'合成测试音色，不出站'})).ok);
   const post = (name:string,payload:object,requestHeaders:Record<string,string> = headers) => f.app.inject({method:'POST',url:`/v1/live/danmaku/${name}`,headers:requestHeaders,payload});
-  const payload = (text:string) => ({text,scene:'rain-loft',role:'longmei'});
+  const payload = (text:string) => ({text,scene:'rain-loft',role:'longmei',voice:{...target,expectedRevision:2}});
   assert.equal((await post('reply',payload(inputs[0]!),{host:'127.0.0.1'})).statusCode,401);
   assert.equal((await post('reply',payload(inputs[0]!))).statusCode,412);
   await f.write('one'); await f.write('two');
@@ -977,4 +980,26 @@ test('rehearsal uses the real Pi text dispatch with only a public persona and on
   assert.ok((await f.workspace.mutate('pause',{expectedRevision:1})).ok);
   assert.equal((await post('reply',payload(inputs[0]!))).statusCode,409);
   assert.equal(outbound.length,6);
+});
+
+test('live identity withdrawal during real credential read prevents all provider dispatch', use, async t => {
+  const reading=deferred<void>(),release=deferred<void>();let armed=false,calls=0;
+  const speech=new BubbleSpeech({run:async()=>assert.fail('must not play audio'),close:async()=>{}});
+  const f=await fixture(t,async()=>{calls++;return completion('欢迎来到直播间！');},async()=>{if(armed){reading.resolve();await release.promise;}},null,false,false,speech,true);
+  await f.characters.apply(f.petID,0,{type:'saveIdentity',value:{name:'合成龙妹',role:'待撤回的合成身份',background:'',personality:'活泼',values:'',motivations:'',relationship:'',speakingStyle:'简洁',knowledgeScope:'',boundaries:'不泄露资料'}});
+  await f.write('one');
+  const post=(url:string,payload:object)=>f.app.inject({method:'POST',url,headers,payload});
+  const scope={role:'longmei',petID:f.petID,bindingRevision:1} as const;
+  assert.equal((await post('/v1/live/shares',{...scope,expectedRevision:0,records:[{kind:'identity',recordID:'identity',recordRevision:1}]})).statusCode,200);
+  const wav=Buffer.alloc(44+48000);wav.write('RIFF');wav.writeUInt32LE(wav.length-8,4);wav.write('WAVEfmt ',8);wav.writeUInt32LE(16,16);wav.writeUInt16LE(1,20);wav.writeUInt16LE(1,22);wav.writeUInt32LE(24000,24);wav.writeUInt32LE(48000,28);wav.writeUInt16LE(2,32);wav.writeUInt16LE(16,34);wav.write('data',36);wav.writeUInt32LE(wav.length-44,40);
+  const reference = join(f.root,'independent.wav');await writeFile(reference,wav);
+  assert.ok((await f.liveVoices!.selectReference({...scope,expectedRevision:0},reference)).ok);
+  assert.ok((await f.liveVoices!.saveTranscript({...scope,expectedRevision:1,referenceTranscript:'合成逐字稿'})).ok);
+  armed=true;
+  const pending=post('/v1/live/danmaku/reply',{role:'longmei',scene:'desk-room',text:'你好',voice:{...scope,expectedRevision:2}}).then(r=>r);
+  await reading.promise;
+  try{assert.equal((await post('/v1/live/shares',{...scope,expectedRevision:1,records:[]})).statusCode,200);}
+  finally{release.resolve();}
+  assert.notEqual((await pending).statusCode,200);
+  assert.equal(calls,0,'the real ModelClient fetch must not observe withdrawn identity');
 });

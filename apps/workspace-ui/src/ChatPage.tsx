@@ -1,3 +1,4 @@
+import type { DesktopBridge } from '../../../packages/contracts/src/index.ts';
 import type { VoiceDraftBridge } from '../../../packages/contracts/src/voice-draft.ts';
 import { DialogCloseButton, useDialogDismiss } from './DialogDismiss.tsx';
 import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react';
@@ -25,6 +26,8 @@ type ChatPageProps = {
  state: ChatWorkspaceState;
  controller?: ChatWorkspaceController;
  history?: ChatHistoryBridge;
+ learning?:DesktopBridge['characterLearning'];
+ characters?:DesktopBridge['characters'];
  voiceDraft?: VoiceDraftBridge;
  reference?: PackageReference;
  appearance?: ReactNode;
@@ -32,7 +35,7 @@ type ChatPageProps = {
  onOpenPetAgent?: (opener: HTMLElement) => void;
 };
 
-export function ChatPage({ state, controller, history, voiceDraft, reference, appearance, onOpenPets, onOpenPetAgent }: ChatPageProps) {
+export function ChatPage({ state, controller, history, learning, characters, voiceDraft, reference, appearance, onOpenPets, onOpenPetAgent }: ChatPageProps) {
  useEffect(() => { void controller?.refreshModels(); }, [controller]);
  const { session } = state;
  const character = state.characters.find(item => item.id === state.selectedId);
@@ -75,7 +78,7 @@ export function ChatPage({ state, controller, history, voiceDraft, reference, ap
  return <section className="chat-page" aria-label="聊天" data-pet-art={petArt(reference)} onKeyDown={event => {
   if (entry && event.key === 'Escape' && !event.defaultPrevented) { event.preventDefault(); backToHistory(); }
  }}>
-  {entry && character && history && <ChatHistoryDetail key={`${character.id}/${entry.session.id}`} entry={entry} name={character.name} reference={reference}
+  {entry && character && history && <ChatHistoryDetail key={`${character.id}/${entry.session.id}`} entry={entry} petID={character.id} learning={learning} characters={characters} name={character.name} reference={reference}
    readPage={before => history.detail({ petID: character.id, id: entry.session.id, before })}
    onBack={backToHistory} pending={session.pending} notice={historyView?.notice} onContinue={controller && continueChat} />}
   <div className="chat-live" hidden={!!entry}>

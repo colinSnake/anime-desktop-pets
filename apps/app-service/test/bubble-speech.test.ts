@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { liveActions } from '../../../packages/contracts/src/live-stage.ts';
+import { liveActions, liveRoleActions } from '../../../packages/contracts/src/live-stage.ts';
 import { stageVoiceDuration } from '../../../packages/contracts/src/live-voice.ts';
 import { BubbleSpeech, type SpeechTask } from '../src/speech/bubble-speech.ts';
 import { readReferenceAudio } from '../src/speech/reference-audio.ts';
@@ -161,7 +161,7 @@ class LocalMLXBackend:
             f.write(str(Path.cwd()) + '\\n')
         return cls()
     async def synthesize(self, cue, path, transcript):
-        assert cue in ${JSON.stringify(['第一句','第二句','取消这句','临时生成的节目回应。',...Object.values(liveActions).map(action => action.line)])} and transcript == 'synthetic-transcript'
+        assert cue in ${JSON.stringify(['第一句','第二句','取消这句','临时生成的节目回应。',...Object.values(liveActions).map(action => action.line),...Object.values(liveRoleActions.dafeiyu).map(action => action.line)])} and transcript == 'synthetic-transcript'
         assert path.read_bytes()[:4] == b'RIFF'
         yield b'\\x00\\x00' * 100
         if cue == '取消这句': await asyncio.sleep(30)
@@ -214,6 +214,9 @@ class RawOutputStream:
   assert.equal(await controller.prepareStageReply('<非法内容>',abort.signal,()=>true),undefined);
   const reply = await controller.prepareStageReply('临时生成的节目回应。',abort.signal,()=>true);
   assert.ok(reply); assert.equal(stageVoiceDuration(reply),5);
+  await assert.rejects(access(join(warmPath,'stage-reply.wav')));
+  const whale = await controller.prepareStageVoiceWithReference({ audio: wav(), transcript: 'synthetic-transcript' }, 'dafeiyu', abort.signal, () => true);
+  assert.ok(whale.ok); assert.deepEqual(Object.values(whale.clips).map(stageVoiceDuration), [5,5,5]);
   await assert.rejects(access(join(warmPath,'stage-reply.wav')));
 
   await assert.rejects(access(join(dir, 'device-opened')));
@@ -614,4 +617,42 @@ test('fixed live synthesis works with saved tone while bubbles are disabled, fen
   complete(); await paused;
   assert.deepEqual(await synthesis,{ok:false,error:'voice-failed'});
   assert.deepEqual(await speech.prepareStageVoice(signal,()=>true),{ok:true,clips:bank});
+});
+
+test('explicit live references never fall back to saved desktop tone and use per-role fixed lines', async t => {
+  const { path } = await fixture(t);
+  const sample = wav(); sample.writeUInt32LE(24000, 24); sample.writeUInt32LE(48000, 28);
+  const spoken: string[] = [];
+  const speech = new BubbleSpeech({ run: async () => assert.fail('stage capture must not play device audio'), close: async () => {}, renderStageReply: async (profile, text) => {
+    assert.equal(profile.transcript, '舞台专属逐字稿'); spoken.push(text); return sample;
+  } }); t.after(() => speech.close());
+  assert.ok((await speech.select(path)).ok); assert.ok((await speech.saveTranscriptDraft('桌面原有逐字稿')).ok);
+  const original = speech.status(), signal = new AbortController().signal;
+  assert.deepEqual(await speech.prepareStageVoiceWithReference(undefined, 'longmei', signal, () => true), { ok: false, error: 'reference-required' });
+  assert.equal(await speech.prepareStageReplyWithReference(undefined, '你好！', signal, () => true), undefined);
+  const reference = { audio: wav(), transcript: '舞台专属逐字稿' };
+  const whale = await speech.prepareStageVoiceWithReference(reference, 'dafeiyu', signal, () => true);
+  assert.ok(whale.ok); assert.deepEqual(Object.keys(whale.clips).sort(), ['01', '18', '20']);
+  assert.deepEqual(spoken, ['嗨，我是鲸鱼妹，欢迎来直播间！', '见到你们，我很开心！', '给大家拍个鲸鱼尾巴～']);
+  spoken.length = 0;
+  assert.ok((await speech.prepareStageVoiceWithReference(reference, 'longmei', signal, () => true)).ok);
+  assert.deepEqual(spoken, [liveActions['01'].line, liveActions['18'].line, liveActions['20'].line]);
+  assert.deepEqual(speech.status(), original, 'stage capture must not replace the desktop reference or draft');
+});
+
+test('explicit stage capture fences late eligibility, serializes and aborts on pause or external cancellation', async t => {
+  let eligible = true, calls = 0, begin!: () => void, complete!: () => void, owned: AbortSignal | undefined;
+  const began = new Promise<void>(resolve => { begin = resolve; }), gate = new Promise<void>(resolve => { complete = resolve; });
+  const speech = new BubbleSpeech({ run: async () => assert.fail(), close: async () => {}, renderStageReply: async (_profile, _text, signal) => {
+    calls++; owned = signal; begin(); await gate; return Buffer.alloc(0);
+  } }); t.after(() => speech.close());
+  const reference = { audio: wav(), transcript: '有界参考稿' }, controller = new AbortController();
+  const rejected = speech.prepareStageVoiceWithReference(reference, 'longmei', controller.signal, () => eligible); eligible = false;
+  assert.deepEqual(await rejected, { ok: false, error: 'voice-failed' }); assert.equal(calls, 0);
+  eligible = true;
+  const pending = speech.prepareStageVoiceWithReference(reference, 'dafeiyu', controller.signal, () => true); await began;
+  assert.deepEqual(await speech.prepareStageVoiceWithReference(reference, 'longmei', controller.signal, () => true), { ok: false, error: 'voice-busy' });
+  const stopping = speech.pause(); assert.ok(owned?.aborted); complete(); await stopping;
+  assert.deepEqual(await pending, { ok: false, error: 'voice-failed' });
+  controller.abort(); assert.deepEqual(await speech.prepareStageVoiceWithReference(reference, 'longmei', controller.signal, () => true), { ok: false, error: 'voice-failed' });
 });

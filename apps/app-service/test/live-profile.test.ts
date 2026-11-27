@@ -5,6 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LiveProfileStore } from '../src/live/profile.ts';
 import { defaultLiveProfile } from '../../../packages/contracts/src/live-stage.ts';
+import { longmei } from "../../../packages/contracts/src/built-in-pets.ts";
+import { LiveRoleBindingStore } from "../src/live/role-bindings.ts";
+
 
 test('stage profile uses the fixed filename for v2 and does not auto-migrate v1', {skip: process.platform === 'win32'}, async () => {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'stage-profile-'));
@@ -83,10 +86,16 @@ test('stage voice route accepts only a fixed authenticated request and returns o
   const token = 'd'.repeat(64);
   let calls = 0;
   const speech = new BubbleSpeech({run:async () => assert.fail('no desktop audio'), close:async()=>{},
-    renderStage: async () => { calls++; return {'01':wav,'18':wav,'20':wav}; }});
+    renderStageReply: async () => { calls++; return wav; }});
   const snapshot = () => ({kind:'diagnostic',status:'idle',detail:''} as const);
-  const workspace = new PetWorkspace({root:join(root,'workspace'), catalog:[]});
-  const app = createService({token,workspace,speech,liveProfile:new LiveProfileStore(join(root,'live')),
+  const workspace = new PetWorkspace({root:join(root,'workspace'), catalog:[{...longmei,name:'龙妹'}]});
+  const added = await workspace.mutate('add',{expectedRevision:0,package:longmei});assert.ok(added.ok);
+  const petID = added.workspace.instances[0]!.id;
+  const bindings = new LiveRoleBindingStore(join(root,'live'));await bindings.write(0,{longmei:petID,dafeiyu:null});
+  const { LiveVoiceProfileStore }=await import('../src/live/voice-profiles.ts');
+  const voices=new LiveVoiceProfileStore(join(root,'live'),{workspace,bindings});
+  const target={role:'longmei',petID,bindingRevision:1} as const;
+  const app = createService({token,workspace,speech,liveRoleBindings:bindings,liveVoices:voices,liveProfile:new LiveProfileStore(join(root,'live')),
     runtime:{snapshot,probe:async () => snapshot(),close:async () => {}}});
   t.after(async () => { try { await app.close(); } finally { await rm(root,{recursive:true,force:true}); } });
   const url = '/v1/live/voice';
@@ -94,17 +103,22 @@ test('stage voice route accepts only a fixed authenticated request and returns o
   assert.equal((await app.inject({method:'POST',url,headers:{host:'127.0.0.1'},payload:{}})).statusCode,401);
   assert.equal((await app.inject({method:'POST',url,headers:{...headers,origin:'http://localhost'},payload:{}})).statusCode,403);
   assert.equal((await app.inject({method:'POST',url:'/v1/live/stage-profile?path=a&role=longmei',headers,payload:{}})).statusCode,400);
-  const post = (payload: object = {}) => app.inject({method:'POST',url,headers,payload});
+  const post = (payload: object = target) => app.inject({method:'POST',url,headers,payload});
   assert.equal((await post({text:'不接受任意台词'})).statusCode,400);
   assert.equal((await post()).statusCode,422); assert.equal(calls,0);
   assert.ok((await speech.select(reference)).ok);
   assert.ok((await speech.saveTranscriptDraft('仅本机合成夹具')).ok);
+  assert.equal((await post()).statusCode,422,'desktop reference must never be reused');
+  assert.equal(calls,0);
+  const choose = await app.inject({method:'POST',url:'/v1/live/voice-profile/select-reference',headers,payload:{...target,expectedRevision:0,path:reference}});
+  assert.equal(choose.statusCode,200,choose.body);
+  assert.ok((await voices.saveTranscript({...target,expectedRevision:1,referenceTranscript:'固定角色独立音色'})).ok);
   const response = await post();
   assert.equal(response.statusCode,200); assert.equal(response.headers['content-type'],'application/octet-stream');
   assert.deepEqual(parseLiveVoice(response.rawPayload),{'01':wav,'18':wav,'20':wav});
   assert.equal(speech.status().state,'disabled');
-  assert.ok((await workspace.mutate('pause',{expectedRevision:0})).ok);
-  assert.equal((await post()).statusCode,409); assert.equal(calls,1);
+  assert.ok((await workspace.mutate('pause',{expectedRevision:1})).ok);
+  assert.equal((await post()).statusCode,409); assert.equal(calls,3);
 });
 
 test('schema v2 profile migrates atomically to v3 while preserving dragon layout', {skip: process.platform === 'win32'}, async t => {

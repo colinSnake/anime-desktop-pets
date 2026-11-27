@@ -2,10 +2,11 @@ import type { FastifyInstance } from 'fastify';
 import { isLiveRoleId, type LiveRoleId } from '../../../../packages/contracts/src/live-stage.ts';
 import { liveRoleForPackage } from '../../../../packages/contracts/src/character-personas.ts';
 import type { PetWorkspace } from '../pet-workspace.ts';
+import type { LiveShareStore } from './sharing.ts';
 import type { LiveRoleBindingStore } from './role-bindings.ts';
 
 const error=(code:'invalid'|'conflict'|'unavailable')=>({ok:false as const,error:code});
-export function registerLiveRoleBindings(app:FastifyInstance,store:LiveRoleBindingStore|undefined,workspace:PetWorkspace|undefined){
+export function registerLiveRoleBindings(app:FastifyInstance,store:LiveRoleBindingStore|undefined,workspace:PetWorkspace|undefined,shares?:LiveShareStore){
   const empty={type:'object',additionalProperties:false} as const;
   app.get('/v1/live/role-bindings',{schema:{querystring:empty}},async()=>{
     if(!store)return error('unavailable');
@@ -15,13 +16,20 @@ export function registerLiveRoleBindings(app:FastifyInstance,store:LiveRoleBindi
     const body=request.body as {expectedRevision:number;role:LiveRoleId;petID:string|null};
     if(!store||!workspace)return reply.code(503).send(error('unavailable'));
     if(!Number.isSafeInteger(body.expectedRevision)||body.expectedRevision<0||!isLiveRoleId(body.role)||!(body.petID===null||/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(body.petID)))return reply.code(400).send(error('invalid'));
-    const commit=async()=>{
+    const publish=async()=>{
       try{
         const current=await store.read(); if(current.revision!==body.expectedRevision) throw new Error('conflict');
+        const previous=current.bindings[body.role];
+        // Revoke before publishing a changed binding, never revive grants on rebind.
+        if(shares&&previous!==body.petID){
+          const snapshot=await shares.read();const grants=snapshot.grants.filter(g=>g.petID!==previous&&g.petID!==body.petID);
+          if(grants.length!==snapshot.grants.length)await shares.write(snapshot.revision,grants);
+        }
         const bindings={...current.bindings,[body.role]:body.petID};
         return await store.write(current.revision,bindings);
       }catch(e){throw e;}
     };
+    const commit=()=>shares?shares.manage(publish):publish();
     try{
       const result=body.petID===null ? await commit() : await workspace.withRegisteredInstance(body.petID,async(id,instance)=>{
         if(id!==body.petID||liveRoleForPackage(instance.package)!==body.role)throw new Error('invalid');

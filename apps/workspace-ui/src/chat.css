@@ -456,3 +456,8 @@ button.chat-microphone[aria-pressed="true"] { color: var(--chat-composer-text); 
 @media (max-width: 530px) {
  .chat-project-nav { max-height: 180px; overflow: auto; margin: 0 0 7px; padding-inline: 2px; }
 }
+
+.chat-learn-turn { align-self: flex-start; }
+.chat-learning { display: grid; gap: .65rem; padding: .85rem; border: 1px solid var(--line); border-radius: 12px; }
+.chat-learning p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-learning button { justify-self: start; }

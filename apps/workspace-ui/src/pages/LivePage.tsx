@@ -1,9 +1,13 @@
+import type { DesktopBridge } from '../../../../packages/contracts/src/index.ts';
+import { LiveVoiceProfile } from './LiveVoiceProfile.tsx';
+import { LiveLearning } from './LiveLearning.tsx';
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { defaultLiveProfile, liveRoleActions, liveScenes, type LiveRoleActionId, type LiveDanmakuState, type LiveError, type LiveProfile, type LiveResult, type LiveRoleId, type LiveScene, type LiveStageBridge, type LiveVoiceState } from '../../../../packages/contracts/src/live-stage.ts';
 import { dafeiyu, longmei } from '../../../../packages/contracts/src/built-in-pets.ts';
 import { ImagePreview } from '../ImagePreview.tsx';
 import { PetNookIcon } from '../PetNookIcon.tsx';
 import { PetRolePicker } from '../PetRolePicker.tsx';
+import { LiveSharing } from './LiveSharing.tsx';
 import { InteractionLayout } from './InteractionLayout.tsx';
 import { danmakuWorking, LiveDanmaku } from './LiveDanmaku.tsx';
 
@@ -29,11 +33,12 @@ const equal = (a: LiveProfile, b: LiveProfile) => a.selected === b.selected && l
 const missing = {ok:false,error:'unavailable'} as const;
 const call = async (op: () => Promise<LiveResult>): Promise<LiveResult> => { try { return await op(); } catch { return missing; } };
 
-export function LivePage({appearance,bridge,paused,instances=[]}:{appearance?:ReactNode;bridge?:LiveStageBridge;paused?:boolean;instances?:Array<{id:string;displayName?:string;package:{id:string;version:string}}>}) {
+export function LivePage({appearance,bridge,paused,characters,instances=[]}:{appearance?:ReactNode;bridge?:LiveStageBridge;paused?:boolean;characters?:DesktopBridge['characters'];instances?:Array<{id:string;displayName?:string;package:{id:string;version:string}}>}) {
   const [preview, setPreview] = useState<{ id: LiveScene; name: string; opener: HTMLButtonElement }>();
   const [role, setRole] = useState<(typeof roles)[number]>(roles[0]);
   const [bindings,setBindings]=useState<{revision:number;bindings:Record<LiveRoleId,string|null>}>({revision:0,bindings:{longmei:null,dafeiyu:null}});
   const [bindingBusy,setBindingBusy]=useState(false);
+  const [voiceConfigBusy,setVoiceConfigBusy]=useState(false);
   const [bindingMessage,setBindingMessage]=useState('');
   const [draft,setDraft] = useState(defaultLiveProfile);
   const [saved,setSaved] = useState<LiveProfile>();
@@ -51,24 +56,26 @@ export function LivePage({appearance,bridge,paused,instances=[]}:{appearance?:Re
   const gate = useRef(false);
   const requestRevision = useRef(0);
   const held = useRef(false);
+  const currentRole = useRef(role.id);
+  currentRole.current = role.id;
   useEffect(() => {
     held.current = true;
     return () => {
       held.current = false;
       requestRevision.current++;
-      if (unsettledDanmaku.current && bridge?.stopDanmaku) void call(() => bridge.stopDanmaku!(role.id));
+      if (unsettledDanmaku.current && bridge?.stopDanmaku) void call(() => bridge.stopDanmaku!(currentRole.current));
       unsettledDanmaku.current = false;
     };
   }, [bridge]);
   function acceptDanmaku(state?: LiveDanmakuState) {
-    unsettledDanmaku.current = danmakuWorking(state);
+    unsettledDanmaku.current = danmakuWorking(state) || state?.phase === 'published';
     setDanmaku(state);
   }
   const trackingDanmaku = danmakuWorking(danmaku);
 
   useEffect(()=>{if(!bridge?.readBindings)return;let mounted=true;void bridge.readBindings().then(result=>{if(!mounted)return;if(result.ok){setBindings({revision:result.revision,bindings:result.bindings});setBindingMessage('');}else setBindingMessage('未能读取角色绑定；请重试。');}).catch(()=>{if(mounted)setBindingMessage('未能读取角色绑定；请重试。');});return()=>{mounted=false;};},[bridge]);
   async function bindRole(roleID:LiveRoleId,petID:string|null){
-    if(!bridge?.writeBinding||bindingBusy)return;setBindingBusy(true);setBindingMessage('');
+    if(!bridge?.writeBinding||bindingBusy||voiceConfigBusy)return;setBindingBusy(true);setBindingMessage('');
     try{const result=await bridge.writeBinding({expectedRevision:bindings.revision,role:roleID,petID});if(!result.ok){setBindingMessage(result.error==='conflict'?'绑定已在其他操作中更新，请重新读取。':'无法确认绑定保存，请重新读取。');return;}
       setBindings({revision:result.revision,bindings:result.bindings});setBindingMessage(petID?'角色绑定已保存。':'角色已解绑。');
       if(role.id===roleID)void run('read',()=>bridge.read(roleID));
@@ -81,11 +88,16 @@ export function LivePage({appearance,bridge,paused,instances=[]}:{appearance?:Re
     void call(() => bridge.read(role.id)).then(result => {
       if (!mounted) return;
       gate.current = false; setBusy(undefined);
-      if (result.ok) { setSaved(result.profile); setDraft(result.profile); setRunning(result.running); setVoice(result.voice); acceptDanmaku(result.danmaku); }
+      if (result.ok) { adoptActiveRole(result); setSaved(result.profile); setDraft(result.profile); setRunning(result.running); setVoice(result.voice); acceptDanmaku(result.danmaku); }
       else { setError(problems[result.error]); setNeedsRead(true); }
     });
     return () => { mounted = false; };
   }, [bridge]);
+
+  function adoptActiveRole(result:Extract<LiveResult,{ok:true}>) {
+    const current = result.running && roles.find(option=>option.id===result.activeRole);
+    if(current && current.id!==currentRole.current){currentRole.current=current.id;setRole(current);}
+  }
 
   async function run(kind: StageOperation, op: () => Promise<LiveResult>, success = ''): Promise<boolean> {
     if (gate.current || !held.current) return false;
@@ -115,7 +127,7 @@ export function LivePage({appearance,bridge,paused,instances=[]}:{appearance?:Re
       if (kind === 'read' || (kind === 'save' && result.error !== 'busy') || result.error === 'unavailable') setNeedsRead(true);
       return false;
     }
-    setRunning(result.running); setVoice(result.voice); acceptDanmaku(result.danmaku); setStartFailed(false);
+    adoptActiveRole(result); setRunning(result.running); setVoice(result.voice); acceptDanmaku(result.danmaku); setStartFailed(false);
     if (!rehearsal && (kind === 'start' || kind === 'stop')) setDanmakuNotice('');
     if (kind === 'switchScene') setSceneNotice(success);
     else setNotice(success);
@@ -154,21 +166,20 @@ export function LivePage({appearance,bridge,paused,instances=[]}:{appearance?:Re
   const scene = liveScenes.find(scene => scene.id === draft.selected)!;
   const dirty = !!saved && !equal(draft, saved);
   const supported = true;
-  const editable = supported && !!bridge && !!saved && !running && !busy && !paused && !needsRead;
+  const editable = supported && !!bridge && !!saved && !running && !busy && !paused && !needsRead && !voiceConfigBusy && !bindingBusy;
   // Keep the same controls and keyboard focus while a scene write holds the operation gate.
   const switching = busy === 'switchScene';
   const actionBusy = !!busy && !switching;
   const active = supported && !!bridge && running && !actionBusy && !paused && !needsRead;
   const voiceHint = !running ? ''
-    : voice === 'reference-required' ? '请在「语音互动」保存参考 WAV 和逐字稿，再重新开启直播台。'
+    : voice === 'reference-required' ? '请停台，在「直播音色」为当前主播实例保存参考 WAV 和逐字稿。'
     : voice === 'voice-busy' ? '本机语音忙，节目暂时静音。等当前语音任务结束后重新开台。'
-    : role.id === 'dafeiyu' ? '鲸鱼妹暂未配置独立节目音色；画面可用，节目保持静音。'
-    : voice === 'voice-failed' ? '龙妹声音准备失败，节目保持静音。请检查本机语音后重新开台。'
+    : voice === 'voice-failed' ? '当前主播音色准备失败，节目保持静音。请检查本机音色后重新开台。'
     : voice === undefined ? '此环境未接入本机语音运行时。'
     : '';
   const canSwitchScene = typeof bridge?.switchScene === 'function';
   const canChooseScene = editable || (active && canSwitchScene);
-  const canChooseRole = !running && !busy && !needsRead && (!bridge || !!saved);
+  const canChooseRole = !voiceConfigBusy && !bindingBusy && !running && !busy && !needsRead && (!bridge || !!saved);
   const reading = busy === 'read' || (!!bridge && !saved && !needsRead);
   const status = !bridge ? '未连接桌面工作区' : reading ? '读取中' : busy === 'start' ? '准备中'
     : busy === 'stop' ? '关闭中' : needsRead ? '状态待确认' : running ? '舞台可用' : paused ? '联动已暂停' : startFailed ? '开启失败' : '舞台未开启';
@@ -190,6 +201,8 @@ export function LivePage({appearance,bridge,paused,instances=[]}:{appearance?:Re
     else if (running) void run('stop', () => bridge.stop(role.id), '已关闭本机舞台。');
     else if (editable && !dirty) void run('start', () => bridge.start(role.id), '本机画面源已开启。');
   }
+  const petID = bindings.bindings[role.id];
+  const learning = danmaku?.phase === 'published' && danmaku.learning?.petID === petID ? danmaku.learning : undefined;
   const toolbar = <div className="live-toolbar-actions">
     <PetRolePicker label="直播桌宠" options={roles} selected={role} reference={role.reference} description={running ? 'live-role-lock' : undefined}
       onChange={canChooseRole ? id => {
@@ -203,7 +216,7 @@ export function LivePage({appearance,bridge,paused,instances=[]}:{appearance?:Re
     {!supported ? <section className="interaction-card live-role-unavailable" aria-labelledby="live-role-unavailable-title"><div className="live-output-icon"><PetNookIcon name="lock" /></div><h2 id="live-role-unavailable-title">{role.name}暂不支持直播</h2></section> : <div className="live-stage-layout">
       <section className="interaction-card live-bindings" aria-label="主播实例绑定">
         <label htmlFor="live-role-instance">{role.name}绑定的桌宠实例</label>
-        <select id="live-role-instance" value={bindings.bindings[role.id] ?? ''} disabled={!bridge?.writeBinding||bindingBusy||running} onChange={event=>void bindRole(role.id,event.currentTarget.value||null)}>
+        <select id="live-role-instance" value={bindings.bindings[role.id] ?? ''} disabled={!bridge?.writeBinding||bindingBusy||voiceConfigBusy||!!busy||running} onChange={event=>void bindRole(role.id,event.currentTarget.value||null)}>
           <option value="">未绑定</option>
           {instances.filter(item=>item.package.id===role.reference.id&&item.package.version===role.reference.version&&(!bindings.bindings[role.id==='longmei'?'dafeiyu':'longmei']||bindings.bindings[role.id==='longmei'?'dafeiyu':'longmei']!==item.id)).map(item=><option key={item.id} value={item.id}>{item.displayName||item.id}</option>)}
         </select>
@@ -234,6 +247,8 @@ export function LivePage({appearance,bridge,paused,instances=[]}:{appearance?:Re
           {paused && <p className="live-hint">桌宠联动已暂停；解除暂停后可手动开启。</p>}
         </div>
       </section>
+      <LiveVoiceProfile key={`${role.id}:${bindings.revision}:${petID}`} target={petID?{role:role.id,petID,bindingRevision:bindings.revision}:undefined} bridge={bridge?.voiceProfile} locked={running||!!busy||!!paused||bindingBusy} onBusy={setVoiceConfigBusy} />
+      <LiveSharing key={`${role.id}:${bindings.revision}:${bindings.bindings[role.id]}`} role={role.id} petID={bindings.bindings[role.id]} bridge={bridge} locked={bindingBusy||!!busy||needsRead} />
       <section className="interaction-card live-scenes-card" aria-labelledby="live-scenes-title">
         <div className="live-section-heading"><span className="live-index" aria-hidden="true">01</span><h2 id="live-scenes-title">布景与摆位</h2></div>
         {running && !canSwitchScene && <p className="live-hint">此版本不支持开台换景。</p>}
@@ -277,9 +292,11 @@ export function LivePage({appearance,bridge,paused,instances=[]}:{appearance?:Re
           </button>;
         })}</div>
         <LiveDanmaku state={danmaku} notice={danmakuNotice} locked={!!busy}
-          available={active && role.id === 'longmei' && voice === 'ready' && !!bridge?.submitDanmaku}
-          unavailableHint={running && role.id === 'dafeiyu' ? '鲸鱼妹尚未配置独立节目音色，弹幕演练暂不可用。' : running && !bridge?.submitDanmaku ? '此工作区不支持弹幕演练。' : ''}
+          available={active && voice === 'ready' && !!bridge?.submitDanmaku}
+          unavailableHint={running && !bridge?.submitDanmaku ? '此工作区不支持弹幕演练。' : running && voice !== 'ready' ? '当前角色声轨就绪后才可发送演练。' : ''}
           onSend={async text => bridge?.submitDanmaku ? run('submitDanmaku', () => bridge.submitDanmaku!(text,role.id)) : false} />
+        {running && !paused && learning && bridge?.learning && <LiveLearning key={learning.ticket} bridge={bridge.learning} handle={learning} role={role.id} locked={!active} characters={characters}
+          onUnknown={()=>{if(held.current&&!document.hidden)setDanmakuNotice('未能确认候选是否保存。请到「聊天 → 桌宠 Agent → 记忆」核对，不会自动重试。');}} />}
       </section>
     </div>}
     {supported && preview && <ImagePreview src={artwork(preview.id, 'preview')} alt={preview.name} downloadName={`${preview.name}.webp`}

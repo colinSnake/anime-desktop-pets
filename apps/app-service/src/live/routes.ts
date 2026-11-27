@@ -1,4 +1,6 @@
 import { packLiveVoice } from '../../../../packages/contracts/src/live-voice.ts';
+import { isLiveVoiceProfileTarget } from '../../../../packages/contracts/src/live-voice-profile.ts';
+import type { LiveVoiceProfileStore } from './voice-profiles.ts';
 import type { BubbleSpeech } from '../speech/bubble-speech.ts';
 import type { FastifyInstance } from 'fastify';
 import { isLiveProfile,isLiveRoleId,type LiveRoleId,type LiveProfile,type LiveProfileResult } from '../../../../packages/contracts/src/live-stage.ts';
@@ -19,4 +21,24 @@ export function registerLiveProfile(app:FastifyInstance,store:LiveProfileStore|u
  app.post('/v1/live/stage-profile',{schema:{querystring},bodyLimit:2048},async(request,reply):Promise<LiveProfileResult>=>{const role=params(request);if(!role||!isLiveProfile(request.body)){reply.code(400);return unavailable;}if(!await available(role))return {ok:false,error:'busy'};const r=await access(role,async()=>{try{return {ok:true,profile:await store!.write(request.body as LiveProfile,role)};}catch{return {ok:false,error:'storage'};}});if(!r.ok)reply.code(r.error==='unbound'||r.error==='role-mismatch'?409:503);return r;});
 }
 
-export function registerLiveVoice(app:FastifyInstance,speech:BubbleSpeech|undefined,allowed:()=>boolean){const empty={type:'object',additionalProperties:false} as const;app.post('/v1/live/voice',{bodyLimit:64,schema:{querystring:empty,body:empty}},async(_request,reply)=>{reply.header('cache-control','no-store');if(!speech)return reply.code(503).send();const controller=new AbortController();const cancel=()=>controller.abort();reply.raw.once('close',cancel);try{const result=await speech.prepareStageVoice(controller.signal,allowed);if(!result.ok)return reply.code(result.error==='voice-busy'?409:result.error==='reference-required'?422:503).send();return reply.type('application/octet-stream').send(packLiveVoice(result.clips));}catch{return reply.code(503).send();}finally{reply.raw.removeListener('close',cancel);}});}
+export function registerLiveVoice(app: FastifyInstance, speech: BubbleSpeech | undefined, allowed: () => boolean, voices?: LiveVoiceProfileStore) {
+  const querystring = {type:'object',additionalProperties:false} as const;
+  app.post('/v1/live/voice',{bodyLimit:512,schema:{querystring}},async (request,reply) => {
+    reply.header('cache-control','no-store');
+    if (!isLiveVoiceProfileTarget(request.body)) return reply.code(400).send();
+    if (!speech || !voices) return reply.code(503).send();
+    if (!allowed()) return reply.code(409).send();
+    const controller = new AbortController();
+    const cancel = () => controller.abort();
+    reply.raw.once('close',cancel);
+    try {
+      const profile=await voices.readForStage(request.body,controller.signal);
+      if(!profile.ok)return reply.code(503).send();
+      if(!profile.profile.ready)return reply.code(422).send();
+      const result = await voices.prepareStageVoice({...request.body,expectedRevision:profile.profile.revision},speech,controller.signal,allowed);
+      if (!result.ok) return reply.code(result.error === 'voice-busy' ? 409 : result.error === 'reference-required' ? 422 : 503).send();
+      return reply.header('x-adpets-live-voice-revision',String(profile.profile.revision)).type('application/octet-stream').send(packLiveVoice(result.clips));
+    } catch { return reply.code(503).send(); }
+    finally { reply.raw.removeListener('close',cancel); }
+  });
+}

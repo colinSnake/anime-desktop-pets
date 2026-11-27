@@ -65,11 +65,11 @@ export class CharacterRepository {
     return state;
   }
 
-  async apply(petID: unknown, expectedRevision: unknown, input: unknown): Promise<Publication> {
+  async apply(petID: unknown, expectedRevision: unknown, input: unknown, beforePublish?: () => void): Promise<Publication> {
     if (!petId(petID) || !revision(expectedRevision) || !isCommand(input)) throw invalid();
     if (!this.acceptingWrites) throw storage();
     const command = structuredClone(input);
-    const op = this.queue.then(() => this.write(petID, expectedRevision, command));
+    const op = this.queue.then(() => this.write(petID, expectedRevision, command, beforePublish));
     this.queue = op.catch(() => {});
     return op;
   }
@@ -102,7 +102,7 @@ export class CharacterRepository {
     return attempt;
   }
 
-  private async write(petID: string, expected: number, command: Command): Promise<Publication> {
+  private async write(petID: string, expected: number, command: Command, beforePublish?: () => void): Promise<Publication> {
     const name = `${petID}.json`, lockName = `.${petID}.lock`, temporary = `.character-${randomUUID()}.tmp`;
     let lock: FileHandle | undefined, tmp: FileHandle | undefined, tmpInfo: Stats | undefined;
     let published = false;
@@ -131,6 +131,8 @@ export class CharacterRepository {
       const prepared = await this.directory.read(temporary, CHARACTER_LIMIT);
       if (!prepared || !sameFile(prepared.info, tmpInfo) || !prepared.bytes.equals(bytes)) throw storage();
       if (!unchanged(source, (await this.load(petID)).source)) throw new CharacterError('character_conflict');
+      // Trusted short-lived operations may be revoked while queued or staging.
+      beforePublish?.();
       let durability: Publication['durability'] = 'confirmed';
       try { await (this.options.io?.rename ?? rename)(this.directory.path(temporary), this.directory.path(name)); }
       catch {

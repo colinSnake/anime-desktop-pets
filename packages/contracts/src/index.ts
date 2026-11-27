@@ -31,6 +31,7 @@ export interface DesktopBridge {
   openWorkspaceData?(): Promise<WorkspaceFolderResult>;
   legacyCharacterHandoff?: import("./legacy-character-snapshot.ts").LegacyHandoffBridge;
   characters?: import("./characters.ts").CharactersBridge;
+  characterLearning?: import("./character-learning.ts").CharacterLearningBridge;
   liveStage?: import("./live-stage.ts").LiveStageBridge;
   speech?: import("./speech.ts").SpeechBridge;
   voiceDraft?: import("./voice-draft.ts").VoiceDraftBridge;

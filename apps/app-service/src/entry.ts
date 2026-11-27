@@ -1,3 +1,4 @@
+import { LiveVoiceProfileStore } from './live/voice-profiles.ts';
 import { LiveProfileStore } from './live/profile.ts';
 import { LiveRoleBindingStore } from './live/role-bindings.ts';
 import { LiveShareStore } from './live/sharing.ts';
@@ -172,6 +173,9 @@ function message(value: unknown) {
     const models = process.platform === "darwin" && typeof input.modelsRoot === "string"
       ? new ModelManagement(input.modelsRoot, keychain) : undefined;
     const agentState = models && workspace && typeof businessRoot === 'string' ? new AgentStateStore(businessRoot) : undefined;
+    const liveRoot = typeof businessRoot === 'string' ? join(businessRoot,'live') : undefined;
+    const liveRoleBindings = workspace && liveRoot ? new LiveRoleBindingStore(liveRoot) : undefined;
+    const liveShares = workspace && liveRoot ? new LiveShareStore(liveRoot) : undefined;
     service = createService({
       token,
       models,
@@ -179,8 +183,9 @@ function message(value: unknown) {
       chatHistory: typeof businessRoot === 'string' ? new ChatHistory(businessRoot) : undefined,
       agentState,
       liveProfile: workspace && typeof businessRoot === 'string' ? new LiveProfileStore(join(businessRoot, 'live')) : undefined,
-      liveRoleBindings: workspace && typeof businessRoot === 'string' ? new LiveRoleBindingStore(join(businessRoot, 'live')) : undefined,
-      liveShares: workspace && typeof businessRoot === 'string' ? new LiveShareStore(join(businessRoot, 'live')) : undefined,
+      liveRoleBindings,
+      liveShares,
+      liveVoices: workspace && liveRoot && liveRoleBindings && speech ? new LiveVoiceProfileStore(liveRoot,{workspace,bindings:liveRoleBindings,shares:liveShares}) : undefined,
       chatRuntime: models && createPiTextRuntime(),
       speech,
       characters: process.platform === "darwin" && workspaceOptions ? new CharacterRepository(join(workspaceOptions.root, "characters")) : undefined,

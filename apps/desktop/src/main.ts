@@ -1,5 +1,10 @@
-import { isLiveBindingInput, liveChannel, liveMethods, validLiveArgs } from '../../../packages/contracts/src/live-stage.ts';
+import { liveVoiceProfileChannel, liveVoiceProfileMethods, validVoiceProfileInput } from './live-voice-profile-transport.ts';
+import { characterLearningIPC } from '../../../packages/contracts/src/character-learning-ipc.ts';
+import { isCharacterLearningChatSelection, isCharacterLearningGenerateInput, isCharacterLearningInput, type CharacterLearningInput } from '../../../packages/contracts/src/character-learning.ts';
+import { isLiveSharingInput } from '../../../packages/contracts/src/live-sharing.ts';
+import { isLiveRoleId, isLiveBindingInput, liveChannel, liveMethods, validLiveArgs } from '../../../packages/contracts/src/live-stage.ts';
 import { LiveStageController } from './live-stage/controller.ts';
+import { CharacterLearningRequests } from './character-learning-transport.ts';
 import { hasRequiredStageActions, liveStageMediaDirectory, loadStageAssets, stageArtworkName } from './live-stage/assets.ts';
 import { openStageOutput } from './live-stage/output.ts';
 import { LiveStagePreview } from './live-stage/preview.ts';
@@ -113,7 +118,10 @@ let stopWorkspaceDisplayWatch: (() => void) | undefined;
 let service: ServiceProcess | undefined;
 let liveStage: LiveStageController | undefined;
 let livePausing = 0;
-async function pauseLiveStage() { await liveStage?.stop(); }
+let liveConfiguration: AbortController | undefined;
+function cancelLiveConfiguration() { liveConfiguration?.abort(); }
+let cancelChatLearning: (()=>void) | undefined;
+async function pauseLiveStage() { cancelLiveConfiguration(); await liveStage?.stop(); }
 let covers: PetCoverProvider | undefined;
 let models: ModelIPC | undefined;
 let chat: ChatIPC | undefined;
@@ -391,7 +399,7 @@ async function start() {
     }
     chat = new ChatIPC(service);
     const tasks = taskIPC = new AgentTaskIPC(service.agentTask.bind(service));
-    const cancelWorkspaceRequests = () => { liveStage?.cancelDanmaku(); void stopSpeechPreview(); microphone?.revoke(); models?.cancel(); chat?.cancel(); void voiceDraft?.cancel(); };
+    const cancelWorkspaceRequests = () => { cancelLiveConfiguration(); cancelChatLearning?.(); liveStage?.cancelDanmaku(); void stopSpeechPreview(); microphone?.revoke(); models?.cancel(); chat?.cancel(); void voiceDraft?.cancel(); };
     workspace.on('hide', cancelWorkspaceRequests);
     workspace.on('minimize', cancelWorkspaceRequests);
     workspace.webContents.on('did-start-navigation', cancelWorkspaceRequests);
@@ -572,9 +580,14 @@ async function start() {
   }
   if (process.platform === 'darwin') {
     const preview = new LiveStagePreview();
+    const learningRequests = new CharacterLearningRequests(input => service!.characterLearning('cancel',input));
     liveStage = new LiveStageController({
       profile: (input,role) => service!.liveProfile(input,role),
-      ...(speech && data.kind === 'adpets' && {voice: signal => service!.liveVoice(signal), danmaku: (role,text,scene,signal,synthesizing) => service!.liveDanmaku(role,text,scene,signal,synthesizing)}),
+      ...(speech && data.kind === 'adpets' && {
+        voice:(signal,role)=>service!.liveVoice(signal,role),
+        danmaku:(role,text,scene,signal,synthesizing,voice)=>service!.liveDanmaku(role,text,scene,signal,synthesizing,voice),
+        cancelLearning:input=>learningRequests.cancel(input),
+      }),
       allowed: async () => {
         if (exiting || livePausing) return false;
         const result = await service!.petRequest('list');
@@ -595,11 +608,87 @@ async function start() {
         mainFrame:workspace.webContents.mainFrame, url:event.senderFrame?.url ?? '', args,
       });
       if (!eligible() || !validLiveArgs(method,args)) throw new Error('forbidden');
+      if (method === 'start' && (liveConfiguration || livePausing)) return {ok:false,error:'busy'};
       return liveStage!.run(method,args[0],eligible,args.at(-1));
     });
     const liveBindingCaller=(event:Electron.IpcMainInvokeEvent,args:unknown[])=>!exiting&&!!workspace&&!workspace.isDestroyed()&&isWorkspaceVisible()&&trustedFrame({senderId:event.sender.id,ownerId:workspace.webContents.id,senderFrame:event.senderFrame,mainFrame:workspace.webContents.mainFrame,url:event.senderFrame?.url??'',args});
+    ipcMain.handle('pet:live-shares-read',(event,...args:unknown[])=>{if(args.length!==1||!liveBindingCaller(event,args)||!isLiveRoleId(args[0]))throw new Error('forbidden');return service!.liveSharing(args[0]);});
+    ipcMain.handle('pet:live-shares-write',(event,...args:unknown[])=>{if(args.length!==1||!liveBindingCaller(event,args)||!isLiveSharingInput(args[0]))throw new Error('forbidden');return service!.liveSharing(args[0].role,args[0]);});
     ipcMain.handle('pet:live-role-bindings-read',(event,...args:unknown[])=>{if(args.length||!liveBindingCaller(event,args))throw new Error('forbidden');return service!.liveRoleBindings();});
-    ipcMain.handle('pet:live-role-bindings-write',(event,...args:unknown[])=>{if(args.length!==1||!liveBindingCaller(event,args)||!isLiveBindingInput(args[0]))throw new Error('forbidden');return service!.liveRoleBindings(args[0]);});
+    ipcMain.handle('pet:live-role-bindings-write',async (event,...args:unknown[])=>{
+      if(args.length!==1||!liveBindingCaller(event,args)||!isLiveBindingInput(args[0]))throw new Error('forbidden');
+      if(liveConfiguration||livePausing||!liveStage?.canConfigureVoice)return {ok:false,error:'unavailable'};
+      const owned=new AbortController();liveConfiguration=owned;
+      try{return await service!.liveRoleBindings(args[0]);}
+      finally{if(liveConfiguration===owned)liveConfiguration=undefined;}
+    });
+    for(const method of liveVoiceProfileMethods)ipcMain.handle(liveVoiceProfileChannel(method),async(event,...args:unknown[])=>{
+      const input=args[0];
+      if(args.length!==1||!liveBindingCaller(event,args)||!validVoiceProfileInput(method,input))throw new Error('forbidden');
+      const unavailable={ok:false,error:'unavailable'} as const;
+      const cancelled={ok:false,error:'cancelled'} as const;
+      const owner=workspace;
+      if(!owner||!speech||data.kind!=='adpets')return unavailable;
+      if(method==='read')return service!.liveVoiceProfile(method,input);
+      if(liveConfiguration||livePausing||!liveStage?.canConfigureVoice||!owner.isFocused())return unavailable;
+      const owned=new AbortController();liveConfiguration=owned;
+      const current=()=>!owned.signal.aborted&&!livePausing&&workspace===owner&&liveBindingCaller(event,args)&&liveStage?.canConfigureVoice===true;
+      try {
+        const linkage=await service!.petRequest('list');
+        if(!linkage.ok||linkage.workspace.linkage!=='active'||!current())return unavailable;
+        if(method!=='select-reference')return await service!.liveVoiceProfile(method,input,undefined,owned.signal);
+        const selection=await dialog.showOpenDialog(owner,{title:input.role==='longmei'?'为龙妹选择独立直播音色':'为鲸鱼妹选择独立直播音色',properties:['openFile','noResolveAliases','dontAddToRecent'],filters:[{name:'PCM WAV 音频',extensions:['wav']}]});
+        if(selection.canceled||!current())return cancelled;
+        const path=selection.filePaths[0];
+        if(selection.filePaths.length!==1||!path)return {ok:false,error:'invalid'};
+        return await service!.liveVoiceProfile(method,input,path,owned.signal);
+      }catch{return unavailable;}finally{if(liveConfiguration===owned)liveConfiguration=undefined;}
+    });
+    let chatSelection: AbortController | undefined;
+    let chatLearning: (CharacterLearningInput & {expiresAt:number;timer:ReturnType<typeof setTimeout>}) | undefined;
+    const isChatLearning=(input:CharacterLearningInput)=>!!chatLearning&&chatLearning.petID===input.petID&&chatLearning.ticket===input.ticket&&chatLearning.expiresAt>Date.now();
+    const dropChatLearning=()=>{
+      const current=chatLearning;chatLearning=undefined;
+      if(!current)return;
+      clearTimeout(current.timer);
+      return learningRequests.cancel({petID:current.petID,ticket:current.ticket});
+    };
+    cancelChatLearning=()=>{chatSelection?.abort();void dropChatLearning();};
+    ipcMain.handle(characterLearningIPC.selectChatTurn,async(event,...args:unknown[])=>{
+      const input=args[0];
+      if(args.length!==1||!liveBindingCaller(event,args)||!isCharacterLearningChatSelection(input))throw new Error('forbidden');
+      const unavailable={ok:false,error:'unavailable'} as const;
+      if(data.kind!=='adpets'||chatSelection)return unavailable;
+      void dropChatLearning();
+      const owned=new AbortController();chatSelection=owned;
+      try{
+        const result=await service!.characterLearning('selectChatTurn',input,owned.signal);
+        if(!result.ok)return result;
+        const {petID,ticket,expiresAt,source}=result.preview;
+        if(owned.signal.aborted||!liveBindingCaller(event,args)||source!=='chat'||petID!==input.petID||expiresAt<=Date.now()||expiresAt>Date.now()+65000){void service!.characterLearning('cancel',{petID,ticket});return unavailable;}
+        const timer=setTimeout(dropChatLearning,Math.max(0,expiresAt-Date.now()));timer.unref();
+        chatLearning={petID,ticket,expiresAt,timer};return result;
+      }finally{if(chatSelection===owned)chatSelection=undefined;}
+    });
+    for(const method of ['preview','generate','cancel'] as const)ipcMain.handle(characterLearningIPC[method],async(event,...args:unknown[])=>{
+      const input=args[0];
+      if(args.length!==1||!liveBindingCaller(event,args))throw new Error('forbidden');
+      const unavailable={ok:false,error:'unavailable'} as const;
+      const owned=(request:CharacterLearningInput)=>isChatLearning(request)||liveStage?.ownsLearning(request)===true;
+      if(method==='generate'){
+        if(!isCharacterLearningGenerateInput(input))throw new Error('forbidden');
+        if(!owned(input))return unavailable;
+        const result=await learningRequests.generate(input,signal=>service!.characterLearning(method,input,signal));
+        return liveBindingCaller(event,args)&&owned(input)?result:{ok:false,error:'write-outcome-unknown'};
+      }
+      if(!isCharacterLearningInput(input))throw new Error('forbidden');
+      if(!owned(input))return unavailable;
+      if(method==='cancel') {
+        return (await (isChatLearning(input) ? dropChatLearning() : liveStage?.cancelLearning(input))) ?? unavailable;
+      }
+      const result=await service!.characterLearning(method,input);
+      return liveBindingCaller(event,args)&&owned(input)?result:unavailable;
+    });
   }
   const workspaceData = new WorkspaceDataFolder(appData, path => shell.openPath(path), data.kind === 'adpets' ? data.root : undefined);
   const dataCaller = (event: Electron.IpcMainInvokeEvent, args: unknown[]) => isWorkspaceVisible() && !!workspace && trustedCaller({
@@ -657,6 +746,12 @@ async function start() {
         url: event.senderFrame?.url ?? "", args,
       }) || !validPetArgs(method, args)) throw new Error("forbidden");
       if (method === "pause" || method === "delete") { void stopSpeechPreview(); }
+      if (method === 'delete' && liveStage && (!liveStage.canConfigureVoice || liveConfiguration)) {
+        // Do not retain published audio or learning for an instance that may be removed.
+        livePausing++;
+        try { await pauseLiveStage(); return await service!.petRequest(method,args[0]); }
+        finally { livePausing--; void workspaceStatus?.refresh(); }
+      }
       // Reopening the service gate must not admit an offer issued before pause.
       if (method === "resume" && !await stopSpeechPreview()) return { ok: false, error: 'apply-failed' };
       const result = await (async () => {

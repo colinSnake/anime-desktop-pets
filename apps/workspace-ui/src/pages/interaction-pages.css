@@ -322,3 +322,12 @@ textarea.interaction-field { display: block; min-height: 67px; resize: vertical;
 .live-bindings select { min-width: 0; min-height: 36px; border: 1px solid var(--line); border-radius: 9px; padding: 6px 10px; color: var(--text); background: var(--surface); font: inherit; }
 .live-bindings p { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 12px; }
 @media (max-width: 640px) { .live-bindings { grid-template-columns: 1fr; } }
+
+.live-sharing { display: grid; gap: 12px; padding: 14px; }
+.live-sharing details { min-width: 0; }
+.live-sharing summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.live-sharing details[open] > .module-copy { margin-top: 8px; }
+
+.live-learning { margin-top: .8rem; }
+.live-learning .module-record-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.live-sharing textarea { width: 100%; resize: vertical; }

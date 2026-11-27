@@ -24,7 +24,7 @@ test('live authorization is independent from chatShare and context rechecks curr
  const headers={host:'127.0.0.1',authorization:`Bearer ${token}`};const post=(url:string,payload:Record<string,unknown>)=>app.inject({method:'POST',url,headers,payload});
  assert.equal((await post('/v1/live/role-bindings',{expectedRevision:0,role:'longmei',petID:id})).statusCode,200);
  const hidden=await buildLivePersonaContext({workspace,characters,bindings,shares,role:'longmei',scene:'desk-room',question:'你好'});assert.doesNotMatch(hidden.system,/合成身份/);
- assert.equal((await post('/v1/live/shares',{expectedRevision:0,role:'longmei',records:[{kind:'identity',recordID:'identity',recordRevision:1}]})).statusCode,200);
+ assert.equal((await post('/v1/live/shares',{expectedRevision:0,role:'longmei',petID:id,bindingRevision:1,records:[{kind:'identity',recordID:'identity',recordRevision:1}]})).statusCode,200);
  const visible=await buildLivePersonaContext({workspace,characters,bindings,shares,role:'longmei',scene:'desk-room',question:'你好'});assert.match(visible.system,/合成身份/);assert.doesNotMatch(visible.system,/密码/);
  await characters.apply(id,1,{type:'saveIdentity',value:{name:'龙妹',role:'改过的身份',background:'背景',personality:'性格',values:'价值',motivations:'愿望',relationship:'关系',speakingStyle:'表达',knowledgeScope:'范围',boundaries:'边界'}});
  const stale=await buildLivePersonaContext({workspace,characters,bindings,shares,role:'longmei',scene:'desk-room',question:'你好'});assert.doesNotMatch(stale.system,/改过的身份/);

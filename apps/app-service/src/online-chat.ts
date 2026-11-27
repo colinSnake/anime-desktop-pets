@@ -1,3 +1,4 @@
+import type { CharacterLearning } from './characters/learning.ts';
 import type { AgentStateStore } from './agent/agent-state.ts';
 import { ChatMaterialGrants } from './agent/chat-material-grants.ts';
 import { runAgentTask } from './agent/task-runtime.ts';
@@ -170,7 +171,7 @@ export async function sendOnlineChat(models: ModelManagement, workspace: PetWork
   } catch (error) { return failure(error); }
 }
 
-export function registerOnlineChat(app: FastifyInstance, models?: ModelManagement, workspace?: PetWorkspace, characters?: CharacterRepository, runtime?: TextChatRuntime, store?: ChatHistory, agentState?: AgentStateStore) {
+export function registerOnlineChat(app: FastifyInstance, models?: ModelManagement, workspace?: PetWorkspace, characters?: CharacterRepository, runtime?: TextChatRuntime, store?: ChatHistory, agentState?: AgentStateStore, learning?: CharacterLearning) {
   if (!models || !workspace || !characters) return;
   const turns = runtime ? new TextChatTurns(runtime, agentState) : undefined;
   const shutdown = new AbortController();
@@ -228,7 +229,7 @@ export function registerOnlineChat(app: FastifyInstance, models?: ModelManagemen
         const result = await workspace.withRegisteredInstance(input.petID, async id => {
           if (method === 'projects') return { ok: true, projects: await store.listProjects(id) };
           if (method === 'createProject' && isHistoryInput('createProject', input)) return { ok: true, project: await store.createProject(id, input.project) };
-          if (method === 'clear') { await store.clear(id); return { ok: true }; }
+          if (method === 'clear') { learning?.cancelChat(id); await store.clear(id); return { ok: true }; }
           if (method === 'detail' && isHistoryInput('detail', input)) {
             const detail = await store.detail(id, input.id, input.before);
             return detail && { ok: true, detail };

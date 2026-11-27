@@ -21,7 +21,7 @@ test('identity page has editable main fields, detailed settings, version history
 
 test('memory keeps personal and knowledge drafting separate from persisted review and import', async () => {
   const html = await view('memory');
-  for (const text of ['个人记忆', '角色知识', '待确认', '已确认', '来源', '引用或位置', '版本或日期', '有效期', '在线聊天授权需逐条开启']) assert.ok(html.includes(text), text);
+  for (const text of ['个人记忆', '角色知识', '待确认', '已确认', '来源', '引用或位置', '版本或日期', '有效期', '聊天和直播授权需分别开启']) assert.ok(html.includes(text), text);
   assert.match(html, /role="tab"[^>]*aria-selected="true"[^>]*>个人记忆/);
   assert.equal([...html.matchAll(/disabled=""[^>]*>加入待确认<\/button>/g)].length, 2);
   disabledButton(html, '选择文本文件');
@@ -178,7 +178,7 @@ test('live rehearsal stays composer-only and keeps processing and failure feedba
   for (const [state, feedback] of [
     [{ phase: 'generating' }, '主播正在读弹幕、组织回复。'],
     [{ phase: 'synthesizing' }, '正在用本机音色生成节目语音。'],
-    [{ phase: 'published', text: '合成回复' }, ''],
+    [{ phase: 'published' }, ''],
     [{ phase: 'failed', error: 'model-failed' }, '没收到可播的回复'],
     [{ phase: 'stopped' }, ''],
   ] as const) {
@@ -242,4 +242,16 @@ test('connected identity uses the selected new instance with a read-only loading
   assert.match(html, /readonly=""/i);
   assert.doesNotMatch(html, /未选实例|界面预览/);
   disabledButton(html, '保存身份');
+});
+
+test('live sharing stays opt-in and renders no private records or requests before opening management', async () => {
+  const { LiveSharing } = await import('../src/pages/LiveSharing.tsx');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  let calls=0;const unavailable=async()=>{calls++;return {ok:false,error:'unavailable'} as const;};
+  const bridge={readShares:unavailable,writeShares:unavailable} as never;
+  const html=renderToStaticMarkup(createElement(LiveSharing,{role:'longmei',petID:'pet-synthetic',bridge,locked:false}));
+  assert.match(html,/直播资料授权/);assert.match(html,/aria-expanded="false"/);assert.match(html,/与在线聊天授权独立/);
+  assert.doesNotMatch(html,/确认直播授权|当前版本正文/);assert.equal(calls,0);
+  const offline=renderToStaticMarkup(createElement(LiveSharing,{role:'dafeiyu',petID:null,locked:false}));
+  assert.match(offline,/<button[^>]*disabled=""[^>]*>管理授权/);
 });

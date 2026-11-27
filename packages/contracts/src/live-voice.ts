@@ -1,5 +1,10 @@
-import { liveActionIds, liveVoiceMaxMs, type LiveAction } from './live-stage.ts';
+import { liveActionIds, liveRoleActions, liveVoiceMaxMs, type LiveAction, type LiveRoleId } from './live-stage.ts';
 
+/** Three stable wire slots; the host maps these to the selected role's actions. */
+export const liveVoiceLines: Readonly<Record<LiveRoleId, Readonly<Record<LiveAction, string>>>> = {
+  longmei: { '01': liveRoleActions.longmei['01'].line, '18': liveRoleActions.longmei['18'].line, '20': liveRoleActions.longmei['20'].line },
+  dafeiyu: { '01': liveRoleActions.dafeiyu['companion-wave'].line, '18': liveRoleActions.dafeiyu['companion-jump'].line, '20': liveRoleActions.dafeiyu['companion-49c0d89c0992'].line },
+};
 const rate = 24000;
 export const liveVoiceClipLimit = 44 + rate * 2 * liveVoiceMaxMs / 1000;
 export const liveVoiceWireLimit = (4 + liveVoiceClipLimit) * liveActionIds.length;

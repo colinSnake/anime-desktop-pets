@@ -1,3 +1,4 @@
+import { characterLearningIPC } from '../../../packages/contracts/src/character-learning-ipc.ts';
 import { liveChannel } from '../../../packages/contracts/src/live-stage.ts';
 import { contextBridge, ipcRenderer } from "electron";
 import { microphoneIPC, voiceDraftIPC } from '../../../packages/contracts/src/voice-draft.ts';
@@ -19,6 +20,12 @@ const noMicGesture = Promise.resolve({ ok: false, error: 'cancelled' } as const)
 if (microphone) ipcRenderer.on(microphoneIPC.revoked, (_event, id) => microphone.revoked(id));
 
 const bridge: DesktopBridge = Object.freeze({
+  ...(process.platform === 'darwin' ? { characterLearning: Object.freeze({
+    selectChatTurn: input => ipcRenderer.invoke(characterLearningIPC.selectChatTurn,input),
+    preview: input => ipcRenderer.invoke(characterLearningIPC.preview,input),
+    generate: input => ipcRenderer.invoke(characterLearningIPC.generate,input),
+    cancel: input => ipcRenderer.invoke(characterLearningIPC.cancel,input),
+  } satisfies NonNullable<DesktopBridge['characterLearning']>) } : {}),
   ...(process.platform === 'darwin' ? {
     legacyCharacterHandoff: (input: Parameters<NonNullable<DesktopBridge['legacyCharacterHandoff']>>[0]) => ipcRenderer.invoke('pet:legacy-character-handoff', input),
   } : {}),
@@ -58,6 +65,19 @@ const bridge: DesktopBridge = Object.freeze({
     trigger: (action,role) => ipcRenderer.invoke(liveChannel('trigger'), action,role),
     submitDanmaku: (text,role) => ipcRenderer.invoke(liveChannel('submitDanmaku'),text,role),
     stopDanmaku: role => ipcRenderer.invoke(liveChannel('stopDanmaku'),role),
+    voiceProfile: Object.freeze({
+      read: input => ipcRenderer.invoke('pet:live-voice-profile-read',input),
+      selectReference: input => ipcRenderer.invoke('pet:live-voice-profile-select-reference',input),
+      saveTranscript: input => ipcRenderer.invoke('pet:live-voice-profile-transcript',input),
+      clearReference: input => ipcRenderer.invoke('pet:live-voice-profile-clear-reference',input),
+    }),
+    learning: Object.freeze({
+      preview: input => ipcRenderer.invoke(characterLearningIPC.preview,input),
+      generate: input => ipcRenderer.invoke(characterLearningIPC.generate,input),
+      cancel: input => ipcRenderer.invoke(characterLearningIPC.cancel,input),
+    }),
+    readShares: role => ipcRenderer.invoke('pet:live-shares-read',role),
+    writeShares: input => ipcRenderer.invoke('pet:live-shares-write',input),
     readBindings: () => ipcRenderer.invoke('pet:live-role-bindings-read'),
     writeBinding: input => ipcRenderer.invoke('pet:live-role-bindings-write',input),
   } satisfies NonNullable<DesktopBridge['liveStage']>) } : {}),

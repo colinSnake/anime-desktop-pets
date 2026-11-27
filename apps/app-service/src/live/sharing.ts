@@ -13,10 +13,12 @@ function validGrant(value:unknown):value is LiveShareGrant{
 function validGrants(value:unknown):value is LiveShareGrant[]{return Array.isArray(value)&&value.length<=96&&value.every(validGrant)&&new Set(value.map(g=>`${g.petID}:${g.kind}:${g.recordID}`)).size===value.length;}
 function parse(bytes:Buffer):LiveShareSnapshot{const v:unknown=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));if(!v||typeof v!=='object'||Array.isArray(v))throw invalid();const r=v as Record<string,unknown>;if(Object.keys(r).length!==3||r.schemaVersion!==1||!revision(r.revision)||!validGrants(r.grants))throw invalid();return {revision:r.revision,grants:structuredClone(r.grants)};}
 export class LiveShareStore{
- private readonly directory:PrivateDirectory;private tail:Promise<unknown>=Promise.resolve();private closing=false;
+ private readonly directory:PrivateDirectory;private tail:Promise<unknown>=Promise.resolve();private closing=false;private managementTail:Promise<unknown>=Promise.resolve();
  constructor(root:string){this.directory=new PrivateDirectory(root);}
  private run<T>(fn:()=>Promise<T>):Promise<T>{if(this.closing)return Promise.reject(invalid());const p=this.tail.then(fn);this.tail=p.catch(()=>{});return p;}
- close(){this.closing=true;return this.tail;}
+ // Serialize binding changes with grants without nesting the file I/O queue.
+ manage<T>(fn:()=>Promise<T>):Promise<T>{if(this.closing)return Promise.reject(invalid());const p=this.managementTail.then(fn);this.managementTail=p.catch(()=>{});return p;}
+ async close(){this.closing=true;await this.managementTail;await this.tail;}
  read():Promise<LiveShareSnapshot>{return this.run(async()=>{const row=await this.directory.read(file,limit);return row?parse(row.bytes):empty();});}
  write(expectedRevision:number,grants:LiveShareGrant[]):Promise<LiveShareSnapshot>{return this.run(async()=>{
   if(!revision(expectedRevision)||!validGrants(grants))throw invalid();let lock:FileHandle|undefined,lockInfo:Stats|undefined;

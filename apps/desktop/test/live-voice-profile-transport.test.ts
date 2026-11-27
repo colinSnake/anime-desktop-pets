@@ -1,0 +1,20 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { requestLiveVoiceProfile } from '../src/live-voice-profile-transport.ts';
+const connection={port:1234,token:'a'.repeat(64)};
+const input={role:'dafeiyu' as const,petID:'pet-synthetic',bindingRevision:4,expectedRevision:3};
+const response={ok:true,profile:{role:input.role,petID:input.petID,bindingRevision:4,revision:4,hasReference:true,referenceTranscript:'',ready:false}};
+test('voice transport path is fixed and only native selection can append a path; rejects wrong binding',async()=>{
+ let calls=0;
+ const fetcher:typeof fetch=async(url,init)=>{calls++;
+  assert.equal(String(url),'http://127.0.0.1:1234/v1/live/voice-profile/select-reference');
+  assert.deepEqual(JSON.parse(String(init?.body)),{...input,path:'/synthetic/reference.wav'});
+  return Response.json(response);
+ };
+ assert.deepEqual(await requestLiveVoiceProfile(connection,'select-reference',input,undefined,fetcher),{ok:false,error:'unavailable'});
+ assert.deepEqual(await requestLiveVoiceProfile(connection,'select-reference',{...input,path:'/arbitrary'} as typeof input,'/synthetic/reference.wav',fetcher),{ok:false,error:'unavailable'});
+ assert.equal(calls,0);
+ assert.deepEqual(await requestLiveVoiceProfile(connection,'select-reference',input,'/synthetic/reference.wav',fetcher),response);
+ assert.equal(calls,1);
+ assert.deepEqual(await requestLiveVoiceProfile(connection,'clear-reference',input,undefined,async()=>Response.json({...response,profile:{...response.profile,bindingRevision:5}})),{ok:false,error:'unavailable'});
+});

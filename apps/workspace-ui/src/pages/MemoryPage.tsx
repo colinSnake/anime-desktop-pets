@@ -146,6 +146,6 @@ export function MemoryPage({ mode, onMode, personal, knowledge, connected = fals
       { id: 'personal', title: '个人记忆', content: editor('personal', personal) },
       { id: 'knowledge', title: '角色知识', content: editor('knowledge', knowledge) },
     ]} />
-    <p className="module-copy">确认只影响本机资料。在线聊天授权需逐条开启。</p>
+    <p className="module-copy">学习候选与手动记录都需人工确认。确认只影响本机资料；聊天和直播授权需分别开启。</p>
   </ModulePage>;
 }

@@ -1,9 +1,9 @@
-import { isLiveDanmakuReply } from '../../../../packages/contracts/src/live-stage.ts';
-import { stageVoiceDuration, type LiveVoiceBank, type LiveVoiceResult } from '../../../../packages/contracts/src/live-voice.ts';
+import { isLiveDanmakuReply, isLiveRoleId, liveActionIds, type LiveRoleId } from '../../../../packages/contracts/src/live-stage.ts';
+import { liveVoiceLines, stageVoiceDuration, type LiveVoiceBank, type LiveVoiceResult } from '../../../../packages/contracts/src/live-voice.ts';
 import { speechPreviewPhrase, type SpeechPreviewCommand, isSpeechEnableInput, isSpeechTranscriptInput, type SpeechResult, type SpeechRuntimeReadiness, type SpeechStatus } from '../../../../packages/contracts/src/speech.ts';
 import type { VideoSpeechState } from '../workspace-video-protocol.ts';
 import { isCue } from './cue.ts';
-import { readReferenceAudio } from './reference-audio.ts';
+import { isReferenceAudio, readReferenceAudio } from './reference-audio.ts';
 import type { SpeechProfile, SpeechProfileStore } from './profile-store.ts';
 
 export type SpeechTask = { text: string; audio: Buffer; transcript: string; signal: AbortSignal; resolveStatus(state: 'loading' | 'speaking'): void };
@@ -197,19 +197,48 @@ export class BubbleSpeech {
     if (result.ok && stageVoiceDuration(result.value)) return result.value;
   }
 
-  private async renderStage<T>(signal: AbortSignal, eligible: () => boolean, render: (profile: SpeechProfileInput, owned: AbortSignal) => Promise<T>):
+  /** Explicit live-only input: never reads, prepares, or persists the desktop speech profile. */
+  async prepareStageVoiceWithReference(reference: SpeechProfileInput | undefined, role: LiveRoleId, signal: AbortSignal, eligible: () => boolean, recheck?: (signal: AbortSignal) => Promise<void>): Promise<LiveVoiceResult> {
+    if (!isLiveRoleId(role) || !this.backend.renderStageReply) return { ok: false, error: 'voice-failed' };
+    const result = await this.renderStage(signal, eligible, async (profile, owned) => {
+      const clips = {} as LiveVoiceBank;
+      for (const slot of liveActionIds) {
+        await recheck?.(owned);
+        owned.throwIfAborted();
+        if (!eligible()) throw new Error('stage_ineligible');
+        const clip = await this.backend.renderStageReply!(profile, liveVoiceLines[role][slot], owned);
+        owned.throwIfAborted();
+        if (!eligible() || !stageVoiceDuration(clip)) throw new Error('stage_voice_invalid');
+        clips[slot] = clip;
+      }
+      return clips;
+    }, reference, true);
+    return result.ok ? { ok: true, clips: result.value } : result;
+  }
+
+  async prepareStageReplyWithReference(reference: SpeechProfileInput | undefined, text: string, signal: AbortSignal, eligible: () => boolean): Promise<Buffer | undefined> {
+    if (!this.backend.renderStageReply || !isLiveDanmakuReply(text)) return;
+    const result = await this.renderStage(signal, eligible, (profile, owned) => this.backend.renderStageReply!(profile, text, owned), reference, true);
+    if (result.ok && stageVoiceDuration(result.value)) return result.value;
+  }
+
+  private async renderStage<T>(signal: AbortSignal, eligible: () => boolean, render: (profile: SpeechProfileInput, owned: AbortSignal) => Promise<T>, explicit?: SpeechProfileInput, liveOnly = false):
     Promise<{ok:true;value:T} | Extract<LiveVoiceResult,{ok:false}>> {
-    if (this.closed || this.storageUnavailable || signal.aborted) return {ok:false,error:'voice-failed'};
+    if (this.closed || (!liveOnly && this.storageUnavailable) || signal.aborted) return {ok:false,error:'voice-failed'};
     if (!eligible() || this.stageRender || this.selecting || this.suspending || this.stopUnconfirmed || this.voiceDraftSuspended || this.current || this.pending)
       return {ok:false,error:'voice-busy'};
-    const { reference, savedTranscript } = this;
+    const reference = liveOnly ? explicit?.audio : this.reference;
+    const savedTranscript = liveOnly ? explicit?.transcript : this.savedTranscript;
     if (!reference || !savedTranscript?.trim()) return {ok:false,error:'reference-required'};
+    if (liveOnly && (!isReferenceAudio(reference) || !isSpeechEnableInput({ referenceTranscript: savedTranscript }))) return {ok:false,error:'voice-failed'};
+    const captured = { audio: liveOnly ? Buffer.from(reference) : reference, transcript: savedTranscript };
     const abort = new AbortController();
     const cancel = () => abort.abort();
     signal.addEventListener('abort', cancel, {once:true});
     const task = Promise.resolve().then(() => {
       abort.signal.throwIfAborted();
-      return render({audio:reference,transcript:savedTranscript},abort.signal);
+      if (this.closed || !eligible()) throw new Error('stage_ineligible');
+      return render(captured,abort.signal);
     });
     this.stageRender = {abort,task};
     try {

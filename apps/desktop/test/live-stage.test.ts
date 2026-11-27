@@ -217,7 +217,7 @@ test('running stage confirms a persisted scene on the same program URL without r
     assert.deepEqual(await stage.run('switchScene','cloud-terrace',eligible), {ok:false,error:'busy'});
     assert.equal((await state()).scene, 'desk-room');
     finish();
-    assert.deepEqual(await switching, {ok:true,running:true,profile});
+    assert.deepEqual(await switching, {ok:true,running:true,profile,activeRole:'longmei'});
     const after = await state();
     assert.equal(after.scene, 'rain-loft'); assert.deepEqual(after.placement, {position:68,scale:87});
     assert.equal(after.generation, before.generation); assert.equal(after.action, before.action);
@@ -366,7 +366,7 @@ test('successful start prepares voice once in the background; stopping aborts it
   } finally { for (const job of jobs) job.fail(); await stage.close(); }
 });
 
-test('Whale Girl stage uses its role actions, stays muted, and cannot enter Dragon Girl danmaku rehearsal', async () => {
+test('Whale Girl without its own reference stays silent and cannot rehearse', async () => {
   const { LiveStageController } = await import('../src/live-stage/controller.ts');
   let profileRole: string | undefined, openedRole: string | undefined, voiceCalls = 0, modelCalls = 0;
   let clock: LiveStageClock | undefined;
@@ -375,7 +375,7 @@ test('Whale Girl stage uses its role actions, stays muted, and cannot enter Drag
     allowed: async () => true,
     open: async (role, openedClock) => { openedRole = role; clock = openedClock; return openStageOutput(openedClock,new Map()); },
     preview: async () => {}, closePreview: () => {}, copy: () => {},
-    voice: async () => { voiceCalls++; return {ok:true,clips:{'01':Buffer.from('dragon voice'),'18':Buffer.from('dragon voice'),'20':Buffer.from('dragon voice')}}; },
+    voice: async (_signal,role) => { voiceCalls++; assert.equal(role,'dafeiyu'); return {ok:false,error:'reference-required'}; },
     danmaku: async () => { modelCalls++; return {ok:false,error:'model-failed'}; },
   });
   const run = (method: Parameters<typeof stage.run>[0], input?: unknown) => stage.run(method,input,()=>true,'dafeiyu');
@@ -383,8 +383,8 @@ test('Whale Girl stage uses its role actions, stays muted, and cannot enter Drag
     assert.ok((await run('start')).ok);
     assert.equal(profileRole,'dafeiyu'); assert.equal(openedRole,'dafeiyu');
     assert.equal(clock?.snapshot().role,'dafeiyu');
-    assert.equal(voiceCalls,0,'no Whale Girl voice profile exists; do not prepare Dragon Girl TTS');
-    const read = await run('read'); assert.ok(read.ok); assert.equal(read.voice,'muted');
+    assert.equal(voiceCalls,1,'look up only the explicitly selected Whale Girl reference');
+    const read = await run('read'); assert.ok(read.ok); assert.equal(read.voice,'reference-required');
     assert.deepEqual(await stage.run('stop',undefined,()=>true,'longmei'),{ok:false,error:'unavailable'},'a role cannot stop the other presenter stage');
     assert.ok((await run('trigger','companion-wave')).ok);
     assert.equal(clock?.snapshot().action,'companion-wave');

@@ -16,19 +16,19 @@ export class LiveStageClock {
     this.now = typeof roleOrNow === 'function' ? roleOrNow : now;
   }
   selectScene(scene: LiveScene) { this.profile.selected = scene; }
-  setVoice(clips?: LiveVoiceBank) {
-    this.voice = this.role==='longmei'?clips:undefined;
+  setVoice(clips?: LiveVoiceBank, role: LiveRoleId = 'longmei') {
+    this.voice = this.role === role ? clips : undefined;
     this.stopDanmaku();
     if (this.playing) this.playing.voiced = false;
   }
   voiceFor(generation: number): Buffer | undefined {
     const next = this.snapshot();
-    return next.voice && this.role==='longmei' && next.generation === generation && next.action ? (this.playing?.reply?.audio ?? this.voice?.[next.action as LiveAction]) : undefined;
+    return next.voice && next.generation === generation && next.action ? (this.playing?.reply?.audio ?? this.voice?.[this.voiceSlot(next.action)]) : undefined;
   }
   trigger(action: LiveRoleAction): true {
     if(!isLiveRoleAction(this.role,action))throw new Error('invalid_live_action');
     this.generation++;
-    const duration = this.role==='longmei'&&this.voice&&isDragonAction(action)?stageVoiceDuration(this.voice[action]):undefined;
+    const duration = this.voice ? stageVoiceDuration(this.voice[this.voiceSlot(action)]) : undefined;
     this.playing = { action, voiced: !!duration, until: this.now() + Math.max(liveActionLifetimeMs, duration ? duration + liveVoiceStartBudgetMs : 0) };
     return true;
   }
@@ -38,10 +38,14 @@ export class LiveStageClock {
   }
   publishDanmaku(text: string, audio: Buffer): boolean {
     const duration = stageVoiceDuration(audio);
-    if (this.role!=='longmei'||!this.voice || !isLiveDanmakuReply(text) || !duration || this.hasManualCue()) return false;
+    if (!this.voice || !isLiveDanmakuReply(text) || !duration || this.hasManualCue()) return false;
     this.generation++;
-    this.playing = { action:'01', voiced:true, reply:{text,audio}, until:this.now() + Math.max(liveActionLifetimeMs, duration + liveVoiceStartBudgetMs) };
+    this.playing = { action:this.role === 'longmei' ? '01' : 'companion-wave', voiced:true, reply:{text,audio}, until:this.now() + Math.max(liveActionLifetimeMs, duration + liveVoiceStartBudgetMs) };
     return true;
+  }
+  private voiceSlot(action: LiveRoleAction): LiveAction {
+    if (this.role === 'longmei') return action as LiveAction;
+    return action === 'companion-wave' ? '01' : action === 'companion-jump' ? '18' : '20';
   }
   stopDanmaku() { if (this.playing?.reply) this.playing = undefined; }
   snapshot(): LiveSnapshot {
@@ -53,4 +57,3 @@ export class LiveStageClock {
       ...(active && remainingMs > 0 && { action: active.action, remainingMs, ...(active.voiced && {voice:true as const}), ...(active.reply && {reply:active.reply.text}) }) };
   }
 }
-function isDragonAction(action:LiveRoleAction):action is LiveAction{return action==='01'||action==='18'||action==='20';}

@@ -1,7 +1,7 @@
 import type { Stats } from 'node:fs';
 import type { DatabaseSync } from 'node:sqlite';
 import { chatHistoryDetailSize, chatHistoryPageSize, isHistoryDetail, isHistoryInput, isHistoryPage, isHistoryTurn, isChatProject, maxChatProjects, type ChatProject, type ChatHistoryDetail, type ChatHistoryPage, type ChatHistoryTurn } from '../../../packages/contracts/src/chat-history.ts';
-import { isChatConversation, type ChatConversation, type ChatExchange } from '../../../packages/contracts/src/online-chat.ts';
+import { isChatConversation, validChatRequestID, type ChatConversation, type ChatExchange } from '../../../packages/contracts/src/online-chat.ts';
 import { petId } from '../../../packages/contracts/src/pets.ts';
 import { PrivateDirectory, sameFile } from './models/private-directory.ts';
 import { safeChatFields } from './characters/chat-context-policy.ts';
@@ -195,6 +195,20 @@ export class ChatHistory {
       if (!isHistoryTurn({ requestID: row.requestID, user: row.user, assistant: row.assistant, completedAt: row.completedAt }) ||
         typeof row.assistant !== 'string' || !safeChatFields([user, row.assistant]) || (row.replayable !== 0 && row.replayable !== 1)) throw invalid();
       return { status: 'completed', text: row.assistant, replayable: row.replayable === 1 } as const;
+    });
+  }
+  /** A learning selection reads exactly one ordinary completed turn. Never
+   * fall back to a page, replay, an attachment/tool turn or another session. */
+  async readLearningTurn(petID: string, sessionID: string, turnID: string): Promise<ChatExchange | undefined> {
+    if (!petId(petID) || !validChatRequestID(sessionID) || !validChatRequestID(turnID)) throw invalid();
+    return this.run(db => {
+      const row = db.prepare(`SELECT t.request_id AS requestID, t.user_text AS user,
+        t.assistant_text AS assistant, t.completed_at AS completedAt
+        FROM turns t JOIN sessions s ON s.id = t.session_id
+        WHERE t.request_id = ? AND s.id = ? AND s.pet_id = ? AND t.replayable = 1`).get(turnID, sessionID, petID);
+      if (!row) return;
+      if (!isHistoryTurn(row) || !safeChatFields([row.user, row.assistant])) throw invalid();
+      return { user: row.user, assistant: row.assistant };
     });
   }
   async replay(petID: string, conversation: ChatConversation): Promise<ChatExchange[] | undefined> {

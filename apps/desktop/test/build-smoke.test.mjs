@@ -883,3 +883,52 @@ test('compiled Apple silicon speech service restores drafts and the explicit ena
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('compiled live sharing bridge is macOS-only and cannot forward renderer paths or surplus arguments', async () => {
+  const { runInNewContext } = await import('node:vm');
+  const preload=await readFile(`${out}/preload.cjs`,'utf8');
+  for(const platform of ['darwin','linux','win32']){
+    let bridge;const calls=[];
+    runInNewContext(preload,{process:{platform},require:()=>({contextBridge:{exposeInMainWorld:(_name,value)=>{bridge=value;}},ipcRenderer:{invoke(...args){calls.push(args);return Promise.resolve({ok:false});}}})});
+    if(platform!=='darwin'){assert.equal(bridge.liveStage,undefined);continue;}
+    await bridge.liveStage.readShares('longmei',{path:'/not-forwarded'});
+    assert.deepEqual(calls.pop(),['pet:live-shares-read','longmei']);
+    const input={role:'dafeiyu',petID:'pet-synthetic',bindingRevision:1,expectedRevision:0,records:[]};
+    await bridge.liveStage.writeShares(input,{path:'/not-forwarded'});
+    assert.deepEqual(calls.pop(),['pet:live-shares-write',input]);
+  }
+});
+
+
+test('compiled independent live voice and single-turn learning expose only fixed macOS IPC methods', async () => {
+  const { runInNewContext } = await import('node:vm');
+  const preload = await readFile(`${out}/preload.cjs`, 'utf8');
+  for (const platform of ['darwin', 'linux', 'win32']) {
+    let bridge;
+    const calls = [];
+    runInNewContext(preload, {
+      process: { platform },
+      require: () => ({
+        contextBridge: { exposeInMainWorld: (_name, value) => { bridge = value; } },
+        ipcRenderer: { invoke(...args) { calls.push(args); return Promise.resolve({ ok: false }); } },
+      }),
+    });
+    if (platform !== 'darwin') {
+      assert.equal(bridge.liveStage, undefined);
+      assert.equal(bridge.characterLearning, undefined);
+      continue;
+    }
+    const target = { role: 'dafeiyu', petID: 'synthetic-pet', bindingRevision: 1 };
+    const learning = { petID: target.petID, ticket: 'a'.repeat(48) };
+    assert.deepEqual(Object.keys(bridge.liveStage.voiceProfile).sort(), ['clearReference', 'read', 'saveTranscript', 'selectReference']);
+    assert.deepEqual(Object.keys(bridge.liveStage.learning).sort(), ['cancel', 'generate', 'preview']);
+    assert.deepEqual(Object.keys(bridge.characterLearning).sort(), ['cancel', 'generate', 'preview', 'selectChatTurn']);
+    await bridge.liveStage.voiceProfile.selectReference(target, '/ignored.wav');
+    assert.deepEqual(calls.pop(), ['pet:live-voice-profile-select-reference', target]);
+    await bridge.liveStage.learning.preview(learning, { text: 'ignored' });
+    assert.deepEqual(calls.pop(), ['pet:character-learning-preview', learning]);
+    const selection = { petID: target.petID, sessionID: 'synthetic-session', turnID: 'synthetic-turn' };
+    await bridge.characterLearning.selectChatTurn(selection, { text: 'ignored' });
+    assert.deepEqual(calls.pop(), ['pet:character-learning-select-chat-turn', selection]);
+  }
+});
