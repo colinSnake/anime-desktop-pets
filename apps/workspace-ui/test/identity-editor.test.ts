@@ -4,6 +4,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { IdentityPage } from '../src/pages/IdentityPage.tsx';
 import { IdentityWorkspace, identityDirty } from '../src/pages/identity-editor.ts';
+import { characterPersonaSuggestions, liveRolePackages } from '../../../packages/contracts/src/character-personas.ts';
 import type { IdentityBridge, IdentityDraft, IdentitySnapshot, IdentityWriteResult } from '../../../packages/contracts/src/characters.ts';
 
 const fixture = (petID: string, revision: number, name: string): IdentitySnapshot => ({
@@ -13,9 +14,99 @@ const fixture = (petID: string, revision: number, name: string): IdentitySnapsho
 const draft = (name: string): IdentityDraft => ({ name, role: '', background: '', personality: '', values: '', motivations: '', relationship: '', speakingStyle: '', knowledgeScope: '', boundaries: '' });
 const ok = (snapshot: IdentitySnapshot) => ({ ok: true as const, snapshot });
 const confirmed = (snapshot: IdentitySnapshot) => ({ ...ok(snapshot), durability: 'confirmed' as const });
+const blankIdentity = (petID: string): IdentitySnapshot => ({ schemaVersion: 1, revision: 4, petID, identityHistory: [], identity: null });
 const bridge = (overrides: Partial<IdentityBridge>): IdentityBridge => ({
   readIdentity: async () => assert.fail('unexpected read'), saveIdentity: async () => assert.fail('unexpected save'), restoreIdentity: async () => assert.fail('unexpected restore'),
   setIdentityChatShare: async () => assert.fail('unexpected sharing change'), ...overrides,
+});
+
+test('each built-in persona fills only the selected instance draft until an explicit local save', async () => {
+  const dragon = { id: 'pet-dragon', displayName: '龙妹分身', package: liveRolePackages.longmei };
+  const whale = { id: 'pet-whale', displayName: '我的鲸鱼', package: liveRolePackages.dafeiyu };
+  const saves: Parameters<IdentityBridge['saveIdentity']>[0][] = [];
+  const workspace = new IdentityWorkspace(bridge({ readIdentity: async ({ petID }) => ok(blankIdentity(petID)),
+    saveIdentity: async input => {
+      saves.push(input);
+      const result = fixture(input.petID, 5, input.draft.name);
+      return confirmed({ ...result, identity: { ...result.identity!, ...input.draft } });
+    },
+  }));
+  const a = workspace.forPet(dragon.id), b = workspace.forPet(whale.id);
+  await a.load(); await b.load();
+  const html = (instance: typeof dragon, editor: typeof a, connected = true) => renderToStaticMarkup(createElement(IdentityPage, {
+    draft: { value: draft(''), update: () => {} }, connected, instance, editor,
+  }));
+  assert.match(html(dragon, a), /<button[^>]*>使用龙妹人格建议<\/button>/);
+  assert.match(html(whale, b), /<button[^>]*>使用鲸鱼妹人格建议<\/button>/);
+  assert.doesNotMatch(html(whale, a), /使用.*人格建议/);
+  assert.doesNotMatch(html(dragon, a, false), /使用.*人格建议/);
+  assert.doesNotMatch(html({ ...dragon, package: { ...dragon.package, version: '9.9.9' } }, a), /使用.*人格建议/);
+  a.applySuggestion(dragon);
+  assert.deepEqual(a.getSnapshot().draft, characterPersonaSuggestions.longmei);
+  assert.notEqual(a.getSnapshot().draft, characterPersonaSuggestions.longmei);
+  assert.equal(a.getSnapshot().snapshot?.identity, null);
+  assert.deepEqual(b.getSnapshot().draft, draft(''));
+  assert.match(html(dragon, a), /已填入草稿，尚未保存/);
+  assert.doesNotMatch(html(dragon, a), /使用龙妹人格建议/);
+  a.discardDraft();
+  assert.match(html(dragon, a), /<button[^>]*>使用龙妹人格建议<\/button>/);
+  b.applySuggestion(whale);
+  assert.deepEqual(b.getSnapshot().draft, characterPersonaSuggestions.dafeiyu);
+  b.change('name', '我的鲸鱼妹');
+  assert.deepEqual(saves, []);
+  await b.save();
+  assert.deepEqual(saves, [{ petID: whale.id, expectedRevision: 4, draft: { ...characterPersonaSuggestions.dafeiyu, name: '我的鲸鱼妹' } }]);
+  assert.equal(b.getSnapshot().snapshot?.identity?.chatShare, undefined);
+  assert.equal(b.getSnapshot().notice, 'saved');
+  assert.deepEqual(a.getSnapshot().draft, draft(''));
+});
+
+test('persona suggestion refuses a stale click, mismatched instance or package, and any hand-written field', async () => {
+  const instance = { id: 'pet-dragon', package: liveRolePackages.longmei };
+  const editor = new IdentityWorkspace(bridge({ readIdentity: async () => ok(blankIdentity(instance.id)) })).forPet(instance.id);
+  const applyAndExpectNoChange = (target = instance) => {
+    const before = editor.getSnapshot();
+    editor.applySuggestion(target);
+    assert.equal(editor.getSnapshot(), before);
+  };
+  applyAndExpectNoChange();
+  const loading = editor.load();
+  applyAndExpectNoChange();
+  await loading;
+  applyAndExpectNoChange({ ...instance, id: 'pet-whale' });
+  applyAndExpectNoChange({ ...instance, package: { ...instance.package, id: 'other' } });
+  applyAndExpectNoChange({ ...instance, package: { ...instance.package, version: '9.9.9' } });
+  editor.change('boundaries', ' ');
+  applyAndExpectNoChange();
+  editor.change('boundaries', '我的边界');
+  applyAndExpectNoChange();
+  editor.retire();
+  applyAndExpectNoChange();
+});
+
+test('persona suggestion never replaces an existing identity or treats a failed refresh as blank', async () => {
+  const instance = { id: 'pet-dragon', package: liveRolePackages.longmei };
+  let response = ok(blankIdentity(instance.id)) as Awaited<ReturnType<IdentityBridge['readIdentity']>>;
+  const editor = new IdentityWorkspace(bridge({ readIdentity: async () => response })).forPet(instance.id);
+  const trySuggestion = () => {
+    const before = editor.getSnapshot();
+    editor.applySuggestion(instance);
+    assert.equal(editor.getSnapshot(), before);
+  };
+  await editor.load();
+  response = { ok: false, error: 'unavailable' };
+  await editor.load();
+  assert.equal(editor.getSnapshot().snapshot?.identity, null);
+  assert.equal(editor.getSnapshot().review, 'read-required');
+  trySuggestion();
+  const saved = fixture(instance.id, 5, '自己的设定');
+  saved.identityHistory = [fixture(instance.id, 4, '更早的设定').identity!];
+  response = ok(saved);
+  await editor.load();
+  trySuggestion();
+  editor.inspectHistory(4);
+  assert.equal(editor.getSnapshot().inspecting, 4);
+  trySuggestion();
 });
 
 test('a conflict preserves the draft and requires reviewing the latest snapshot before another save', async () => {

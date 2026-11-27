@@ -124,13 +124,14 @@ test('a failed in-flight speech autosave never overwrites newer edits or resurre
 test('live puts output first, offers the two roles, and keeps offline controls disabled', async () => {
   const html = await view('live');
   const page = html.slice(html.indexOf('<main'));
-  assert.match(page, /<header class="interaction-heading">[\s\S]*?<h1>直播管理<\/h1>[\s\S]*?aria-label="直播桌宠"[\s\S]*?class="theme-toggle"/);
+  assert.match(page, /<header class="interaction-heading">[\s\S]*?<h1>直播工作台<\/h1>[\s\S]*?class="theme-toggle"/);
+  assert.match(page, /<button[^>]*aria-label="预览舞台"[^>]*disabled=""/);
   const composer = page.match(/<div class="live-danmaku-controls">([\s\S]*?)<\/div>/)?.[1] ?? '';
   assert.deepEqual([...composer.matchAll(/<button[^>]*aria-label="([^"]+)"/g)].map(match => match[1]), ['发送演练弹幕']);
-  assert.match(page, /舞台输出[\s\S]*?布景与摆位[\s\S]*?主播互动[\s\S]*?打招呼[\s\S]*?开心一下[\s\S]*?比个心[\s\S]*?弹幕演练/);
-  for (const text of ['暮色小屋', '雨夜阁楼', '云海露台', '蓝天草原', '森林篝火', '录音棚', '未连接桌面工作区', '1920 × 1080', '静音']) assert.ok(page.includes(text), text);
-  assert.match(page, /<select[^>]*aria-label="直播桌宠"[^>]*>[\s\S]*?龙妹<\/option>[\s\S]*?鲸鱼妹<\/option>/);
-  for (const text of ['保存布景', '开启直播台', '预览舞台', '复制 OBS 地址', '打招呼', '开心一下', '比个心']) {
+  assert.match(page, /舞台预览[\s\S]*?选择布景[\s\S]*?主播互动[\s\S]*?打招呼[\s\S]*?开心一下[\s\S]*?比个心[\s\S]*?弹幕演练/);
+  for (const text of ['暮色小屋', '雨夜阁楼', '云海露台', '蓝天草原', '森林篝火', '录音棚', '未连接桌面工作区', '1920 × 1080', '布景示意 · 非实时画面']) assert.ok(page.includes(text), text);
+  assert.match(page, /aria-label="直播桌宠"[\s\S]*?aria-pressed="true"[\s\S]*?龙妹[\s\S]*?aria-pressed="false"[\s\S]*?鲸鱼妹/);
+  for (const text of ['调整摆位', '开启直播台', '复制 OBS 地址', '打招呼', '开心一下', '比个心']) {
     assert.match(buttonWithText(page, text), /disabled=""/, text);
   }
   for (const text of ['LOCAL OUTPUT', '选择布景、触发动作，向 OBS 提供本机画面。', '开启本机节目源，不会推流。',
@@ -141,7 +142,7 @@ test('live puts output first, offers the two roles, and keeps offline controls d
   assert.match(page, /<button(?=[^>]*aria-label="发送演练弹幕")(?=[^>]*aria-keyshortcuts="Enter")(?=[^>]*disabled="")[^>]*>/);
   assert.doesNotMatch(page, /live-danmaku-conversation|<kbd>Enter<\/kbd>|0 \/ 120/);
   assert.doesNotMatch(page, /live-danmaku-steps|演练进度/);
-  assert.doesNotMatch(page, /模拟一次|模拟问候|晨光书房|已开播|已连接平台|live-stage-hero|布景示意|房间草稿|平台能力|关闭直播台|<iframe|type="password"|type="file"/);
+  assert.doesNotMatch(page, /模拟一次|模拟问候|晨光书房|已开播|已连接平台|live-stage-hero|房间草稿|平台能力|<iframe|type="password"|type="file"/);
   assert.equal((page.match(/type="radio"/g) ?? []).length, 6);
   assert.equal((page.match(/-cover\.webp/g) ?? []).length, 6);
   for (const scene of ['暮色小屋', '雨夜阁楼', '云海露台', '蓝天草原', '森林篝火', '录音棚']) {
@@ -150,7 +151,7 @@ test('live puts output first, offers the two roles, and keeps offline controls d
     assert.doesNotMatch(preview, /disabled/);
     assert.match(preview, /aria-haspopup="dialog"/);
   }
-  const sceneChoices = [...page.matchAll(/<label class="live-scene-choice">([\s\S]*?)<\/label>(<button[^>]*class="live-scene-preview"[^>]*>)/g)];
+  const sceneChoices = [...page.matchAll(/<label class="live-scene-choice(?: selected)?">([\s\S]*?)<\/label>(<button[^>]*class="live-scene-preview"[^>]*>)/g)];
   assert.equal(sceneChoices.length, 6, 'each card has a separate preview button');
   for (const [, choice, preview] of sceneChoices) {
     assert.ok(choice && preview);
@@ -160,15 +161,9 @@ test('live puts output first, offers the two roles, and keeps offline controls d
     assert.doesNotMatch(choice, /<button/);
     assert.match(preview, /aria-haspopup="dialog"/);
   }
-  assert.match(page, /<div class="live-scene-controls"><fieldset class="live-scenes">[\s\S]*?<\/fieldset><div class="live-adjustments">[\s\S]*?角色位置与大小[\s\S]*?保存布景[\s\S]*?<p class="live-hint live-scene-status" role="status">[\s\S]*?<\/p><\/div><\/div>/);
-  assert.doesNotMatch(page, /<fieldset class="live-scenes" disabled|type="range"/);
-  assert.match(page, /<fieldset class="live-placement" disabled=""/);
-  for (const label of ['横向位置', '角色大小']) {
-    assert.match(page, new RegExp(`aria-label="减少${label}"`));
-    assert.match(page, new RegExp(`aria-label="增加${label}"`));
-  }
-  assert.match(page, /<input(?=[^>]*type="number")(?=[^>]*min="25")(?=[^>]*max="75")[^>]*>/);
-  assert.match(page, /<input(?=[^>]*type="number")(?=[^>]*min="75")(?=[^>]*max="125")[^>]*>/);
+  assert.match(page, /class="live-workbench-scene-footer"/);
+  assert.doesNotMatch(page, /<fieldset class="live-placement"|type="range"|type="number"|<select/);
+  assert.match(page, /<button[^>]+aria-haspopup="dialog"[^>]+disabled=""[^>]*>[\s\S]*?调整摆位/);
   assert.equal((page.match(/<input[^>]*type="radio"[^>]*disabled/g) ?? []).length, 6);
 
 });
@@ -250,8 +245,8 @@ test('live sharing stays opt-in and renders no private records or requests befor
   let calls=0;const unavailable=async()=>{calls++;return {ok:false,error:'unavailable'} as const;};
   const bridge={readShares:unavailable,writeShares:unavailable} as never;
   const html=renderToStaticMarkup(createElement(LiveSharing,{role:'longmei',petID:'pet-synthetic',bridge,locked:false}));
-  assert.match(html,/直播资料授权/);assert.match(html,/aria-expanded="false"/);assert.match(html,/与在线聊天授权独立/);
+  assert.match(html,/直播资料授权/);assert.match(html,/aria-expanded="false"/);assert.match(html,/点击查看逐项授权/);
   assert.doesNotMatch(html,/确认直播授权|当前版本正文/);assert.equal(calls,0);
   const offline=renderToStaticMarkup(createElement(LiveSharing,{role:'dafeiyu',petID:null,locked:false}));
-  assert.match(offline,/<button[^>]*disabled=""[^>]*>管理授权/);
+  assert.match(offline,/<button[^>]*aria-label="主播直播资料授权"[^>]*disabled=""/);assert.match(offline,/待绑定/);
 });

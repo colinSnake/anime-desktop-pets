@@ -50,7 +50,7 @@ test('every workspace page keeps its title and theme control without a breadcrum
   for (const [initialPage, label] of pages) {
     const html = await renderWorkspace(createElement(WorkspaceView, { ...diagnostics, initialPage }));
     assert.doesNotMatch(html, /workspace-breadcrumb|workspace-crumb-|aria-label="当前位置"/);
-    assert.match(html, new RegExp(`<h1[^>]*>${label}</h1>`));
+    assert.match(html, new RegExp(`<h1[^>]*>${initialPage === 'live' ? '直播工作台' : label}</h1>`));
     assert.equal((html.match(/class="theme-toggle"/g) ?? []).length, 1);
     assert.match(html, /<main id="main"[^>]+tabindex="-1"/i);
     if (!['identity', 'memory', 'goals'].includes(initialPage)) {

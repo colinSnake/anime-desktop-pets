@@ -1,7 +1,8 @@
 import { useEffect, useSyncExternalStore } from 'react';
+import { characterPersonaSuggestions } from '../../../../packages/contracts/src/character-personas.ts';
 import { identityDraftOf, isIdentityWriteInput, type IdentityDraft, type IdentityWriteError } from '../../../../packages/contracts/src/characters.ts';
 import { ChatShareControl } from './ChatShareControl.tsx';
-import { emptyIdentity, emptyIdentityEditorState, identityDirty, type IdentityEditor } from './identity-editor.ts';
+import { emptyIdentity, emptyIdentityEditorState, identityDirty, identitySuggestionRole, type IdentityEditor, type IdentityInstance } from './identity-editor.ts';
 import { DisabledAction, Disclosure, EmptyState, Field, InlineFooter, ModulePage, OptionRow, Panel, PreviewNotice, patch, type Draft } from './WorkspacePanels.tsx';
 
 const common = [['personality', '性格', '这个角色怎样待人、怎样处理不确定？'], ['speakingStyle', '表达方式', '希望它用怎样的语气和节奏？'], ['relationship', '与你的关系', '这个桌边伙伴怎样称呼你、怎样陪伴你？']] as const;
@@ -15,10 +16,10 @@ const errors: Record<IdentityWriteError, string> = {
   'credential-like': '身份中将用于聊天的字段可能包含凭证，未授权。',
   'write-outcome-unknown': '上次写入结果未确认，请先重新读取当前资料。',
 };
-const notices = { shared: '已保存在线聊天授权。', unshared: '已撤回在线聊天授权。', saved: '身份已保存。', restored: '已恢复为新版本。', unchanged: '内容与已保存版本相同。', reloaded: '已重新读取当前保存资料。' } as const;
+const notices = { suggested: '人格建议已填入草稿，尚未保存。', shared: '已保存在线聊天授权。', unshared: '已撤回在线聊天授权。', saved: '身份已保存。', restored: '已恢复为新版本。', unchanged: '内容与已保存版本相同。', reloaded: '已重新读取当前保存资料。' } as const;
 
 export function IdentityPage({ draft, connected, instance, editor }: {
-  draft: Draft<IdentityDraft>; connected?: boolean; instance?: { id: string; displayName?: string }; editor?: IdentityEditor;
+  draft: Draft<IdentityDraft>; connected?: boolean; instance?: IdentityInstance & { displayName?: string }; editor?: IdentityEditor;
 }) {
   const state = useSyncExternalStore(editor?.subscribe ?? noSubscription, editor?.getSnapshot ?? noState, editor?.getSnapshot ?? noState);
   useEffect(() => {
@@ -26,6 +27,7 @@ export function IdentityPage({ draft, connected, instance, editor }: {
     if (initial && !initial.snapshot && !initial.error) void editor?.load();
   }, [editor]);
   const { snapshot, busy, error, review, inspecting, notice } = state;
+  const suggestionRole = connected ? identitySuggestionRole(state, instance) : undefined;
   const dirty = identityDirty(state);
   const selectedVersion = typeof inspecting === 'number' ? snapshot?.identityHistory.find(item => item.revision === inspecting) : undefined;
   const inspected = inspecting === 'saved' ? snapshot?.identity : selectedVersion;
@@ -49,8 +51,11 @@ export function IdentityPage({ draft, connected, instance, editor }: {
       {!!editor && ((error === 'unavailable' && !busy) || (review === 'read-required' && !busy)) &&
         <button className="button secondary" type="button" onClick={() => { void editor.load(); }}>读取最新身份</button>}
     </aside> : <PreviewNotice>可试填身份草稿；角色资料尚未连接，编辑不会保存到实例，也不会进入聊天。</PreviewNotice>}
-    <Panel title="角色资料" focusHeading={inspecting !== undefined}>
+    <Panel title="角色资料" focusHeading={inspecting !== undefined || notice === 'suggested'}>
       <div className="module-stack">
+        {suggestionRole && instance && <OptionRow title="内置人格建议" detail="只填入当前实例的草稿。你可以修改或放弃，保存后才会写入本机。">
+          <button className="button secondary" type="button" onClick={() => editor?.applySuggestion(instance)}>使用{characterPersonaSuggestions[suggestionRole].name}人格建议</button>
+        </OptionRow>}
         <Field label="名称" placeholder="给这个角色起个名字" limit={80} value={value.name} readOnly={readOnly} onChange={name => change('name', name)} />
         {common.map(([key, label, placeholder]) => <Field key={key} label={label} placeholder={placeholder} limit={2000} value={value[key]} readOnly={readOnly} onChange={text => change(key, text)} multiline />)}
         <Disclosure title="基础设定"><div className="module-fields two-columns">{extended.map(([key, label]) => <Field key={key} label={label} limit={2000} value={value[key]} readOnly={readOnly} onChange={text => change(key, text)} multiline />)}</div></Disclosure>

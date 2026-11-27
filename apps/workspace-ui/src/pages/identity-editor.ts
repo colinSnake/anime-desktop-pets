@@ -1,7 +1,9 @@
+import { identitySuggestionForRole, liveRoleForPackage } from '../../../../packages/contracts/src/character-personas.ts';
 import {
   identityDraftOf, identityFields, isIdentityResult, isIdentityWriteInput, isIdentityWriteResult,
   type IdentityBridge, type IdentityDraft, type IdentityResult, type IdentitySnapshot, type IdentityWriteError, type IdentityWriteResult,
 } from '../../../../packages/contracts/src/characters.ts';
+import type { PackageReference } from '../../../../packages/contracts/src/pets.ts';
 
 export const emptyIdentity: IdentityDraft = { name: '', personality: '', speakingStyle: '', relationship: '', role: '', background: '', values: '', motivations: '', knowledgeScope: '', boundaries: '' };
 const fields = ['name', ...identityFields] as const;
@@ -13,10 +15,16 @@ export type IdentityEditorState = {
   error?: IdentityWriteError;
   review?: 'read-required' | 'review-required';
   inspecting?: 'saved' | number;
-  notice?: 'reloaded' | 'saved' | 'restored' | 'unchanged' | 'shared' | 'unshared';
+  notice?: 'suggested' | 'reloaded' | 'saved' | 'restored' | 'unchanged' | 'shared' | 'unshared';
 };
+export type IdentityInstance = { id: string; package?: PackageReference };
 export const emptyIdentityEditorState: IdentityEditorState = Object.freeze({});
 export const identityDirty = ({ draft, snapshot }: IdentityEditorState) => !!draft && fields.some(key => draft[key] !== (snapshot?.identity?.[key] ?? ''));
+export function identitySuggestionRole({ snapshot, draft, busy, error, review, inspecting }: IdentityEditorState, instance?: IdentityInstance) {
+  if (!instance || !snapshot || snapshot.petID !== instance.id || snapshot.identity !== null || !draft ||
+    busy || error || review || inspecting !== undefined || fields.some(key => draft[key] !== '')) return undefined;
+  return liveRoleForPackage(instance.package);
+}
 
 export class IdentityEditor {
   private state = emptyIdentityEditorState;
@@ -59,6 +67,13 @@ export class IdentityEditor {
     const { snapshot, draft, busy, inspecting, error, review } = this.state;
     if (!snapshot || !draft || busy || inspecting !== undefined || review || error === 'not-found') return;
     this.publish({ ...this.state, draft: { ...draft, [key]: value }, error: undefined, notice: undefined });
+  }
+  applySuggestion(instance: IdentityInstance) {
+    if (this.retired) return;
+    const role = identitySuggestionRole(this.state, instance);
+    if (!role) return;
+    const draft = identitySuggestionForRole(role);
+    if (draft) this.publish({ ...this.state, draft, notice: 'suggested' });
   }
   discardDraft() {
     const { snapshot, busy, inspecting, review } = this.state;
