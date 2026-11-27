@@ -1,6 +1,6 @@
 import { isLiveBindingInput, liveChannel, liveMethods, validLiveArgs } from '../../../packages/contracts/src/live-stage.ts';
 import { LiveStageController } from './live-stage/controller.ts';
-import { loadStageAssets, stageArtworkName } from './live-stage/assets.ts';
+import { hasRequiredStageActions, liveStageMediaDirectory, loadStageAssets, stageArtworkName } from './live-stage/assets.ts';
 import { openStageOutput } from './live-stage/output.ts';
 import { LiveStagePreview } from './live-stage/preview.ts';
 import { SpeechPreview } from './speech-preview.ts';
@@ -581,13 +581,13 @@ async function start() {
         return !exiting && !livePausing && result.ok && result.workspace.linkage === 'active';
       },
       open: async (role,clock,current) => {
-        if(role!=='longmei')throw new Error('stage_role_media_unavailable');
-        if (!workspaceVideoDirectory || !video?.longmeiReady) throw new Error('stage_media_unavailable');
-        const assets = await loadStageAssets(join(__dirname,'live-stage'), workspaceVideoDirectory);
+        if (!workspaceVideoDirectory || (role === 'longmei' ? !video?.longmeiReady : !video?.companionReady || !hasRequiredStageActions('dafeiyu',video.companionClips))) throw new Error('stage_media_unavailable');
+        const mediaDirectory = liveStageMediaDirectory(workspaceVideoDirectory,role);
+        const assets = await loadStageAssets(join(__dirname,'live-stage'), mediaDirectory, role);
         if (!current()) throw new Error('stage_cancelled');
         return openStageOutput(clock, assets);
       },
-      preview: url => preview.open(url), closePreview: () => preview.close(), copy: url => clipboard.writeText(url),
+      preview: (url,role) => preview.open(url,role), closePreview: () => preview.close(), copy: url => clipboard.writeText(url),
     });
     for (const method of liveMethods) ipcMain.handle(liveChannel(method), (event, ...args: unknown[]) => {
       const eligible = () => !exiting && !!workspace && !workspace.isDestroyed() && isWorkspaceVisible() && trustedFrame({

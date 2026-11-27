@@ -35,11 +35,12 @@ export const liveRoleActions = {
     'companion-49c0d89c0992': { label: '鲸尾回应', line: '给大家拍个鲸鱼尾巴～' },
   },
 } as const satisfies Record<LiveRoleId, Readonly<Record<string, { label: string; line: string }>>>;
-export type LiveRoleActionId<R extends LiveRoleId = LiveRoleId> = keyof typeof liveRoleActions[R] & string;
+export type LiveRoleActionId<R extends LiveRoleId = LiveRoleId> = R extends LiveRoleId ? keyof typeof liveRoleActions[R] & string : never;
 export function isLiveRoleAction(role: unknown, action: unknown): role is LiveRoleId {
   return isLiveRoleId(role) && typeof action === 'string' && Object.hasOwn(liveRoleActions[role], action);
 }
 export type LiveAction = keyof typeof liveActions;
+export type LiveRoleAction = LiveRoleActionId;
 export const liveActionIds = ['01', '18', '20'] as const satisfies readonly LiveAction[];
 export type LivePlacement = { position: number; scale: number };
 export type LiveRoleProfile = { schemaVersion: 3; selected: LiveScene; scenes: Record<LiveScene, LivePlacement> };
@@ -115,14 +116,14 @@ export interface LiveStageBridge {
   readBindings?():Promise<LiveBindingResult>;
   writeBinding?(input:LiveBindingInput):Promise<LiveBindingResult>;
 }
-export type LiveSnapshot = { protocol: 1; scene: LiveScene; placement: LivePlacement; generation: number; action?: LiveAction; remainingMs?: number; voice?: true; reply?: string };
+export type LiveSnapshot = { protocol: 1; role: LiveRoleId; scene: LiveScene; placement: LivePlacement; generation: number; action?: LiveRoleAction; remainingMs?: number; voice?: true; reply?: string };
 export const liveActionLifetimeMs = 7300; // The pinned four-second clips plus bounded first-frame preparation.
 export const liveVoiceMaxMs = 8_000;
 export const liveVoiceStartBudgetMs = 4_000;
 export function isLiveSnapshot(value: unknown): value is LiveSnapshot {
-  if (!(fields(value, ['protocol', 'scene', 'placement', 'generation']) || fields(value, ['protocol', 'scene', 'placement', 'generation', 'action', 'remainingMs']) || fields(value, ['protocol', 'scene', 'placement', 'generation', 'action', 'remainingMs', 'voice']) || fields(value, ['protocol', 'scene', 'placement', 'generation', 'action', 'remainingMs', 'voice', 'reply']))) return false;
-  return value.protocol === 1 && isLiveScene(value.scene) && isLivePlacement(value.placement, value.scene) && validInt(value.generation, 0, Number.MAX_SAFE_INTEGER) &&
+  if (!(fields(value, ['protocol', 'role', 'scene', 'placement', 'generation']) || fields(value, ['protocol', 'role', 'scene', 'placement', 'generation', 'action', 'remainingMs']) || fields(value, ['protocol', 'role', 'scene', 'placement', 'generation', 'action', 'remainingMs', 'voice']) || fields(value, ['protocol', 'role', 'scene', 'placement', 'generation', 'action', 'remainingMs', 'voice', 'reply']))) return false;
+  return value.protocol === 1 && isLiveRoleId(value.role) && isLiveScene(value.scene) && isLivePlacement(value.placement, value.scene) && validInt(value.generation, 0, Number.MAX_SAFE_INTEGER) &&
     (!Object.hasOwn(value, 'voice') || value.voice === true) &&
-    (!Object.hasOwn(value, 'reply') || (value.action === '01' && value.voice === true && isLiveDanmakuReply(value.reply))) &&
-    (!Object.hasOwn(value, 'action') || (isLiveAction(value.action) && validInt(value.remainingMs, 1, liveVoiceMaxMs + liveVoiceStartBudgetMs)));
+    (!Object.hasOwn(value, 'reply') || (value.role === 'longmei' && value.action === '01' && value.voice === true && isLiveDanmakuReply(value.reply))) &&
+    (!Object.hasOwn(value, 'action') || (isLiveRoleAction(value.role, value.action) && (value.role === 'longmei' || value.voice !== true) && validInt(value.remainingMs, 1, liveVoiceMaxMs + liveVoiceStartBudgetMs)));
 }

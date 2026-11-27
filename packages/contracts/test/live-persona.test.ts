@@ -3,7 +3,7 @@ import test from 'node:test';
 import { dafeiyu, longmei } from '../src/built-in-pets.ts';
 import { identityFields, isIdentityDraft } from '../src/characters.ts';
 import { characterPersonaSuggestions, liveRoleForPackage, liveRolePackages } from '../src/character-personas.ts';
-import { isLiveRoleAction, liveRoleActions } from '../src/live-stage.ts';
+import { isLiveRoleAction, isLiveSnapshot, liveRoleActions } from '../src/live-stage.ts';
 
 test('built-in live personas provide complete, valid, distinct identity suggestions', () => {
   for (const role of ['longmei', 'dafeiyu'] as const) {
@@ -38,4 +38,16 @@ test('live action catalogs are role-scoped and cannot cross-play another pet act
   assert.equal(isLiveRoleAction('longmei', 'companion-wave'), false);
   assert.equal(isLiveRoleAction('longmei', '__proto__'), false);
   assert.equal(isLiveRoleAction('unknown', '01'), false);
+});
+
+test('live stage snapshots bind each action and voice cue to one presenter role', () => {
+  const base = { protocol:1, scene:'desk-room', placement:{position:50,scale:100}, generation:1 };
+  assert.equal(isLiveSnapshot({...base,role:'dafeiyu',action:'companion-wave',remainingMs:2000}),true);
+  assert.equal(isLiveSnapshot({...base,role:'longmei',action:'01',remainingMs:2000}),true);
+  assert.equal(isLiveSnapshot({...base,role:'dafeiyu',action:'01',remainingMs:2000}),false);
+  assert.equal(isLiveSnapshot({...base,role:'longmei',action:'companion-wave',remainingMs:2000}),false);
+  assert.equal(isLiveSnapshot({...base,role:'dafeiyu',action:'companion-wave',remainingMs:2000,voice:true}),false);
+  assert.equal(isLiveSnapshot({...base,role:'dafeiyu',voice:true}),false);
+  assert.equal(isLiveSnapshot({...base,role:'longmei',voice:true}),false);
+  assert.equal(isLiveSnapshot(base),false);
 });

@@ -1,4 +1,4 @@
-import { isLiveSnapshot, liveActions, liveScenes, liveVoiceStartBudgetMs, type LiveAction, type LiveSnapshot } from '../../../../packages/contracts/src/live-stage.ts';
+import { isLiveSnapshot, liveRoleActions, liveScenes, liveVoiceStartBudgetMs, type LiveAction, type LiveRoleAction, type LiveSnapshot } from '../../../../packages/contracts/src/live-stage.ts';
 import catalog from '../video-preview/clip-catalog.json';
 
 const stage = document.querySelector<HTMLElement>('#stage')!;
@@ -10,18 +10,19 @@ let room = document.querySelector<HTMLImageElement>('#room')!;
 const dialogue = document.querySelector<HTMLElement>('#dialogue')!;
 const line = document.querySelector<HTMLElement>('#line')!;
 let ready = false, connected = false, closed = false;
-let latest = -1, scene: LiveSnapshot['scene'] | undefined;
+let latest = -1, scene: LiveSnapshot['scene'] | undefined, presenter: LiveSnapshot['role'] | undefined;
 let placement: LiveSnapshot['placement'];
 let desired: LiveSnapshot | undefined, retryBackdropAt = 0;
 let cancelBackdrop: (() => void) | undefined;
-let playingClip: LiveAction | undefined;
+let playingClip: LiveRoleAction | undefined;
 let disposeVoice: (() => void) | undefined;
 let disposeAction: (() => void) | undefined;
 let admission = new AbortController();
 
-function position(video: HTMLVideoElement, clip: 'idle' | LiveAction, {position: x, scale}: LiveSnapshot['placement'], sceneId: LiveSnapshot['scene']) {
+function position(video: HTMLVideoElement, clip: 'idle' | LiveRoleAction, {position: x, scale}: LiveSnapshot['placement'], sceneId: LiveSnapshot['scene'], role: LiveSnapshot['role']) {
   const core = 624 * scale / 100;
-  const { scale: correction, offset } = catalog[clip];
+  const layout = role === 'longmei' ? catalog[clip === 'idle' ? 'idle' : clip as LiveAction] : {scale:1, offset:[0,0] as const};
+  const { scale: correction, offset } = layout;
   const floorY = liveScenes.find(item => item.id === sceneId)!.floorY;
   const size = Math.round(core * correction);
   video.style.width = `${size / 19.2}%`;
@@ -59,11 +60,13 @@ function firstFrame(video: HTMLVideoElement, signal: AbortSignal, timeout: numbe
 }
 
 function connect(snapshot: LiveSnapshot) {
-  connected = true; latest = snapshot.generation;
+  connected = true; latest = snapshot.generation; presenter = snapshot.role;
+  const presenterName = presenter === 'longmei' ? '龙妹' : '鲸鱼妹';
+  document.title = `${presenterName}的直播舞台`; stage.setAttribute('aria-label', `${presenterName}的直播舞台`);
   scene = snapshot.scene; stage.dataset.scene = scene;
   room.src = `${scene}-room.webp`; desk.src = `${scene}-desk.webp`;
   placement = snapshot.placement;
-  position(idle, 'idle', placement, snapshot.scene);
+  position(idle, 'idle', placement, snapshot.scene, snapshot.role);
   idle.src = 'idle.webm'; idle.muted = true;
   const signal = admission.signal;
   // Keep video eligible for composition during preparation; hide the entire scene visually.
@@ -104,13 +107,14 @@ function updateBackdrop(snapshot: LiveSnapshot) {
     }
     room = nextRoom; desk = nextDesk;
     placement = desired.placement;
-    position(idle, 'idle', placement, target);
-    if (playingClip) position(action, playingClip, placement, target);
+    if (!presenter) { cancel(); return; }
+    position(idle, 'idle', placement, target, presenter);
+    if (playingClip) position(action, playingClip, placement, target, presenter);
     stage.dataset.scene = scene = target;
   }).catch(failed);
 }
 
-function play(clip: LiveAction, snapshot: LiveSnapshot) {
+function play(clip: LiveRoleAction, snapshot: LiveSnapshot) {
   const remaining = snapshot.remainingMs!;
   if (!ready || remaining < 1400) return;
   const pending = new AbortController();
@@ -159,14 +163,15 @@ function play(clip: LiveAction, snapshot: LiveSnapshot) {
     audio.src = `voice-${snapshot.generation}.wav`;
     stage.append(audio);
   }
-  position(action, clip, placement, snapshot.scene); action.muted = true;
+  position(action, clip, placement, snapshot.scene, snapshot.role); action.muted = true;
   action.src = `${clip}.webm`; action.classList.add('pending'); action.hidden = false;
   action.addEventListener('ended', ended); action.addEventListener('error', stop);
   const reveal = () => {
     if (pending.signal.aborted || !ready) return;
     shownAt = performance.now(); action.classList.remove('pending'); idle.hidden = true;
     dialogue.classList.toggle('agent-reply', snapshot.reply !== undefined);
-    line.textContent = snapshot.reply ?? liveActions[clip].line; dialogue.hidden = false;
+    const actions = liveRoleActions[snapshot.role] as Readonly<Record<string,{label:string;line:string}>>;
+    line.textContent = snapshot.reply ?? actions[clip]!.line; dialogue.hidden = false;
     endWhenReady();
   };
   void firstFrame(action, pending.signal, Math.min(2300, remaining - 1250)).then(() => {
@@ -198,7 +203,7 @@ async function poll() {
     if (!isLiveSnapshot(next)) throw new Error('bad_snapshot');
     if (!connected) connect(next);
     else {
-      if (next.generation < latest) throw new Error('bad_generation');
+      if (next.role !== presenter || next.generation < latest) throw new Error('bad_generation');
       updateBackdrop(next);
       if (next.generation > latest) {
         latest = next.generation; stopAction();

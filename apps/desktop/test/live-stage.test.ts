@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 // @ts-expect-error The production build helper is an executable JavaScript module.
 import { stageLiveUI } from '../../../scripts/stage-live-ui.mjs';
-import { defaultLiveProfile, isLiveProfile, isLiveSnapshot, liveActions, liveScenes, validLiveArgs, type LiveProfile } from '../../../packages/contracts/src/live-stage.ts';
+import { defaultLiveProfile, isLiveProfile, isLiveSnapshot, liveActions, liveRoleActions, liveScenes, validLiveArgs, type LiveProfile } from '../../../packages/contracts/src/live-stage.ts';
 import { LiveStageClock } from '../src/live-stage/clock.ts';
 import { stageArtworkName } from '../src/live-stage/assets.ts';
 import { openStageOutput } from '../src/live-stage/output.ts';
@@ -25,7 +25,7 @@ test('only six latest scenes, complete scene-specific placement, and fixed calls
   assert.equal(isLiveProfile({...p, scenes:incomplete}), false);
   assert.equal(isLiveProfile({...p, scenes:{...p.scenes, forest:{position:75,scale:100}}}), false);
   assert.equal(isLiveSnapshot({protocol:1, scene:'forest', placement:{position:75,scale:100}, generation:0}), false);
-  assert.ok(isLiveSnapshot({protocol:1, scene:'studio', placement:studio, generation:0}));
+  assert.ok(isLiveSnapshot({protocol:1, role:'longmei', scene:'studio', placement:studio, generation:0}));
   assert.ok(isLiveProfile(p));
   for (const input of [{...p, path: '/tmp/data'}, {...p, schemaVersion: 1}, {...p, selected: 'morning'}, {...p, scenes: {...p.scenes, 'desk-room': {position: 76, scale: 100}}}]) assert.equal(isLiveProfile(input), false);
   assert.equal(validLiveArgs('start', ['url']), false);
@@ -59,6 +59,19 @@ test('latest manual host action wins and expiry does not replay', () => {
   assert.equal(clock.snapshot().action, undefined);
   assert.equal(clock.snapshot().generation, 2);
   assert.equal(clock.snapshot().action, undefined);
+});
+
+test('Whale Girl clock publishes only whale actions and never binds Dragon Girl voice', () => {
+  let now = 0;
+  const clock = new LiveStageClock(defaultLiveProfile(), 'dafeiyu', () => now);
+  assert.equal(clock.snapshot().role, 'dafeiyu');
+  assert.equal(clock.trigger('companion-wave'), true);
+  assert.equal(clock.snapshot().action, 'companion-wave');
+  assert.equal(clock.voiceFor(clock.snapshot().generation), undefined);
+  assert.throws(() => clock.trigger('01'), /invalid_live_action/);
+  now += 8_000;
+  assert.equal(clock.snapshot().action, undefined);
+  assert.equal(Object.hasOwn(liveRoleActions.dafeiyu, '01'), false);
 });
 
 test('loopback output isolates session path, rejects writes and serves bounded byte ranges', async () => {
@@ -143,7 +156,9 @@ test('stage package contains the complete local artwork for all six approved sce
   const out = join(root,'stage');
   try {
     await stageLiveUI(process.cwd(),out);
-    assert.match(await readFile(join(out,'index.html'),'utf8'),/<title>龙妹的直播舞台<\/title>/);
+    assert.match(await readFile(join(out,'index.html'),'utf8'),/<title>主播直播舞台<\/title>/);
+    const script = await readFile(join(out,'stage.js'),'utf8');
+    assert.match(script,/companion-wave/); assert.match(script,/dafeiyu/);
     for (const id of sceneIds) for (const kind of ['room','desk','cover','preview']) {
       const name = `${id}-${kind}.webp`;
       assert.deepEqual(await readFile(join(out,name)),await readFile(join(process.cwd(),'apps/desktop/src/live-stage/art',name)),name);
@@ -349,6 +364,59 @@ test('successful start prepares voice once in the background; stopping aborts it
     assert.ok(video.ok && video.running,'missing tone does not stop the picture');
     assert.equal(jobs.length,2,'failure is not retried on read');
   } finally { for (const job of jobs) job.fail(); await stage.close(); }
+});
+
+test('Whale Girl stage uses its role actions, stays muted, and cannot enter Dragon Girl danmaku rehearsal', async () => {
+  const { LiveStageController } = await import('../src/live-stage/controller.ts');
+  let profileRole: string | undefined, openedRole: string | undefined, voiceCalls = 0, modelCalls = 0;
+  let clock: LiveStageClock | undefined;
+  const stage = new LiveStageController({
+    profile: async (next, role) => { profileRole = role; return {ok:true,profile:next ?? defaultLiveProfile()}; },
+    allowed: async () => true,
+    open: async (role, openedClock) => { openedRole = role; clock = openedClock; return openStageOutput(openedClock,new Map()); },
+    preview: async () => {}, closePreview: () => {}, copy: () => {},
+    voice: async () => { voiceCalls++; return {ok:true,clips:{'01':Buffer.from('dragon voice'),'18':Buffer.from('dragon voice'),'20':Buffer.from('dragon voice')}}; },
+    danmaku: async () => { modelCalls++; return {ok:false,error:'model-failed'}; },
+  });
+  const run = (method: Parameters<typeof stage.run>[0], input?: unknown) => stage.run(method,input,()=>true,'dafeiyu');
+  try {
+    assert.ok((await run('start')).ok);
+    assert.equal(profileRole,'dafeiyu'); assert.equal(openedRole,'dafeiyu');
+    assert.equal(clock?.snapshot().role,'dafeiyu');
+    assert.equal(voiceCalls,0,'no Whale Girl voice profile exists; do not prepare Dragon Girl TTS');
+    const read = await run('read'); assert.ok(read.ok); assert.equal(read.voice,'muted');
+    assert.deepEqual(await stage.run('stop',undefined,()=>true,'longmei'),{ok:false,error:'unavailable'},'a role cannot stop the other presenter stage');
+    assert.ok((await run('trigger','companion-wave')).ok);
+    assert.equal(clock?.snapshot().action,'companion-wave');
+    assert.deepEqual(await run('trigger','01'),{ok:false,error:'unavailable'});
+    assert.deepEqual(await run('submitDanmaku','欢迎'),{ok:false,error:'unavailable'});
+    assert.equal(modelCalls,0,'danmaku rehearsal remains disabled while Whale Girl has no independent voice');
+  } finally { await stage.close(); }
+});
+
+test('stopping a pending Whale Girl media open retires its late output without publishing it', async () => {
+  const { LiveStageController } = await import('../src/live-stage/controller.ts');
+  let resolveOutput!: (output: {url:string;close():Promise<void>}) => void;
+  let entered!: () => void;
+  const waiting = new Promise<{url:string;close():Promise<void>}>(resolve => { resolveOutput = resolve; });
+  const openStarted = new Promise<void>(resolve => { entered = resolve; });
+  let openedRole: string | undefined, isCurrent: (() => boolean) | undefined, closes = 0;
+  const stage = new LiveStageController({
+    profile: async () => ({ok:true,profile:defaultLiveProfile()}),
+    allowed: async () => true,
+    open: async (role, _clock, current) => { openedRole = role; isCurrent = current; entered(); return waiting; },
+    preview: async () => {}, closePreview: () => {}, copy: () => {},
+  });
+  const eligible = () => true;
+  const starting = stage.run('start',undefined,eligible,'dafeiyu');
+  await openStarted;
+  await stage.run('stop',undefined,eligible,'dafeiyu');
+  resolveOutput({url:'late-whale-output',close:async()=>{closes++;}});
+  assert.deepEqual(await starting,{ok:false,error:'unavailable'});
+  assert.equal(openedRole,'dafeiyu');
+  assert.equal(isCurrent?.(),false,'the open callback generation guard is invalidated by stop');
+  assert.equal(closes,1,'a result that resolves after stop is always closed');
+  await stage.close();
 });
 
 test('rehearsal publishes only generated text and its own audio; scene switch preserves the cue and stopping does not cancel a manual action', async () => {

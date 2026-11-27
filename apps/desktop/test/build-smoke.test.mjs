@@ -14,7 +14,7 @@ test('built stage ships fixed scene layers and workspace previews without charac
     for (const layer of ['room', 'desk', 'cover', 'preview']) files.push(`${id}-${layer}.webp`);
   }
   assert.deepEqual((await readdir(`${out}/live-stage`)).sort(), files.sort());
-  assert.match(await readFile(`${out}/live-stage/index.html`, 'utf8'), /<title>龙妹的直播舞台<\/title>[\s\S]*<video id="idle" muted loop/);
+  assert.match(await readFile(`${out}/live-stage/index.html`, 'utf8'), /<title>主播直播舞台<\/title>[\s\S]*<video id="idle" muted loop/);
   const script = await readFile(`${out}/live-stage/stage.js`, 'utf8');
   assert.match(script, /requestVideoFrameCallback/);
   assert.doesNotMatch(script, /petDesktop|ipcRenderer|require\(|https?:\/\//);

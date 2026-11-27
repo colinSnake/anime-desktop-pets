@@ -1,5 +1,5 @@
 import type { LiveVoiceResult } from '../../../../packages/contracts/src/live-voice.ts';
-import { isLiveDanmaku, isLiveScene, isLiveRoleId, isLiveRoleAction, type LiveRoleId, type LiveDanmakuError, type LiveDanmakuState, type LiveScene, type LiveAction, type LiveMethod, type LiveProfile, type LiveProfileResult, type LiveResult, type LiveVoiceState } from '../../../../packages/contracts/src/live-stage.ts';
+import { isLiveDanmaku, isLiveScene, isLiveRoleId, isLiveRoleAction, type LiveRoleId, type LiveDanmakuError, type LiveDanmakuState, type LiveScene, type LiveRoleAction, type LiveMethod, type LiveProfile, type LiveProfileResult, type LiveResult, type LiveVoiceState } from '../../../../packages/contracts/src/live-stage.ts';
 import { LiveStageClock } from './clock.ts';
 import type { StageOutput } from './output.ts';
 const unavailable = {ok:false,error:'unavailable'} as const;
@@ -11,6 +11,7 @@ export class LiveStageController {
   private active?: ActiveStage;
   private danmakuJob?: { controller:AbortController; task:Promise<void> };
   private changing?: Promise<LiveResult>;
+  private changingRole?: LiveRoleId;
   private version = 0;
   private stopping?: Promise<void>;
   private retired = false;
@@ -18,7 +19,7 @@ export class LiveStageController {
     profile(input: LiveProfile | undefined,role:LiveRoleId): Promise<LiveProfileResult>;
     allowed(): Promise<boolean>;
     open(role:LiveRoleId,clock: LiveStageClock, current: () => boolean): Promise<StageOutput>;
-    preview(url: string): Promise<void>;
+    preview(url: string, role:LiveRoleId): Promise<void>;
     closePreview(): void;
     copy(url: string): void;
     voice?(signal: AbortSignal): Promise<LiveVoiceResult>;
@@ -36,6 +37,7 @@ export class LiveStageController {
   }
 
   private prepareVoice(active: ActiveStage) {
+    if (active.role !== 'longmei') return;
     const prepare = this.deps.voice;
     if (!prepare) return;
     const job = new AbortController();
@@ -82,6 +84,7 @@ export class LiveStageController {
     const current = () => eligible() && version === this.version && !this.retired;
     const view = (profile: LiveProfile, running = false): LiveResult => ({ok:true,profile:structuredClone(profile),running, ...(this.deps.voice && {voice: (running && this.active?.voice) || 'muted'}), ...(running && this.active?.danmaku && {danmaku:this.active.danmaku})});
     if (method === 'stop') {
+      if ((this.active && this.active.role !== role) || (this.changing && this.changingRole !== role)) return unavailable;
       const profile = this.active?.profile;
       const pending = profile ? this.changing : undefined;
       await this.stop();
@@ -99,7 +102,7 @@ export class LiveStageController {
       return !current() ? unavailable : this.active ? view(this.active.profile,true) : result.ok ? view(result.profile) : result;
     }
     if (method === 'submitDanmaku' || method === 'stopDanmaku') {
-      if (!active || active.role!==role || !this.deps.danmaku) return unavailable;
+      if (!active || active.role!==role || role !== 'longmei' || !this.deps.danmaku) return unavailable;
       if (method === 'stopDanmaku') {
         this.cancelDanmaku(true);
         return view(active.profile,true);
@@ -144,15 +147,15 @@ export class LiveStageController {
         active.clock.selectScene(input);
         return current() ? view(active.profile, true) : unavailable;
       })();
-      this.changing = operation;
-      try { return await operation; } finally { this.changing = undefined; }
+      this.changing = operation; this.changingRole = role;
+      try { return await operation; } finally { this.changing = undefined; this.changingRole = undefined; }
     }
     if (method !== 'save' && method !== 'start') {
       if (!active || active.role!==role) return unavailable;
-      if (method === 'trigger') { if(!isLiveRoleAction(role,input)||role!=='longmei')return unavailable;this.cancelDanmaku(true);active.clock.trigger(input as LiveAction); }
+      if (method === 'trigger') { if(!isLiveRoleAction(role,input))return unavailable;this.cancelDanmaku(true);active.clock.trigger(input as LiveRoleAction); }
       if (method === 'copy') this.deps.copy(active.output.url);
       if (method === 'preview') {
-        try { await this.deps.preview(active.output.url); } catch { return unavailable; }
+        try { await this.deps.preview(active.output.url,active.role); } catch { return unavailable; }
       }
       return current() ? view(active.profile,true) : unavailable;
     }
@@ -167,7 +170,7 @@ export class LiveStageController {
       if (!result.ok) return result;
       if (!current()) return unavailable;
       if (method === 'save') return view(result.profile);
-      const clock = new LiveStageClock(result.profile);
+      const clock = new LiveStageClock(result.profile,role);
       let output: StageOutput;
       try { output = await this.deps.open(role,clock, current); } catch { return current() ? {ok:false,error:'media'} : unavailable; }
       if (!current()) { await output.close(); return unavailable; }
@@ -176,7 +179,7 @@ export class LiveStageController {
       this.prepareVoice(active);
       return view(result.profile,true);
     })();
-    this.changing = operation;
-    try { return await operation; } finally { this.changing = undefined; }
+    this.changing = operation; this.changingRole = role;
+    try { return await operation; } finally { this.changing = undefined; this.changingRole = undefined; }
   }
 }

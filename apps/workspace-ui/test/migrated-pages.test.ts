@@ -176,7 +176,7 @@ test('live puts output first, offers the two roles, and keeps offline controls d
 test('live rehearsal stays composer-only and keeps processing and failure feedback', async () => {
   const props = { notice: '', available: true, locked: false, unavailableHint: '', onSend: async () => true };
   for (const [state, feedback] of [
-    [{ phase: 'generating' }, '龙妹正在读弹幕、组织回复。'],
+    [{ phase: 'generating' }, '主播正在读弹幕、组织回复。'],
     [{ phase: 'synthesizing' }, '正在用本机音色生成节目语音。'],
     [{ phase: 'published', text: '合成回复' }, ''],
     [{ phase: 'failed', error: 'model-failed' }, '没收到可播的回复'],

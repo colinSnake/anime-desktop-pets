@@ -2,18 +2,19 @@ import { BrowserWindow, session } from 'electron';
 import { randomBytes } from 'node:crypto';
 import { WINDOW_SECURITY } from '../security.ts';
 import { windowColors } from '../window-colors.ts';
+import type { LiveRoleId } from '../../../../packages/contracts/src/live-stage.ts';
 
 /** A fresh, ephemeral permissionless surface. No preload, workbench session, or control bridge. */
 export class LiveStagePreview {
   private window?: BrowserWindow;
   private readonly browser = session.fromPartition(`live-stage-${randomBytes(12).toString('hex')}`, {cache:false});
-  async open(url: string) {
+  async open(url: string, role: LiveRoleId = 'longmei') {
     if (this.window && !this.window.isDestroyed()) { this.window.show(); return; }
     const browser = this.browser;
     browser.setPermissionCheckHandler(() => false);
     browser.setPermissionRequestHandler((_c,_p,reply) => reply(false));
     browser.webRequest.onBeforeRequest((details,reply) => reply({cancel:!details.url.startsWith(url)}));
-    const win = new BrowserWindow({title:'龙妹的直播舞台 · 舞台预览', width:960, height:572, minWidth:480, minHeight:300,
+    const win = new BrowserWindow({title:`${role === 'longmei' ? '龙妹' : '鲸鱼妹'}的直播舞台 · 舞台预览`, width:960, height:572, minWidth:480, minHeight:300,
       show:false, autoHideMenuBar:true, backgroundColor:windowColors.liveStage, webPreferences:{...WINDOW_SECURITY,session:browser,backgroundThrottling:false,autoplayPolicy:'no-user-gesture-required'}});
     // This local monitor must not double the OBS program audio via desktop capture.
     win.webContents.setAudioMuted(true);

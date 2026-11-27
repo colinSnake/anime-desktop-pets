@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, rm, readFile, symlink, realpath } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, rename, symlink, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LiveRoleBindingStore } from '../src/live/role-bindings.ts';
@@ -30,6 +30,39 @@ test('concurrent binding updates cannot overwrite a committed revision', {skip:p
   const results=await Promise.allSettled([a.write(0,{longmei:'pet-aaaaaaaaaaaaaaaaaaaa',dafeiyu:null}),b.write(0,{longmei:null,dafeiyu:'pet-bbbbbbbbbbbbbbbbbbbb'})]);
   assert.equal(results.filter(x=>x.status==='fulfilled').length,1);
   assert.equal((await a.read()).revision,1);
+});
+
+test('uncertain binding publication is surfaced and callers must reread instead of assuming rollback', {skip:process.platform==='win32'}, async t => {
+  let failure: 'rename-before' | 'rename-after' | 'directory-sync' | undefined;
+  const root=await mkdtemp(join(await realpath(tmpdir()),'live-role-durability-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const store=new LiveRoleBindingStore(root,{io:{
+    rename:async(from,to)=>{
+      if(failure==='rename-before')throw new Error('synthetic rename failure');
+      await rename(from,to);
+      if(failure==='rename-after')throw new Error('synthetic post-publication failure');
+    },
+    syncDirectory:async()=>{if(failure==='directory-sync')throw new Error('synthetic sync failure');},
+  }});
+  const first={longmei:'pet-aaaaaaaaaaaaaaaaaaaa',dafeiyu:null};
+  const second={longmei:null,dafeiyu:'pet-bbbbbbbbbbbbbbbbbbbb'};
+  await store.write(0,first);
+  const file=join(root,'role-bindings.json');
+  const original=await readFile(file);
+
+  failure='rename-before';
+  await assert.rejects(store.write(1,second),/rename failure/);
+  assert.deepEqual(await readFile(file),original);
+  assert.deepEqual(await store.read(),{revision:1,bindings:first});
+
+  failure='rename-after';
+  await assert.rejects(store.write(1,second),/post-publication failure/);
+  assert.deepEqual(await store.read(),{revision:2,bindings:second});
+  await assert.rejects(store.write(1,first),/conflict/);
+
+  failure='directory-sync';
+  await assert.rejects(store.write(2,first),/sync failure/);
+  assert.deepEqual(await store.read(),{revision:3,bindings:first});
 });
 
 test('binding route accepts only registered instances of the matching built-in package', {skip:process.platform==='win32'}, async t=>{

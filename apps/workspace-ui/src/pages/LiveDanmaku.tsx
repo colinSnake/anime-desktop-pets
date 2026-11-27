@@ -24,7 +24,7 @@ export function LiveDanmaku({ state, notice, available, locked, unavailableHint,
   const text = draft.trim();
   const working = danmakuWorking(state);
   const status = notice || (submitting ? '正在提交演练…'
-    : state?.phase === 'generating' ? '龙妹正在读弹幕、组织回复。'
+    : state?.phase === 'generating' ? '主播正在读弹幕、组织回复。'
     : state?.phase === 'synthesizing' ? '正在用本机音色生成节目语音。'
     : state?.phase === 'failed' ? failures[state.error] : unavailableHint);
   const canSend = available && !locked && !submitting && !working && isLiveDanmaku(text);
@@ -55,7 +55,7 @@ export function LiveDanmaku({ state, notice, available, locked, unavailableHint,
       <div className="live-danmaku-composer">
         <label className="sr-only" htmlFor={`${id}-text`}>观众弹幕</label>
         <textarea id={`${id}-text`} ref={input} rows={2} maxLength={liveDanmakuMaxLength} value={draft} readOnly={submitting || working}
-          placeholder="例如：龙妹，这套布景叫什么？"
+          placeholder="例如：这套布景叫什么？"
           onCompositionStart={() => keyboard.current.start()}
           onCompositionEnd={event => keyboard.current.end(event.timeStamp)}
           onKeyDown={event => {

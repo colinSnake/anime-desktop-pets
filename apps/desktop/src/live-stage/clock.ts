@@ -1,25 +1,34 @@
-import { isLiveDanmakuReply, liveActionLifetimeMs, liveVoiceStartBudgetMs, type LiveAction, type LiveProfile, type LiveScene, type LiveSnapshot } from '../../../../packages/contracts/src/live-stage.ts';
+import { isLiveDanmakuReply, isLiveRoleAction, liveActionLifetimeMs, liveVoiceStartBudgetMs, type LiveAction, type LiveProfile, type LiveRoleAction, type LiveRoleId, type LiveScene, type LiveSnapshot } from '../../../../packages/contracts/src/live-stage.ts';
 import { stageVoiceDuration, type LiveVoiceBank } from '../../../../packages/contracts/src/live-voice.ts';
 
 export class LiveStageClock {
   private generation = 0;
-  private playing?: { action: LiveAction; until: number; voiced: boolean; reply?: { text:string; audio:Buffer } };
+  private playing?: { action: LiveRoleAction; until: number; voiced: boolean; reply?: { text:string; audio:Buffer } };
   private voice?: LiveVoiceBank;
   private readonly profile: LiveProfile;
-  constructor(profile: LiveProfile, private now = () => performance.now()) { this.profile = structuredClone(profile); }
+  private readonly role: LiveRoleId;
+  private readonly now: () => number;
+  constructor(profile: LiveProfile, now?: () => number);
+  constructor(profile: LiveProfile, role: LiveRoleId, now?: () => number);
+  constructor(profile: LiveProfile, roleOrNow: LiveRoleId | (() => number) = 'longmei', now = () => performance.now()) {
+    this.profile = structuredClone(profile);
+    this.role = typeof roleOrNow === 'string' ? roleOrNow : 'longmei';
+    this.now = typeof roleOrNow === 'function' ? roleOrNow : now;
+  }
   selectScene(scene: LiveScene) { this.profile.selected = scene; }
   setVoice(clips?: LiveVoiceBank) {
-    this.voice = clips;
+    this.voice = this.role==='longmei'?clips:undefined;
     this.stopDanmaku();
     if (this.playing) this.playing.voiced = false;
   }
   voiceFor(generation: number): Buffer | undefined {
     const next = this.snapshot();
-    return next.voice && next.generation === generation && next.action ? (this.playing?.reply?.audio ?? this.voice?.[next.action]) : undefined;
+    return next.voice && this.role==='longmei' && next.generation === generation && next.action ? (this.playing?.reply?.audio ?? this.voice?.[next.action as LiveAction]) : undefined;
   }
-  trigger(action: LiveAction): true {
+  trigger(action: LiveRoleAction): true {
+    if(!isLiveRoleAction(this.role,action))throw new Error('invalid_live_action');
     this.generation++;
-    const duration = this.voice && stageVoiceDuration(this.voice[action]);
+    const duration = this.role==='longmei'&&this.voice&&isDragonAction(action)?stageVoiceDuration(this.voice[action]):undefined;
     this.playing = { action, voiced: !!duration, until: this.now() + Math.max(liveActionLifetimeMs, duration ? duration + liveVoiceStartBudgetMs : 0) };
     return true;
   }
@@ -29,7 +38,7 @@ export class LiveStageClock {
   }
   publishDanmaku(text: string, audio: Buffer): boolean {
     const duration = stageVoiceDuration(audio);
-    if (!this.voice || !isLiveDanmakuReply(text) || !duration || this.hasManualCue()) return false;
+    if (this.role!=='longmei'||!this.voice || !isLiveDanmakuReply(text) || !duration || this.hasManualCue()) return false;
     this.generation++;
     this.playing = { action:'01', voiced:true, reply:{text,audio}, until:this.now() + Math.max(liveActionLifetimeMs, duration + liveVoiceStartBudgetMs) };
     return true;
@@ -40,7 +49,8 @@ export class LiveStageClock {
     const active = this.playing;
     const remainingMs = active ? Math.ceil(active.until - this.now()) : 0;
     if (!remainingMs || remainingMs < 0) this.playing = undefined;
-    return { protocol: 1, scene, placement: { ...scenes[scene] }, generation: this.generation,
+    return { protocol: 1, role:this.role, scene, placement: { ...scenes[scene] }, generation: this.generation,
       ...(active && remainingMs > 0 && { action: active.action, remainingMs, ...(active.voiced && {voice:true as const}), ...(active.reply && {reply:active.reply.text}) }) };
   }
 }
+function isDragonAction(action:LiveRoleAction):action is LiveAction{return action==='01'||action==='18'||action==='20';}

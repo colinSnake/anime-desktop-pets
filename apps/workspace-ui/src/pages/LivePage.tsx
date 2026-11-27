@@ -21,7 +21,7 @@ const problems: Record<LiveError, string> = {
   unavailable: '未能确认操作结果。请重新读取舞台状态。',
   storage: '未能确认布景配置。原文件不会被自动重置，请先重新读取。',
   busy: '舞台正在处理其他操作，或桌宠联动已暂停。',
-  media: '未能准备节目画面。请重试；若仍失败，请检查本机龙妹素材及桌面工作区启动日志。',
+  media: '未能准备节目画面。请重试；若仍失败，请检查该角色的本机素材及桌面工作区启动日志。',
 };
 const actionIcons:Record<string,'chat'|'spark'|'pulse'> = {'01':'chat','18':'spark','20':'pulse','companion-wave':'chat','companion-jump':'spark','companion-49c0d89c0992':'pulse'};
 const artwork = (id: LiveScene, size: 'cover' | 'preview') => `pet-app://workspace/live-stage/${id}-${size}.webp`;
@@ -162,6 +162,7 @@ export function LivePage({appearance,bridge,paused,instances=[]}:{appearance?:Re
   const voiceHint = !running ? ''
     : voice === 'reference-required' ? '请在「语音互动」保存参考 WAV 和逐字稿，再重新开启直播台。'
     : voice === 'voice-busy' ? '本机语音忙，节目暂时静音。等当前语音任务结束后重新开台。'
+    : role.id === 'dafeiyu' ? '鲸鱼妹暂未配置独立节目音色；画面可用，节目保持静音。'
     : voice === 'voice-failed' ? '龙妹声音准备失败，节目保持静音。请检查本机语音后重新开台。'
     : voice === undefined ? '此环境未接入本机语音运行时。'
     : '';
@@ -276,8 +277,8 @@ export function LivePage({appearance,bridge,paused,instances=[]}:{appearance?:Re
           </button>;
         })}</div>
         <LiveDanmaku state={danmaku} notice={danmakuNotice} locked={!!busy}
-          available={active && voice === 'ready' && !!bridge?.submitDanmaku}
-          unavailableHint={running && !bridge?.submitDanmaku ? '此工作区不支持弹幕演练。' : ''}
+          available={active && role.id === 'longmei' && voice === 'ready' && !!bridge?.submitDanmaku}
+          unavailableHint={running && role.id === 'dafeiyu' ? '鲸鱼妹尚未配置独立节目音色，弹幕演练暂不可用。' : running && !bridge?.submitDanmaku ? '此工作区不支持弹幕演练。' : ''}
           onSend={async text => bridge?.submitDanmaku ? run('submitDanmaku', () => bridge.submitDanmaku!(text,role.id)) : false} />
       </section>
     </div>}

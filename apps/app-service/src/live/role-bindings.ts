@@ -12,6 +12,7 @@ const file='role-bindings.json', lockFile='role-bindings.lock', limit=1024;
 const invalid=()=>new Error('invalid_live_role_bindings');
 const conflict=()=>new Error('live_role_bindings_conflict');
 const blank=():LiveRoleBindingSnapshot=>({revision:0,bindings:{longmei:null,dafeiyu:null}});
+type Options={io?:{rename?:typeof rename;syncDirectory?:()=>Promise<void>}};
 function validBindings(value:unknown):value is LiveRoleBindings {
   if(!value||typeof value!=='object'||Array.isArray(value)) return false;
   const row=value as Record<string,unknown>;
@@ -30,7 +31,7 @@ export class LiveRoleBindingStore {
   private readonly directory:PrivateDirectory;
   private tail:Promise<unknown>=Promise.resolve();
   private closing=false;
-  constructor(root:string){this.directory=new PrivateDirectory(root);}
+  constructor(root:string,private readonly options:Options={}){this.directory=new PrivateDirectory(root);}
   private run<T>(op:()=>Promise<T>):Promise<T>{if(this.closing)return Promise.reject(invalid());const result=this.tail.then(op);this.tail=result.catch(()=>{});return result;}
   close(){this.closing=true;return this.tail;}
   read():Promise<LiveRoleBindingSnapshot>{return this.run(async()=>{const row=await this.directory.read(file,limit);return row?parse(row.bytes):blank();});}
@@ -60,7 +61,8 @@ export class LiveRoleBindingStore {
       await handle.writeFile(JSON.stringify({schemaVersion:1,...snapshot}));await handle.sync();await handle.close();handle=undefined;
       const current=await this.directory.file(file);
       if(old?!current||!sameFile(old.info,current)||old.info.ctimeMs!==current.ctimeMs:!!current) throw conflict();
-      await rename(this.directory.path(temp),this.directory.path(file));await this.directory.sync();
+      await (this.options.io?.rename??rename)(this.directory.path(temp),this.directory.path(file));
+      await (this.options.io?.syncDirectory?.()??this.directory.sync());
     }finally{await handle?.close().catch(()=>{});if(identity)await this.directory.removeOwned(temp,identity).catch(()=>{});}
   }
 }
