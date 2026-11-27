@@ -13,9 +13,12 @@ import { PetWorkspace } from '../src/pet-workspace.ts';
 import { CharacterRepository } from '../src/characters/repository.ts';
 import { BubbleSpeech } from '../src/speech/bubble-speech.ts';
 import { LiveProfileStore } from '../src/live/profile.ts';
+import { LiveRoleBindingStore } from '../src/live/role-bindings.ts';
+import { LiveShareStore } from '../src/live/sharing.ts';
 import { createService } from '../src/server.ts';
 import { sendOnlineChat } from '../src/online-chat.ts';
 import { TextChatTurns, type TextChatRuntime } from '../src/agent/text-chat-runtime.ts';
+import { longmei } from '../../../packages/contracts/src/built-in-pets.ts';
 import { configuration } from './fixtures/models.ts';
 import { syntheticVault } from './fixtures/secure-models.ts';
 
@@ -31,23 +34,26 @@ const writeDraft = (id: string) => {
   return { ...draft, id, displayName: id, baseURL: `https://${id}.invalid/v1` };
 };
 const syntheticRuntime: TextChatRuntime = (text, complete) => complete(text);
-async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, beforeRead?: () => Promise<void>, chatRuntime: TextChatRuntime | null = syntheticRuntime, withHistory = false, withAgentState = false, speech?: BubbleSpeech) {
+async function fixture(t: test.TestContext, fetch: typeof globalThis.fetch, beforeRead?: () => Promise<void>, chatRuntime: TextChatRuntime | null = syntheticRuntime, withHistory = false, withAgentState = false, speech?: BubbleSpeech, withLiveRoles = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'pet-online-chat-')));
   const { backend } = syntheticVault(); let reads = 0;
   const models = new ModelManagement(join(root, 'models'), { ...backend, read: async (...args) => { reads++; await beforeRead?.(); return backend.read(...args); } }, undefined, { fetch });
-  const pkg = { id: 'local.pet', version: '1.0.0' };
-  const workspace = new PetWorkspace({ root, catalog: [{ ...pkg, name: '合成桌宠' }] });
+  const pkg = withLiveRoles ? longmei : { id: 'local.pet', version: '1.0.0' };
+  const workspace = new PetWorkspace({ root, catalog: [{ ...pkg, name: withLiveRoles ? '龙妹' : '合成桌宠' }] });
   const characters = new CharacterRepository(join(root, 'characters'));
+  const liveRoleBindings = withLiveRoles ? new LiveRoleBindingStore(join(root, 'live')) : undefined;
+  const liveShares = withLiveRoles ? new LiveShareStore(join(root, 'live')) : undefined;
   const snapshot = () => ({ kind: 'diagnostic' as const, status: 'idle' as const, detail: '' });
   const historyFile = join(root, 'chats.sqlite');
   if (withHistory) await writeFile(historyFile, '', { mode: 0o600 });
   const chatHistory = withHistory ? new ChatHistory(root) : undefined;
   const agentState = withAgentState ? new AgentStateStore(root) : undefined;
-  const app = createService({ token, models, workspace, characters, ...(speech && {speech,liveProfile:new LiveProfileStore(join(root,'live'))}), chatHistory, agentState, chatRuntime: chatRuntime ?? undefined, runtime: { snapshot, probe: async () => snapshot(), close: async () => {} } });
+  const app = createService({ token, models, workspace, characters, ...(speech && {speech,liveProfile:new LiveProfileStore(join(root,'live'))}), ...(liveRoleBindings && {liveRoleBindings}), ...(liveShares && {liveShares}), chatHistory, agentState, chatRuntime: chatRuntime ?? undefined, runtime: { snapshot, probe: async () => snapshot(), close: async () => {} } });
   t.after(async () => { await app.close(); await rm(root, { recursive: true, force: true }); });
   const created = await workspace.mutate('add', { expectedRevision: 0, package: pkg });
   assert.ok(created.ok);
   const petID = created.workspace.instances[0]!.id;
+  if (liveRoleBindings) await liveRoleBindings.write(0, { longmei: petID, dafeiyu: null });
   const write = async (id: string, expectedRevision = 0, hasKey = true) => {
     assert.ok((await models.run('save', { connection: writeDraft(id), expectedRevision, credential: hasKey ? { kind: 'replace', key: `${key}-${id}` } : { kind: 'keep' } })).ok);
   };
@@ -934,12 +940,12 @@ test('rehearsal uses the real Pi text dispatch with only a public persona and on
     assert.equal(body.tools,undefined); assert.equal(body.referenceData,undefined);
     outbound.push(body.messages);
     return completion(answers[inputs.indexOf(body.messages[1].content)]);
-  },undefined,null,true,true,speech);
+  },undefined,null,true,true,speech,true);
   const reference = join(f.root,'reference.wav'); await writeFile(reference,wav);
   assert.ok((await speech.select(reference)).ok);
   assert.ok((await speech.saveTranscriptDraft('合成测试音色，不出站')).ok);
   const post = (name:string,payload:object,requestHeaders:Record<string,string> = headers) => f.app.inject({method:'POST',url:`/v1/live/danmaku/${name}`,headers:requestHeaders,payload});
-  const payload = (text:string) => ({text,scene:'rain-loft'});
+  const payload = (text:string) => ({text,scene:'rain-loft',role:'longmei'});
   assert.equal((await post('reply',payload(inputs[0]!),{host:'127.0.0.1'})).statusCode,401);
   assert.equal((await post('reply',payload(inputs[0]!))).statusCode,412);
   await f.write('one'); await f.write('two');

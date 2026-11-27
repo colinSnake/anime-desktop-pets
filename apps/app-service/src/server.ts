@@ -1,5 +1,9 @@
 import { registerLiveDanmaku } from './live/danmaku.ts';
 import { registerLiveProfile, registerLiveVoice } from './live/routes.ts';
+import { registerLiveRoleBindings } from './live/role-binding-routes.ts';
+import type { LiveRoleBindingStore } from './live/role-bindings.ts';
+import { registerLiveSharing } from './live/sharing-routes.ts';
+import type { LiveShareStore } from './live/sharing.ts';
 import type { LiveProfileStore } from './live/profile.ts';
 import type { AgentStateStore } from './agent/agent-state.ts';
 import { registerAgentTasks } from './agent/task-routes.ts';
@@ -36,6 +40,8 @@ export function createService({
   agentTasks,
   agentState,
   liveProfile,
+  liveRoleBindings,
+  liveShares,
 }: {
   token: string;
   runtime: RuntimeController;
@@ -48,6 +54,8 @@ export function createService({
   agentTasks?: AgentTaskStore;
   agentState?: AgentStateStore;
   liveProfile?: LiveProfileStore;
+  liveRoleBindings?: LiveRoleBindingStore;
+  liveShares?: LiveShareStore;
 }) {
   if (!/^[a-f0-9]{64}$/.test(token))
     throw new Error("Invalid session credential");
@@ -116,9 +124,11 @@ export function createService({
     },
   );
   registerPetRoutes(app, workspace);
-  registerLiveProfile(app, liveProfile, () => workspace?.canStartOwnedPlayer() === true);
+  registerLiveProfile(app, liveProfile, () => workspace?.canStartOwnedPlayer() === true, workspace, liveRoleBindings);
+  registerLiveRoleBindings(app, liveRoleBindings, workspace);
+  registerLiveSharing(app, liveShares, workspace, characters, liveRoleBindings);
   registerLiveVoice(app, speech, () => !!liveProfile && workspace?.canStartOwnedPlayer() === true);
-  const danmaku = registerLiveDanmaku(app, models, speech, () => !!liveProfile && workspace?.canStartOwnedPlayer() === true);
+  const danmaku = registerLiveDanmaku(app, models, speech, () => !!liveProfile && workspace?.canStartOwnedPlayer() === true, workspace, characters, liveRoleBindings, liveShares);
   registerModelManagement(app, models);
   const chat = registerOnlineChat(app, models, workspace, characters, chatRuntime, chatHistory, agentState);
   const tasks = agentTasks && workspace && models ? registerAgentTasks(app, agentTasks, workspace, models) : undefined;
@@ -127,7 +137,7 @@ export function createService({
   app.addHook("preClose", async () => {
     const chatCleanup = await Promise.allSettled([chat?.close(), tasks?.close(), danmaku.close()]);
     // Speech settings use the workspace writer lease. Drain accepted profile writes before releasing it.
-    const leaseCleanup = await Promise.allSettled([() => agentState?.close(), () => speech?.close(), () => liveProfile?.close()].map(close => Promise.resolve().then(close)));
+    const leaseCleanup = await Promise.allSettled([() => agentState?.close(), () => speech?.close(), () => liveProfile?.close(), () => liveRoleBindings?.close(), () => liveShares?.close()].map(close => Promise.resolve().then(close)));
     // Schedule each closer independently: a synchronous throw or rejection must not
     // interrupt another owner draining writes / releasing its lease before process.exit.
     const results = await Promise.allSettled([

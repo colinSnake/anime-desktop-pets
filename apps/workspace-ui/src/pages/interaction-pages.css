@@ -317,3 +317,8 @@ textarea.interaction-field { display: block; min-height: 67px; resize: vertical;
 @container (width < 470px) { .live-scene-caption small span, .live-scene-caption small.live-scene-default { display: none; } }
 @container (width < 390px) { [data-interaction="live"] .interaction-heading { flex-wrap: wrap; } }
 @container (width < 315px) { .live-placement { grid-template-columns: minmax(0, 1fr); } }
+.live-bindings { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 280px); gap: 8px 14px; align-items: center; }
+.live-bindings label { color: var(--text); font-size: 13px; font-weight: 650; }
+.live-bindings select { min-width: 0; min-height: 36px; border: 1px solid var(--line); border-radius: 9px; padding: 6px 10px; color: var(--text); background: var(--surface); font: inherit; }
+.live-bindings p { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 12px; }
+@media (max-width: 640px) { .live-bindings { grid-template-columns: 1fr; } }

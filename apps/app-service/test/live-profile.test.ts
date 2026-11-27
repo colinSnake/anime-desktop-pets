@@ -15,7 +15,7 @@ test('stage profile uses the fixed filename for v2 and does not auto-migrate v1'
     const store = new LiveProfileStore(dir);
     const defaults = await store.read();
     assert.deepEqual(defaults, defaultLiveProfile());
-    assert.equal(defaults.schemaVersion, 2);
+    assert.equal(defaults.schemaVersion, 3);
     assert.equal(Object.keys(defaults.scenes).length, 6);
 
     const oldContents = JSON.stringify({schemaVersion:1,selected:'rain-loft',scenes:{
@@ -29,7 +29,8 @@ test('stage profile uses the fixed filename for v2 and does not auto-migrate v1'
     const p = defaultLiveProfile(); p.selected = 'studio'; p.scenes.studio.scale = 106; p.scenes.forest.position = 38;
     await store.write(p);
     assert.deepEqual(await new LiveProfileStore(dir).read(), p);
-    assert.deepEqual(JSON.parse(await readFile(file,'utf8')), p);
+    const stored = JSON.parse(await readFile(file,'utf8'));
+    assert.equal(stored.schemaVersion, 3); assert.equal(stored.roles.longmei.scenes.studio.scale, 106);
     await assert.rejects(readFile(retired));
     assert.equal((await stat(file)).mode & 0o777, 0o600);
 
@@ -44,23 +45,26 @@ test('stage profile uses the fixed filename for v2 and does not auto-migrate v1'
 test('stage configuration is private, fixed-shape, and read-only while linkage is paused', {skip: process.platform === 'win32'}, async t => {
   const { createService } = await import('../src/server.ts');
   const { PetWorkspace } = await import('../src/pet-workspace.ts');
+  const { LiveRoleBindingStore } = await import('../src/live/role-bindings.ts');
+  const { longmei } = await import('../../../packages/contracts/src/built-in-pets.ts');
   const root = await mkdtemp(join(await realpath(tmpdir()), 'stage-profile-route-'));
   const token = 'd'.repeat(64);
   const snapshot = () => ({kind:'diagnostic',status:'idle',detail:''} as const);
-  const workspace = new PetWorkspace({root:join(root,'workspace'), catalog:[]});
-  const app = createService({token,workspace,liveProfile:new LiveProfileStore(join(root,'live')),
+  const workspace = new PetWorkspace({root:join(root,'workspace'), catalog:[{...longmei,name:'龙妹'}]});
+  const bindings=new LiveRoleBindingStore(join(root,'live'));const added=await workspace.mutate('add',{expectedRevision:0,package:longmei});assert.ok(added.ok);const petID=added.workspace.instances[0]!.id;await bindings.write(0,{longmei:petID,dafeiyu:null});
+  const app = createService({token,workspace,liveRoleBindings:bindings,liveProfile:new LiveProfileStore(join(root,'live')),
     runtime:{snapshot,probe:async () => snapshot(),close:async () => {}}});
   t.after(async () => { try { await app.close(); } finally { await rm(root,{recursive:true,force:true}); } });
-  const url = '/v1/live/stage-profile';
+  const url = '/v1/live/stage-profile?role=longmei';
   const headers = {host:'127.0.0.1',authorization:`Bearer ${token}`};
   assert.equal((await app.inject({url,headers:{host:'127.0.0.1'}})).statusCode,401);
   assert.equal((await app.inject({url,headers:{...headers,origin:'https://example.invalid'}})).statusCode,403);
-  assert.equal((await app.inject({url:`${url}?path=a`,headers})).statusCode,400);
+  assert.equal((await app.inject({url:'/v1/live/stage-profile?path=a&role=longmei',headers})).statusCode,400);
   const p = defaultLiveProfile(); p.selected = 'rain-loft'; p.scenes['rain-loft'].position = 64;
   const write = (payload: object) => app.inject({method:'POST', url, headers, payload});
   assert.equal((await write({...p,path:'a'})).statusCode,400);
   assert.deepEqual((await write(p)).json(),{ok:true,profile:p});
-  assert.ok((await workspace.mutate('pause',{expectedRevision:0})).ok);
+  assert.ok((await workspace.mutate('pause',{expectedRevision:1})).ok);
   assert.deepEqual((await write(defaultLiveProfile())).json(),{ok:false,error:'busy'});
   assert.deepEqual((await app.inject({url,headers})).json(),{ok:true,profile:p});
 });
@@ -89,7 +93,7 @@ test('stage voice route accepts only a fixed authenticated request and returns o
   const headers = {host:'127.0.0.1',authorization:`Bearer ${token}`};
   assert.equal((await app.inject({method:'POST',url,headers:{host:'127.0.0.1'},payload:{}})).statusCode,401);
   assert.equal((await app.inject({method:'POST',url,headers:{...headers,origin:'http://localhost'},payload:{}})).statusCode,403);
-  assert.equal((await app.inject({method:'POST',url:`${url}?path=a`,headers,payload:{}})).statusCode,400);
+  assert.equal((await app.inject({method:'POST',url:'/v1/live/stage-profile?path=a&role=longmei',headers,payload:{}})).statusCode,400);
   const post = (payload: object = {}) => app.inject({method:'POST',url,headers,payload});
   assert.equal((await post({text:'不接受任意台词'})).statusCode,400);
   assert.equal((await post()).statusCode,422); assert.equal(calls,0);
@@ -101,4 +105,33 @@ test('stage voice route accepts only a fixed authenticated request and returns o
   assert.equal(speech.status().state,'disabled');
   assert.ok((await workspace.mutate('pause',{expectedRevision:0})).ok);
   assert.equal((await post()).statusCode,409); assert.equal(calls,1);
+});
+
+test('schema v2 profile migrates atomically to v3 while preserving dragon layout', {skip: process.platform === 'win32'}, async t => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'stage-migrate-'));
+  t.after(() => rm(root,{recursive:true,force:true}));
+  const file = join(root,'stage-profile.json');
+  const legacy = {schemaVersion:2,selected:'rain-loft',scenes:{'desk-room':{position:50,scale:100},'rain-loft':{position:69,scale:109},'cloud-terrace':{position:50,scale:100},meadow:{position:48,scale:100},forest:{position:47,scale:100},studio:{position:47,scale:100}}};
+  await writeFile(file,JSON.stringify(legacy),{mode:0o600});
+  const result = await new LiveProfileStore(root).read('longmei');
+  assert.equal(result.selected,'rain-loft'); assert.deepEqual(result.scenes['rain-loft'],{position:69,scale:109});
+  const persisted = JSON.parse(await readFile(file,'utf8'));
+  assert.equal(persisted.schemaVersion,3); assert.deepEqual(persisted.roles.longmei.scenes,legacy.scenes);
+  assert.deepEqual(persisted.roles.dafeiyu.scenes,defaultLiveProfile().scenes);
+});
+
+test('explicit role layouts retain existing Dragon placements and isolate Whale placements', {skip: process.platform === 'win32'}, async t => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'role-layout-'));
+  t.after(() => rm(root,{recursive:true,force:true}));
+  const store = new LiveProfileStore(root);
+  const dragon = defaultLiveProfile(); dragon.scenes.studio.scale = 111;
+  await store.write(dragon);
+  const whale = await store.read('dafeiyu');
+  assert.deepEqual(whale, defaultLiveProfile());
+  whale.scenes.studio.scale = 87; whale.selected = 'studio';
+  await store.write(whale, 'dafeiyu');
+  const reopened = new LiveProfileStore(root);
+  assert.deepEqual(await reopened.read('longmei'), {...dragon,selected:'studio'});
+  assert.deepEqual(await reopened.read('dafeiyu'), whale);
+  assert.equal(JSON.parse(await readFile(join(root,'stage-profile.json'),'utf8')).schemaVersion, 3);
 });

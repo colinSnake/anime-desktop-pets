@@ -15,7 +15,7 @@ const sceneIds = ['desk-room', 'rain-loft', 'cloud-terrace', 'meadow', 'forest',
 test('only six latest scenes, complete scene-specific placement, and fixed calls', () => {
   const p = defaultLiveProfile();
   assert.equal(p.selected, 'desk-room');
-  assert.equal(p.schemaVersion, 2);
+  assert.equal(p.schemaVersion, 3);
   assert.deepEqual(liveScenes.map(scene => scene.id), sceneIds);
   assert.deepEqual(p.scenes, {
     'desk-room': {position:50,scale:100}, 'rain-loft': {position:50,scale:100}, 'cloud-terrace': {position:50,scale:100},
@@ -30,8 +30,10 @@ test('only six latest scenes, complete scene-specific placement, and fixed calls
   for (const input of [{...p, path: '/tmp/data'}, {...p, schemaVersion: 1}, {...p, selected: 'morning'}, {...p, scenes: {...p.scenes, 'desk-room': {position: 76, scale: 100}}}]) assert.equal(isLiveProfile(input), false);
   assert.equal(validLiveArgs('start', ['url']), false);
   assert.equal(validLiveArgs('trigger', ['../idle']), false);
-  assert.equal(validLiveArgs('trigger', ['01']), true);
-  for (const id of sceneIds) assert.equal(validLiveArgs('switchScene', [id]), true);
+  assert.equal(validLiveArgs('trigger', ['01','longmei']), true);
+  assert.equal(validLiveArgs('trigger', ['companion-wave','dafeiyu']), true);
+  assert.equal(validLiveArgs('trigger', ['companion-wave','longmei']), false);
+  for (const id of sceneIds) assert.equal(validLiveArgs('switchScene', [id,'longmei']), true);
   for (const args of [[], ['../rain-loft'], ['rain-loft', 'desk-room'], [defaultLiveProfile()]]) {
     assert.equal(validLiveArgs('switchScene', args), false);
   }
@@ -181,7 +183,7 @@ test('running stage confirms a persisted scene on the same program URL without r
       }
       return {ok:true,profile};
     }, allowed: async () => true,
-    open: async clock => { opens++; const out = await openStageOutput(clock, new Map()); url = out.url; return out; },
+    open: async (_role,clock) => { opens++; const out = await openStageOutput(clock, new Map()); url = out.url; return out; },
     preview: async () => {}, closePreview: () => {}, copy: value => { copied = value; },
   });
   const eligible = () => true;
@@ -222,7 +224,7 @@ test('new scenes can start directly and switch together with desk scenes on one 
       if (next) profile = structuredClone(next);
       return {ok:true,profile};
     }, allowed: async () => true,
-    open: async clock => { opens++; const out = await openStageOutput(clock, new Map()); url = out.url; return out; },
+    open: async (_role,clock) => { opens++; const out = await openStageOutput(clock, new Map()); url = out.url; return out; },
     preview: async () => {}, closePreview: () => {}, copy: value => assert.equal(value,url),
   });
   const trusted = () => true;
@@ -308,7 +310,7 @@ test('successful start prepares voice once in the background; stopping aborts it
   let failOpen = true;
   const stage = new LiveStageController({
     profile:async () => ({ok:true,profile:defaultLiveProfile()}), allowed:async () => true,
-    open:async clock => {
+    open:async (_role,clock) => {
       if (failOpen) throw Error('synthetic media failure');
       clocks.push(clock);
       return {url:'local',close:async()=>{}};
@@ -359,10 +361,10 @@ test('rehearsal publishes only generated text and its own audio; scene switch pr
   const jobs: {signal:AbortSignal; finish(audio?: Buffer):void}[] = [];
   const stage = new LiveStageController({
     profile:async next => ({ok:true,profile:profile = next ?? profile}), allowed:async () => true,
-    open:async clock => { const out = await openStageOutput(clock,new Map()); url = out.url; return out; },
+    open:async (_role,clock) => { const out = await openStageOutput(clock,new Map()); url = out.url; return out; },
     preview:async()=>{}, closePreview:()=>{}, copy:()=>{},
     voice:async () => ({ok:true,clips:{'01':wav,'18':wav,'20':wav}}),
-    danmaku:async (text, scene, signal, synthesizing) => {
+    danmaku:async (_role,text,scene,signal,synthesizing) => {
       synthesizing();
       const audio = await new Promise<Buffer|undefined>(resolve => jobs.push({signal,finish:resolve}));
       return audio ? {ok:true,text:`${scene}：${text === '好累' ? '先歇一会吧。' : '这里是雨夜阁楼。'}`,audio} : {ok:false,error:'speech-failed'};
@@ -372,8 +374,8 @@ test('rehearsal publishes only generated text and its own audio; scene switch pr
   const state = () => fetch(new URL('state.json',url)).then(r => r.json());
   const wavURL = (generation: number) => new URL(`voice-${generation}.wav`,url);
   try {
-    assert.equal(validLiveArgs('submitDanmaku', ['好累']),true);
-    for (const input of ['', '   ', '话\n话', 'x'.repeat(121), {text:'好累',url:'http://invalid'}]) assert.equal(validLiveArgs('submitDanmaku',[input]),false);
+    assert.equal(validLiveArgs('submitDanmaku', ['好累','longmei']),true);
+    for (const input of ['', '   ', '话\n话', 'x'.repeat(121), {text:'好累',url:'http://invalid'}]) assert.equal(validLiveArgs('submitDanmaku',[input,'longmei']),false);
     assert.deepEqual(await run('submitDanmaku','好累'),{ok:false,error:'unavailable'});
     await run('start');
     const ready = await run('read'); assert.ok(ready.ok && ready.voice === 'ready');

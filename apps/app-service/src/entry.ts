@@ -1,4 +1,6 @@
 import { LiveProfileStore } from './live/profile.ts';
+import { LiveRoleBindingStore } from './live/role-bindings.ts';
+import { LiveShareStore } from './live/sharing.ts';
 import { AgentTaskStore } from './agent/task-store.ts';
 import { WorkspaceVideoClient } from './workspace-video-client.ts';
 import { CodexTaskFollowing } from './codex-task-following.ts';
@@ -177,6 +179,8 @@ function message(value: unknown) {
       chatHistory: typeof businessRoot === 'string' ? new ChatHistory(businessRoot) : undefined,
       agentState,
       liveProfile: workspace && typeof businessRoot === 'string' ? new LiveProfileStore(join(businessRoot, 'live')) : undefined,
+      liveRoleBindings: workspace && typeof businessRoot === 'string' ? new LiveRoleBindingStore(join(businessRoot, 'live')) : undefined,
+      liveShares: workspace && typeof businessRoot === 'string' ? new LiveShareStore(join(businessRoot, 'live')) : undefined,
       chatRuntime: models && createPiTextRuntime(),
       speech,
       characters: process.platform === "darwin" && workspaceOptions ? new CharacterRepository(join(workspaceOptions.root, "characters")) : undefined,

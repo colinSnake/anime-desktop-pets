@@ -59,7 +59,7 @@ export function WorkspaceModules({ page, workspace, diagnostics, speech, liveSta
       goals={goalsWorkspace?.forPet(selectedInstance.id)} renderDetail={dataPage} /> : null;
     case 'identity': case 'memory': case 'goals': return dataPage(page);
     case 'speech': return <SpeechPage draft={speechDraft} session={speechSession} bridge={speech} appearance={appearance} />;
-    case 'live': return <LivePage appearance={appearance} bridge={liveStage} paused={!!workspace && workspace.linkage !== 'active'} />;
+    case 'live': return <LivePage appearance={appearance} bridge={liveStage} paused={!!workspace && workspace.linkage !== 'active'} instances={workspace?.instances ?? []} />;
     case 'advanced': return <AdvancedPage appearance={appearance} openWorkspaceData={openWorkspaceData} migrateWorkspaceData={migrateWorkspaceData} diagnostics={diagnostics} />;
     case null: return null;
   }

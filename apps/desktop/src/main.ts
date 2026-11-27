@@ -1,4 +1,4 @@
-import { liveChannel, liveMethods, validLiveArgs } from '../../../packages/contracts/src/live-stage.ts';
+import { isLiveBindingInput, liveChannel, liveMethods, validLiveArgs } from '../../../packages/contracts/src/live-stage.ts';
 import { LiveStageController } from './live-stage/controller.ts';
 import { loadStageAssets, stageArtworkName } from './live-stage/assets.ts';
 import { openStageOutput } from './live-stage/output.ts';
@@ -573,14 +573,15 @@ async function start() {
   if (process.platform === 'darwin') {
     const preview = new LiveStagePreview();
     liveStage = new LiveStageController({
-      profile: input => service!.liveProfile(input),
-      ...(speech && data.kind === 'adpets' && {voice: signal => service!.liveVoice(signal), danmaku: (text,scene,signal,synthesizing) => service!.liveDanmaku(text,scene,signal,synthesizing)}),
+      profile: (input,role) => service!.liveProfile(input,role),
+      ...(speech && data.kind === 'adpets' && {voice: signal => service!.liveVoice(signal), danmaku: (role,text,scene,signal,synthesizing) => service!.liveDanmaku(role,text,scene,signal,synthesizing)}),
       allowed: async () => {
         if (exiting || livePausing) return false;
         const result = await service!.petRequest('list');
         return !exiting && !livePausing && result.ok && result.workspace.linkage === 'active';
       },
-      open: async (clock, current) => {
+      open: async (role,clock,current) => {
+        if(role!=='longmei')throw new Error('stage_role_media_unavailable');
         if (!workspaceVideoDirectory || !video?.longmeiReady) throw new Error('stage_media_unavailable');
         const assets = await loadStageAssets(join(__dirname,'live-stage'), workspaceVideoDirectory);
         if (!current()) throw new Error('stage_cancelled');
@@ -594,8 +595,11 @@ async function start() {
         mainFrame:workspace.webContents.mainFrame, url:event.senderFrame?.url ?? '', args,
       });
       if (!eligible() || !validLiveArgs(method,args)) throw new Error('forbidden');
-      return liveStage!.run(method,args[0],eligible);
+      return liveStage!.run(method,args[0],eligible,args.at(-1));
     });
+    const liveBindingCaller=(event:Electron.IpcMainInvokeEvent,args:unknown[])=>!exiting&&!!workspace&&!workspace.isDestroyed()&&isWorkspaceVisible()&&trustedFrame({senderId:event.sender.id,ownerId:workspace.webContents.id,senderFrame:event.senderFrame,mainFrame:workspace.webContents.mainFrame,url:event.senderFrame?.url??'',args});
+    ipcMain.handle('pet:live-role-bindings-read',(event,...args:unknown[])=>{if(args.length||!liveBindingCaller(event,args))throw new Error('forbidden');return service!.liveRoleBindings();});
+    ipcMain.handle('pet:live-role-bindings-write',(event,...args:unknown[])=>{if(args.length!==1||!liveBindingCaller(event,args)||!isLiveBindingInput(args[0]))throw new Error('forbidden');return service!.liveRoleBindings(args[0]);});
   }
   const workspaceData = new WorkspaceDataFolder(appData, path => shell.openPath(path), data.kind === 'adpets' ? data.root : undefined);
   const dataCaller = (event: Electron.IpcMainInvokeEvent, args: unknown[]) => isWorkspaceVisible() && !!workspace && trustedCaller({

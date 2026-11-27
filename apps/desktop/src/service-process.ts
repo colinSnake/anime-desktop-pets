@@ -1,5 +1,5 @@
 import { liveVoiceClipLimit, liveVoiceWireLimit, parseLiveVoice, stageVoiceDuration, type LiveVoiceResult } from '../../../packages/contracts/src/live-voice.ts';
-import { isLiveDanmakuReply, isLiveProfile, type LiveDanmakuError, type LiveScene, type LiveProfile, type LiveProfileResult } from '../../../packages/contracts/src/live-stage.ts';
+import { isLiveDanmakuReply, isLiveProfile, type LiveDanmakuError, type LiveScene, type LiveRoleId, type LiveProfile, type LiveProfileResult, isLiveBindingInput, isLiveBindingResult, type LiveBindingInput, type LiveBindingResult } from '../../../packages/contracts/src/live-stage.ts';
 import type { AgentTaskInputs, AgentTaskMethod, AgentTaskResults } from '../../../packages/contracts/src/agent-tasks.ts';
 import { requestAgentTask } from './agent-task-transport.ts';
 import { taskUnavailable } from './agent-task-ipc.ts';
@@ -263,24 +263,29 @@ export class ServiceProcess {
     const result = await requestOnlineChat({ port, token: this.token }, input, signal);
     return this.closed || this.port !== port ? chatUnavailable : result;
   }
-  async liveProfile(profile?: LiveProfile): Promise<LiveProfileResult> {
+  async liveProfile(profile: LiveProfile | undefined, role:LiveRoleId): Promise<LiveProfileResult> {
     const unavailable = { ok: false, error: 'unavailable' } as const;
     const port = this.port;
     if (this.closed || !port) return unavailable;
     if (!this.options.businessRoot) return {ok:false,error:'migration'};
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/v1/live/stage-profile`, {
+      const response = await fetch(`http://127.0.0.1:${port}/v1/live/stage-profile?role=${role}`, {
         method: profile ? 'POST' : 'GET', redirect: 'error', signal: AbortSignal.timeout(6500),
         headers: { authorization: `Bearer ${this.token}`, ...(profile && {'content-type':'application/json'}) },
         body: profile ? JSON.stringify(profile) : undefined,
       });
-      if (!response.ok || this.closed || this.port !== port) return unavailable;
+      if (this.closed || this.port !== port) return unavailable;
       const data = await response.json();
       if (this.closed || this.port !== port) return unavailable;
-      if (data?.ok === true && isLiveProfile(data.profile)) return {ok:true,profile:data.profile};
-      if (data?.ok === false && (data.error === 'storage' || data.error === 'busy')) return {ok:false,error:data.error};
+      if (response.ok && data?.ok === true && isLiveProfile(data.profile)) return {ok:true,profile:data.profile};
+      if (data?.ok === false && ['storage','busy','unbound','role-mismatch'].includes(data.error)) return {ok:false,error:data.error};
       return unavailable;
     } catch { return unavailable; }
+  }
+  async liveRoleBindings(input?:LiveBindingInput):Promise<LiveBindingResult>{
+    const unavailable={ok:false,error:'unavailable'} as const;const port=this.port;
+    if(this.closed||!port||!this.options.businessRoot|| (input&&!isLiveBindingInput(input)))return unavailable;
+    try{const response=await fetch(`http://127.0.0.1:${port}/v1/live/role-bindings`,{method:input?'POST':'GET',redirect:'error',signal:AbortSignal.timeout(6500),headers:{authorization:`Bearer ${this.token}`,...(input&&{'content-type':'application/json'})},body:input?JSON.stringify(input):undefined});const data=await response.json();if(this.closed||this.port!==port||!isLiveBindingResult(data))return unavailable;return data;}catch{return unavailable;}
   }
   async liveVoice(signal: AbortSignal): Promise<LiveVoiceResult> {
     const port = this.port;
@@ -300,7 +305,7 @@ export class ServiceProcess {
     } catch { return failed; }
   }
 
-  async liveDanmaku(text: string, scene: LiveScene, signal: AbortSignal, synthesizing: () => void): Promise<
+  async liveDanmaku(role:LiveRoleId,text: string, scene: LiveScene, signal: AbortSignal, synthesizing: () => void): Promise<
     {ok:true; text:string; audio:Buffer} | {ok:false; error:LiveDanmakuError}> {
     const port = this.port;
     const current = () => !this.closed && this.port === port && !signal.aborted;
@@ -311,7 +316,7 @@ export class ServiceProcess {
       headers:{authorization:`Bearer ${this.token}`,'content-type':'application/json'},
     });
     try {
-      const response = await post('reply',{text,scene},42_000);
+      const response = await post('reply',{role,text,scene},42_000);
       if (response.status === 412 || response.status === 429) {
         await response.body?.cancel();
         return {ok:false,error:response.status === 412 ? 'no-model' : 'rate-limit'};

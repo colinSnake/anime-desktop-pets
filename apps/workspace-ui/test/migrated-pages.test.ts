@@ -129,7 +129,7 @@ test('live puts output first, offers the two roles, and keeps offline controls d
   assert.deepEqual([...composer.matchAll(/<button[^>]*aria-label="([^"]+)"/g)].map(match => match[1]), ['发送演练弹幕']);
   assert.match(page, /舞台输出[\s\S]*?布景与摆位[\s\S]*?主播互动[\s\S]*?打招呼[\s\S]*?开心一下[\s\S]*?比个心[\s\S]*?弹幕演练/);
   for (const text of ['暮色小屋', '雨夜阁楼', '云海露台', '蓝天草原', '森林篝火', '录音棚', '未连接桌面工作区', '1920 × 1080', '静音']) assert.ok(page.includes(text), text);
-  assert.match(page, /<select[^>]*aria-label="直播桌宠"[^>]*>[\s\S]*?龙妹<\/option>[\s\S]*?鲸鱼妹 · 暂不支持直播<\/option>/);
+  assert.match(page, /<select[^>]*aria-label="直播桌宠"[^>]*>[\s\S]*?龙妹<\/option>[\s\S]*?鲸鱼妹<\/option>/);
   for (const text of ['保存布景', '开启直播台', '预览舞台', '复制 OBS 地址', '打招呼', '开心一下', '比个心']) {
     assert.match(buttonWithText(page, text), /disabled=""/, text);
   }

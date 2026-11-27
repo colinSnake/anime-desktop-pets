@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
-import { defaultLiveProfile, liveActions, liveScenes, type LiveAction, type LiveDanmakuState, type LiveError, type LiveProfile, type LiveResult, type LiveScene, type LiveStageBridge, type LiveVoiceState } from '../../../../packages/contracts/src/live-stage.ts';
+import { defaultLiveProfile, liveRoleActions, liveScenes, type LiveRoleActionId, type LiveDanmakuState, type LiveError, type LiveProfile, type LiveResult, type LiveRoleId, type LiveScene, type LiveStageBridge, type LiveVoiceState } from '../../../../packages/contracts/src/live-stage.ts';
 import { dafeiyu, longmei } from '../../../../packages/contracts/src/built-in-pets.ts';
 import { ImagePreview } from '../ImagePreview.tsx';
 import { PetNookIcon } from '../PetNookIcon.tsx';
@@ -9,28 +9,32 @@ import { danmakuWorking, LiveDanmaku } from './LiveDanmaku.tsx';
 
 const roles = [
   { id: 'longmei', name: '龙妹', reference: longmei },
-  { id: 'dafeiyu', name: '鲸鱼妹', reference: dafeiyu, detail: '暂不支持直播' },
+  { id: 'dafeiyu', name: '鲸鱼妹', reference: dafeiyu },
 ] as const;
-const actionIcons = { '01': 'chat', '18': 'spark', '20': 'pulse' } as const;
 
 type StageOperation = 'read' | 'start' | 'stop' | 'save' | 'switchScene' | 'preview' | 'copy' | 'trigger' | 'submitDanmaku';
 
 const problems: Record<LiveError, string> = {
   migration: '此功能需要先在新本机资料目录中初始化工作区。',
+  unbound: '请先将该角色绑定到已登记的对应桌宠实例。',
+  'role-mismatch': '绑定的桌宠角色或版本已变化，请重新绑定后重试。',
   unavailable: '未能确认操作结果。请重新读取舞台状态。',
   storage: '未能确认布景配置。原文件不会被自动重置，请先重新读取。',
   busy: '舞台正在处理其他操作，或桌宠联动已暂停。',
   media: '未能准备节目画面。请重试；若仍失败，请检查本机龙妹素材及桌面工作区启动日志。',
 };
-const actions: readonly LiveAction[] = ['01', '18', '20'];
+const actionIcons:Record<string,'chat'|'spark'|'pulse'> = {'01':'chat','18':'spark','20':'pulse','companion-wave':'chat','companion-jump':'spark','companion-49c0d89c0992':'pulse'};
 const artwork = (id: LiveScene, size: 'cover' | 'preview') => `pet-app://workspace/live-stage/${id}-${size}.webp`;
 const equal = (a: LiveProfile, b: LiveProfile) => a.selected === b.selected && liveScenes.every(({id}) => a.scenes[id].position === b.scenes[id].position && a.scenes[id].scale === b.scenes[id].scale);
 const missing = {ok:false,error:'unavailable'} as const;
 const call = async (op: () => Promise<LiveResult>): Promise<LiveResult> => { try { return await op(); } catch { return missing; } };
 
-export function LivePage({ appearance, bridge, paused }: { appearance?: ReactNode; bridge?: LiveStageBridge; paused?: boolean }) {
+export function LivePage({appearance,bridge,paused,instances=[]}:{appearance?:ReactNode;bridge?:LiveStageBridge;paused?:boolean;instances?:Array<{id:string;displayName?:string;package:{id:string;version:string}}>}) {
   const [preview, setPreview] = useState<{ id: LiveScene; name: string; opener: HTMLButtonElement }>();
   const [role, setRole] = useState<(typeof roles)[number]>(roles[0]);
+  const [bindings,setBindings]=useState<{revision:number;bindings:Record<LiveRoleId,string|null>}>({revision:0,bindings:{longmei:null,dafeiyu:null}});
+  const [bindingBusy,setBindingBusy]=useState(false);
+  const [bindingMessage,setBindingMessage]=useState('');
   const [draft,setDraft] = useState(defaultLiveProfile);
   const [saved,setSaved] = useState<LiveProfile>();
   const [voice,setVoice] = useState<LiveVoiceState>();
@@ -52,7 +56,7 @@ export function LivePage({ appearance, bridge, paused }: { appearance?: ReactNod
     return () => {
       held.current = false;
       requestRevision.current++;
-      if (unsettledDanmaku.current && bridge?.stopDanmaku) void call(() => bridge.stopDanmaku!());
+      if (unsettledDanmaku.current && bridge?.stopDanmaku) void call(() => bridge.stopDanmaku!(role.id));
       unsettledDanmaku.current = false;
     };
   }, [bridge]);
@@ -62,11 +66,19 @@ export function LivePage({ appearance, bridge, paused }: { appearance?: ReactNod
   }
   const trackingDanmaku = danmakuWorking(danmaku);
 
+  useEffect(()=>{if(!bridge?.readBindings)return;let mounted=true;void bridge.readBindings().then(result=>{if(!mounted)return;if(result.ok){setBindings({revision:result.revision,bindings:result.bindings});setBindingMessage('');}else setBindingMessage('未能读取角色绑定；请重试。');}).catch(()=>{if(mounted)setBindingMessage('未能读取角色绑定；请重试。');});return()=>{mounted=false;};},[bridge]);
+  async function bindRole(roleID:LiveRoleId,petID:string|null){
+    if(!bridge?.writeBinding||bindingBusy)return;setBindingBusy(true);setBindingMessage('');
+    try{const result=await bridge.writeBinding({expectedRevision:bindings.revision,role:roleID,petID});if(!result.ok){setBindingMessage(result.error==='conflict'?'绑定已在其他操作中更新，请重新读取。':'无法确认绑定保存，请重新读取。');return;}
+      setBindings({revision:result.revision,bindings:result.bindings});setBindingMessage(petID?'角色绑定已保存。':'角色已解绑。');
+      if(role.id===roleID)void run('read',()=>bridge.read(roleID));
+    }catch{setBindingMessage('无法确认绑定保存，请重新读取。');}finally{setBindingBusy(false);}
+  }
   useEffect(() => {
     if (!bridge) return;
     let mounted = true;
     gate.current = true; setBusy('read');
-    void call(() => bridge.read()).then(result => {
+    void call(() => bridge.read(role.id)).then(result => {
       if (!mounted) return;
       gate.current = false; setBusy(undefined);
       if (result.ok) { setSaved(result.profile); setDraft(result.profile); setRunning(result.running); setVoice(result.voice); acceptDanmaku(result.danmaku); }
@@ -121,7 +133,7 @@ export function LivePage({ appearance, bridge, paused }: { appearance?: ReactNod
       if (document.hidden || gate.current || checking) return;
       const revision = requestRevision.current;
       checking = true;
-      const result = await call(() => bridge.read());
+      const result = await call(() => bridge.read(role.id));
       checking = false;
       if (!mounted || gate.current || revision !== requestRevision.current) return;
       if (!result.ok) {
@@ -134,12 +146,14 @@ export function LivePage({ appearance, bridge, paused }: { appearance?: ReactNod
     const timer = window.setInterval(() => void refresh(), trackingDanmaku ? 650 : 2000);
     window.addEventListener('focus', refresh);
     return () => { mounted = false; window.clearInterval(timer); window.removeEventListener('focus', refresh); };
-  }, [bridge,running,trackingDanmaku]);
+  }, [bridge,role.id,running,trackingDanmaku]);
 
+  const roleActions=liveRoleActions[role.id] as Record<string,{label:string;line:string}>;
+  const orderedActions=role.id==='longmei'?['01','18','20']:['companion-wave','companion-jump','companion-49c0d89c0992'];
   const placement = draft.scenes[draft.selected];
   const scene = liveScenes.find(scene => scene.id === draft.selected)!;
   const dirty = !!saved && !equal(draft, saved);
-  const supported = role.id === 'longmei';
+  const supported = true;
   const editable = supported && !!bridge && !!saved && !running && !busy && !paused && !needsRead;
   // Keep the same controls and keyboard focus while a scene write holds the operation gate.
   const switching = busy === 'switchScene';
@@ -166,29 +180,34 @@ export function LivePage({ appearance, bridge, paused }: { appearance?: ReactNod
   }));
   function selectScene(scene: typeof liveScenes[number]) {
     if (!canChooseScene || gate.current) return;
-    if (running && bridge) void run('switchScene', () => bridge.switchScene(scene.id), `已切换为${scene.name}，OBS 地址不变。`);
+    if (running && bridge) void run('switchScene', () => bridge.switchScene(scene.id,role.id), `已切换为${scene.name}，OBS 地址不变。`);
     else setDraft(value => ({ ...value, selected: scene.id }));
   }
   function mainAction() {
     if (!bridge || !supported) return;
-    if (needsRead) void run('read', () => bridge.read());
-    else if (running) void run('stop', () => bridge.stop(), '已关闭本机舞台。');
-    else if (editable && !dirty) void run('start', () => bridge.start(), '本机画面源已开启。');
+    if (needsRead) void run('read', () => bridge.read(role.id));
+    else if (running) void run('stop', () => bridge.stop(role.id), '已关闭本机舞台。');
+    else if (editable && !dirty) void run('start', () => bridge.start(role.id), '本机画面源已开启。');
   }
   const toolbar = <div className="live-toolbar-actions">
     <PetRolePicker label="直播桌宠" options={roles} selected={role} reference={role.reference} description={running ? 'live-role-lock' : undefined}
       onChange={canChooseRole ? id => {
         const next = roles.find(option => option.id === id);
-        if (next && !gate.current) setRole(next);
+        if (next && !gate.current) {setRole(next);void run('read',()=>bridge!.read(next.id));}
       } : undefined} />
     {appearance}
   </div>;
 
   return <InteractionLayout page="live" title="直播管理" appearance={toolbar}>
-    {!supported ? <section className="interaction-card live-role-unavailable" aria-labelledby="live-role-unavailable-title">
-      <div className="live-output-icon"><PetNookIcon name="lock" /></div>
-      <h2 id="live-role-unavailable-title">{role.name}暂不支持直播</h2>
-    </section> : <div className="live-stage-layout">
+    {!supported ? <section className="interaction-card live-role-unavailable" aria-labelledby="live-role-unavailable-title"><div className="live-output-icon"><PetNookIcon name="lock" /></div><h2 id="live-role-unavailable-title">{role.name}暂不支持直播</h2></section> : <div className="live-stage-layout">
+      <section className="interaction-card live-bindings" aria-label="主播实例绑定">
+        <label htmlFor="live-role-instance">{role.name}绑定的桌宠实例</label>
+        <select id="live-role-instance" value={bindings.bindings[role.id] ?? ''} disabled={!bridge?.writeBinding||bindingBusy||running} onChange={event=>void bindRole(role.id,event.currentTarget.value||null)}>
+          <option value="">未绑定</option>
+          {instances.filter(item=>item.package.id===role.reference.id&&item.package.version===role.reference.version&&(!bindings.bindings[role.id==='longmei'?'dafeiyu':'longmei']||bindings.bindings[role.id==='longmei'?'dafeiyu':'longmei']!==item.id)).map(item=><option key={item.id} value={item.id}>{item.displayName||item.id}</option>)}
+        </select>
+        <p role="status">{bindingMessage||'直播只使用这里明确绑定的已登记实例。'}</p>
+      </section>
       <section className="interaction-card live-output" aria-labelledby="stage-output-title">
         <header className="live-output-heading">
           <span className="live-output-icon"><PetNookIcon name="live" /></span>
@@ -197,19 +216,19 @@ export function LivePage({ appearance, bridge, paused }: { appearance?: ReactNod
         </header>
         <div className="live-output-body">
           <ul className="live-output-meta" aria-label="输出规格">
-            <li>1920 × 1080</li><li>16:9</li><li><span role="status">{voice === 'ready' ? '龙妹声音已就绪' : voice === 'preparing' ? '正在准备龙妹声音…' : '静音'}</span></li><li>本机 OBS 浏览器源</li>
+            <li>1920 × 1080</li><li>16:9</li><li><span role="status">{voice === 'ready' ? `${role.name}声音已就绪` : voice === 'preparing' ? `正在准备${role.name}声音…` : '静音'}</span></li><li>本机 OBS 浏览器源</li>
           </ul>
           <div className="live-buttons">
             <button type="button" className="interaction-button primary" aria-disabled={switching || undefined} disabled={!bridge || actionBusy || (!needsRead && !running && (!editable || dirty))} onClick={mainAction}>
               <PetNookIcon name={needsRead ? 'refresh' : running ? 'close' : 'live'} />{primary}
             </button>
-            <button type="button" className="interaction-button secondary" aria-disabled={switching || undefined} disabled={!active} onClick={() => void run('preview', () => bridge!.preview())}><PetNookIcon name="display" />预览舞台</button>
-            <button type="button" className="interaction-button secondary" aria-disabled={switching || undefined} disabled={!active} onClick={() => void run('copy', () => bridge!.copy(), '已复制本机 OBS 地址。')}><PetNookIcon name="globe" />复制 OBS 地址</button>
+            <button type="button" className="interaction-button secondary" aria-disabled={switching || undefined} disabled={!active} onClick={() => void run('preview', () => bridge!.preview(role.id))}><PetNookIcon name="display" />预览舞台</button>
+            <button type="button" className="interaction-button secondary" aria-disabled={switching || undefined} disabled={!active} onClick={() => void run('copy', () => bridge!.copy(role.id), '已复制本机 OBS 地址。')}><PetNookIcon name="globe" />复制 OBS 地址</button>
           </div>
           <p className="live-hint live-voice-feedback" role="status">{voiceHint}</p>
           {error || (needsRead && sceneNotice) ? <div className="live-feedback">
             {error && <p role="alert"><PetNookIcon name="warning" />{error}</p>}
-            {needsRead && <button type="button" className="interaction-button quiet" disabled={!bridge || !!busy} onClick={() => void run('stop', () => bridge!.stop(), '已关闭本机舞台，请重新读取状态。')}>关闭可能运行的舞台</button>}
+            {needsRead && <button type="button" className="interaction-button quiet" disabled={!bridge || !!busy} onClick={() => void run('stop', () => bridge!.stop(role.id), '已关闭本机舞台，请重新读取状态。')}>关闭可能运行的舞台</button>}
           </div> : notice && <p className="live-message" role="status">{notice}</p>}
           {paused && <p className="live-hint">桌宠联动已暂停；解除暂停后可手动开启。</p>}
         </div>
@@ -241,7 +260,7 @@ export function LivePage({ appearance, bridge, paused }: { appearance?: ReactNod
               <PlacementStepper label="横向位置" min={scene.positionMin} max={scene.positionMax} value={placement.position} onChange={value => update('position', value)} />
               <PlacementStepper label="角色大小" min={75} max={125} value={placement.scale} onChange={value => update('scale', value)} />
             </fieldset>
-            <button type="button" className="interaction-button secondary live-save-scene" disabled={!editable || !dirty} onClick={() => void run('save', () => bridge!.save(draft))}>保存布景</button>
+            <button type="button" className="interaction-button secondary live-save-scene" disabled={!editable || !dirty} onClick={() => void run('save', () => bridge!.save(draft,role.id))}>保存布景</button>
             <p className="live-hint live-scene-status" role="status">{switching ? '正在切换布景…' : running ? sceneNotice || '关闭舞台后可切换桌宠或调整摆位。' : dirty ? '有未保存的修改；先保存布景，再开启直播台。' : ''}</p>
           </div>
         </div>
@@ -249,13 +268,17 @@ export function LivePage({ appearance, bridge, paused }: { appearance?: ReactNod
       </section>
       <section className="interaction-card live-actions-card" aria-labelledby="stage-action-title">
         <div className="live-section-heading"><span className="live-index" aria-hidden="true">02</span><h2 id="stage-action-title">主播互动</h2></div>
-        <div className="live-action-list">{actions.map(id => <button key={id} type="button" className="interaction-button secondary" aria-disabled={switching || undefined} disabled={!active} onClick={() => void run('trigger', () => bridge!.trigger(id))}>
-          <PetNookIcon name={actionIcons[id]} />{liveActions[id].label}
-        </button>)}</div>
+        <div className="live-action-list">{orderedActions.map(id => {
+          const action=roleActions[id];
+          if(!action)return null;
+          return <button key={id} type="button" className="interaction-button secondary" aria-disabled={switching || undefined} disabled={!active} onClick={() => void run('trigger', () => bridge!.trigger(id as LiveRoleActionId,role.id))}>
+            <PetNookIcon name={actionIcons[id] ?? 'chat'} />{action.label}
+          </button>;
+        })}</div>
         <LiveDanmaku state={danmaku} notice={danmakuNotice} locked={!!busy}
           available={active && voice === 'ready' && !!bridge?.submitDanmaku}
           unavailableHint={running && !bridge?.submitDanmaku ? '此工作区不支持弹幕演练。' : ''}
-          onSend={async text => bridge?.submitDanmaku ? run('submitDanmaku', () => bridge.submitDanmaku!(text)) : false} />
+          onSend={async text => bridge?.submitDanmaku ? run('submitDanmaku', () => bridge.submitDanmaku!(text,role.id)) : false} />
       </section>
     </div>}
     {supported && preview && <ImagePreview src={artwork(preview.id, 'preview')} alt={preview.name} downloadName={`${preview.name}.webp`}
